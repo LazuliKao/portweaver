@@ -1,39 +1,77 @@
 const std = @import("std");
 
-// 从 C 头文件导入类型定义
-const c = @cImport({
+// 从 C 头文件导入类型定义 - 导出这些类型以便其他模块使用
+pub const c = @cImport({
     @cInclude("uci.h");
 });
-// 定义函数指针类型 - 使用与 @cImport 生成的完全匹配的类型
-const UciAllocContextFn = *const fn () callconv(.c) [*c]c.uci_context;
-const UciFreeContextFn = *const fn ([*c]c.uci_context) callconv(.c) void;
-const UciLoadFn = *const fn (
-    [*c]c.uci_context,
-    [*:0]const u8,
-    *?*c.uci_package,
-) callconv(.c) c_int;
-const UciUnloadFn = *const fn ([*c]c.uci_context, [*c]c.uci_package) callconv(.c) c_int;
-const UciPerrorFn = *const fn ([*c]c.uci_context, [*c]const u8) callconv(.c) void;
-const UciGetErrorstrFn = *const fn ([*c]c.uci_context, [*c]const u8, [*c]const u8) callconv(.c) void;
 
-// 动态加载的库实例（线程安全使用静态变量）
-var lib_loaded: bool = false;
-var uci_lib: std.DynLib = undefined;
-var uci_alloc_context: UciAllocContextFn = undefined;
-var uci_free_context: UciFreeContextFn = undefined;
-var uci_load: UciLoadFn = undefined;
-var uci_unload: UciUnloadFn = undefined;
-var uci_perror: UciPerrorFn = undefined;
-var uci_get_errorstr: UciGetErrorstrFn = undefined;
+const uci_alloc_context_fn = *const @TypeOf(@field(c, "uci_alloc_context"));
+const uci_free_context_fn = *const @TypeOf(@field(c, "uci_free_context"));
+const uci_perror_fn = *const @TypeOf(@field(c, "uci_perror"));
+const uci_get_errorstr_fn = *const @TypeOf(@field(c, "uci_get_errorstr"));
+const uci_import_fn = *const @TypeOf(@field(c, "uci_import"));
+const uci_export_fn = *const @TypeOf(@field(c, "uci_export"));
+const uci_load_fn = *const @TypeOf(@field(c, "uci_load"));
+const uci_unload_fn = *const @TypeOf(@field(c, "uci_unload"));
+const uci_lookup_ptr_fn = *const @TypeOf(@field(c, "uci_lookup_ptr"));
+const uci_add_section_fn = *const @TypeOf(@field(c, "uci_add_section"));
+const uci_set_fn = *const @TypeOf(@field(c, "uci_set"));
+const uci_add_list_fn = *const @TypeOf(@field(c, "uci_add_list"));
+const uci_del_list_fn = *const @TypeOf(@field(c, "uci_del_list"));
+const uci_reorder_section_fn = *const @TypeOf(@field(c, "uci_reorder_section"));
+const uci_rename_fn = *const @TypeOf(@field(c, "uci_rename"));
+const uci_delete_fn = *const @TypeOf(@field(c, "uci_delete"));
+const uci_save_fn = *const @TypeOf(@field(c, "uci_save"));
+const uci_commit_fn = *const @TypeOf(@field(c, "uci_commit"));
+const uci_list_configs_fn = *const @TypeOf(@field(c, "uci_list_configs"));
+const uci_set_savedir_fn = *const @TypeOf(@field(c, "uci_set_savedir"));
+const uci_set_confdir_fn = *const @TypeOf(@field(c, "uci_set_confdir"));
+const uci_set_conf2dir_fn = *const @TypeOf(@field(c, "uci_set_conf2dir"));
+const uci_add_delta_path_fn = *const @TypeOf(@field(c, "uci_add_delta_path"));
+const uci_revert_fn = *const @TypeOf(@field(c, "uci_revert"));
+const uci_parse_argument_fn = *const @TypeOf(@field(c, "uci_parse_argument"));
+const uci_set_backend_fn = *const @TypeOf(@field(c, "uci_set_backend"));
+const uci_validate_text_fn = *const @TypeOf(@field(c, "uci_validate_text"));
+const uci_parse_ptr_fn = *const @TypeOf(@field(c, "uci_parse_ptr"));
+const uci_lookup_next_fn = *const @TypeOf(@field(c, "uci_lookup_next"));
+const uci_parse_section_fn = *const @TypeOf(@field(c, "uci_parse_section"));
+const uci_hash_options_fn = *const @TypeOf(@field(c, "uci_hash_options"));
 
-// 初始化动态库
-pub fn initLibUci() !void {
-    if (lib_loaded) {
-        std.debug.print("UCI library already loaded\n", .{});
-        return;
-    }
+var lib_handle: ?std.DynLib = null;
+var fn_alloc_context: ?uci_alloc_context_fn = null;
+var fn_free_context: ?uci_free_context_fn = null;
+var fn_perror: ?uci_perror_fn = null;
+var fn_get_errorstr: ?uci_get_errorstr_fn = null;
+var fn_import: ?uci_import_fn = null;
+var fn_export: ?uci_export_fn = null;
+var fn_load: ?uci_load_fn = null;
+var fn_unload: ?uci_unload_fn = null;
+var fn_lookup_ptr: ?uci_lookup_ptr_fn = null;
+var fn_add_section: ?uci_add_section_fn = null;
+var fn_set: ?uci_set_fn = null;
+var fn_add_list: ?uci_add_list_fn = null;
+var fn_del_list: ?uci_del_list_fn = null;
+var fn_reorder_section: ?uci_reorder_section_fn = null;
+var fn_rename: ?uci_rename_fn = null;
+var fn_delete: ?uci_delete_fn = null;
+var fn_save: ?uci_save_fn = null;
+var fn_commit: ?uci_commit_fn = null;
+var fn_list_configs: ?uci_list_configs_fn = null;
+var fn_set_savedir: ?uci_set_savedir_fn = null;
+var fn_set_confdir: ?uci_set_confdir_fn = null;
+var fn_set_conf2dir: ?uci_set_conf2dir_fn = null;
+var fn_add_delta_path: ?uci_add_delta_path_fn = null;
+var fn_revert: ?uci_revert_fn = null;
+var fn_parse_argument: ?uci_parse_argument_fn = null;
+var fn_set_backend: ?uci_set_backend_fn = null;
+var fn_validate_text: ?uci_validate_text_fn = null;
+var fn_parse_ptr: ?uci_parse_ptr_fn = null;
+var fn_lookup_next: ?uci_lookup_next_fn = null;
+var fn_parse_section: ?uci_parse_section_fn = null;
+var fn_hash_options: ?uci_hash_options_fn = null;
+fn ensureLibLoaded() !void {
+    if (lib_handle != null) return;
 
-    // 尝试多个可能的库路径
     const lib_paths = [_][]const u8{
         "/lib/libuci.so.20250120",
         "/lib/libuci.so",
@@ -43,209 +81,191 @@ pub fn initLibUci() !void {
     var last_error: ?std.DynLib.Error = null;
 
     for (lib_paths) |path| {
-        std.debug.print("Attempting to load libuci from: {s}\n", .{path});
-        uci_lib = std.DynLib.open(path) catch |err| {
-            std.debug.print("Failed to open {s}: {}\n", .{ path, err });
+        const lib = std.DynLib.open(path) catch |err| {
             last_error = err;
             continue;
         };
-
-        std.debug.print("Successfully opened {s}, loading symbols...\n", .{path});
-
-        // 加载所有函数
-        uci_alloc_context = uci_lib.lookup(UciAllocContextFn, "uci_alloc_context") orelse {
-            std.debug.print("Failed to lookup uci_alloc_context\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        uci_free_context = uci_lib.lookup(UciFreeContextFn, "uci_free_context") orelse {
-            std.debug.print("Failed to lookup uci_free_context\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        uci_load = uci_lib.lookup(UciLoadFn, "uci_load") orelse {
-            std.debug.print("Failed to lookup uci_load\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        uci_unload = uci_lib.lookup(UciUnloadFn, "uci_unload") orelse {
-            std.debug.print("Failed to lookup uci_unload\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        uci_perror = uci_lib.lookup(UciPerrorFn, "uci_perror") orelse {
-            std.debug.print("Failed to lookup uci_perror\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        uci_get_errorstr = uci_lib.lookup(UciGetErrorstrFn, "uci_get_errorstr") orelse {
-            std.debug.print("Failed to lookup uci_get_errorstr\n", .{});
-            last_error = error.FileNotFound;
-            continue;
-        };
-        std.debug.print("Successfully loaded all UCI symbols from {s}\n", .{path});
-        lib_loaded = true;
+        lib_handle = lib;
         return;
     }
 
-    std.debug.print("Failed to load libuci from any path\n", .{});
     if (last_error) |err| {
         return err;
     }
     return error.LibLoadFailed;
 }
 
-// 使用从 C 导入的真实类型
-pub const uci_context = c.uci_context;
-pub const uci_package = c.uci_package;
-pub const uci_element = c.uci_element;
-pub const uci_section = c.uci_section;
-pub const uci_option = c.uci_option;
-pub const uci_list = c.uci_list;
-
-pub const UCI_TYPE_STRING = 0;
-pub const UCI_TYPE_LIST = 1;
-
-pub const UciError = error{
-    UciOk,
-    UciErrMem,
-    UciErrInval,
-    UciErrNotfound,
-    UciErrIo,
-    UciErrParse,
-    UciErrDuplicate,
-    UciErrUnknown,
-    LibNotLoaded,
-    LibLoadFailed,
-};
-
-/// Convert UCI error code to Zig error type
-pub fn toUciError(code: c_int) !void {
-    return switch (code) {
-        0 => {}, // UCI_OK
-        1 => UciError.UciErrMem,
-        2 => UciError.UciErrInval,
-        3 => UciError.UciErrNotfound,
-        4 => UciError.UciErrIo,
-        5 => UciError.UciErrParse,
-        6 => UciError.UciErrDuplicate,
-        7 => UciError.UciErrUnknown,
-        else => UciError.UciErrUnknown,
-    };
-}
-
-pub const UciContext = struct {
-    ctx: [*c]c.uci_context,
-
-    /// Allocate a new UCI context
-    pub fn alloc() !UciContext {
-        // 确保库已加载
-        try initLibUci();
-
-        std.debug.print("Calling uci_alloc_context...\n", .{});
-        const ctx = uci_alloc_context();
-        std.debug.print("uci_alloc_context returned: {*}\n", .{ctx});
-        if (ctx == null) {
-            std.debug.print("Failed to allocate UCI context\n", .{});
-            return UciError.UciErrMem;
-        }
-
-        std.debug.print("Successfully allocated UCI context\n", .{});
-        return UciContext{
-            .ctx = ctx,
-        };
+fn loadFunction(comptime T: type, comptime name: [:0]const u8, cache: *?T) !T {
+    if (cache.*) |func| {
+        return func;
     }
 
-    /// Free the UCI context
-    pub fn free(self: UciContext) void {
-        if (self.ctx != null) {
-            uci_free_context(self.ctx);
-        }
-    }
+    try ensureLibLoaded();
 
-    /// Load a UCI config file
-    pub fn load(self: UciContext, name: [*c]const u8) ![*c]c.uci_package {
-        if (self.ctx == null) {
-            return UciError.UciErrInval;
-        }
-
-        var package: ?*c.uci_package = null;
-        std.debug.print("Calling uci_load with ctx={*}, name={s}, package_ptr={*}, func={*}\n", .{ self.ctx, name, &package, uci_load });
-        const result = uci_load(self.ctx, "network", &package);
-        std.debug.print("uci_load returned: {}, package={*}\n", .{ result, package });
-
-        try toUciError(result);
-        return package;
-    }
-
-    /// Unload a UCI config package
-    pub fn unload(self: UciContext, package: [*c]c.uci_package) !void {
-        if (self.ctx == null) {
-            return UciError.UciErrInval;
-        }
-
-        const result = uci_unload(self.ctx, package);
-        try toUciError(result);
-    }
-
-    /// Get error string for the last error
-    pub fn getErrorStr(self: UciContext, allocator: std.mem.Allocator, prefix: [*c]const u8) ![]u8 {
-        if (self.ctx == null) {
-            return UciError.UciErrInval;
-        }
-
-        var dest: [*c]u8 = undefined;
-        uci_get_errorstr(self.ctx, &dest, prefix);
-        const len = std.mem.len(dest);
-        const result = try allocator.dupe(u8, dest[0..len]);
-        return result;
-    }
-
-    /// Print error message
-    pub fn perror(self: UciContext, prefix: [*c]const u8) void {
-        if (self.ctx != null) {
-            uci_perror(self.ctx, prefix);
-        }
-    }
-};
-
-/// Get all sections and options from a UCI package
-pub fn listConfigSections(_: std.mem.Allocator, package: [*c]c.uci_package) !void {
-    // 简化实现：由于我们现在使用 opaque 类型，
-    // 实际的遍历需要通过 C 函数接口
-    std.debug.print("Package loaded successfully!\n", .{});
-    // print [*c]*c.uci_context
-
-    _ = package;
-}
-
-/// Print all firewall configuration settings
-pub fn printFirewallConfig(allocator: std.mem.Allocator) !void {
-    std.debug.print("Loading firewall configuration...\n", .{});
-
-    // Allocate UCI context
-    var uci_ctx = try UciContext.alloc();
-    defer uci_ctx.free();
-    std.debug.print("UCI context allocated\n", .{});
-
-    // // Try to load the firewall config
-    const config_name: [*c]const u8 = "firewall";
-    const package = uci_ctx.load(config_name) catch |err| {
-        std.debug.print("Error loading firewall config: {}\n", .{err});
-        uci_ctx.perror(config_name);
-        return;
+    const func = lib_handle.?.lookup(T, name) orelse {
+        std.debug.print("Failed to lookup {s}\n", .{name});
+        return error.FunctionNotFound;
     };
 
-    if (package != null) {
-        defer {
-            uci_ctx.unload(package) catch |err| {
-                std.debug.print("Error unloading package: {}\n", .{err});
-            };
-        }
+    cache.* = func;
+    return func;
+}
 
-        std.debug.print("Firewall configuration:\n", .{});
-        try listConfigSections(allocator, package);
-    } else {
-        std.debug.print("Firewall package is null\n", .{});
-    }
+pub inline fn uci_alloc_context() ![*c]c.uci_context {
+    const func = try loadFunction(uci_alloc_context_fn, "uci_alloc_context", &fn_alloc_context);
+    return func();
+}
+
+pub inline fn uci_free_context(ctx: [*c]c.uci_context) !void {
+    const func = try loadFunction(uci_free_context_fn, "uci_free_context", &fn_free_context);
+    func(ctx);
+}
+
+pub inline fn uci_perror(ctx: [*c]c.uci_context, str: [*c]const u8) !void {
+    const func = try loadFunction(uci_perror_fn, "uci_perror", &fn_perror);
+    func(ctx, str);
+}
+
+pub inline fn uci_get_errorstr(ctx: [*c]c.uci_context, dest: [*c][*c]u8, str: [*c]const u8) !void {
+    const func = try loadFunction(uci_get_errorstr_fn, "uci_get_errorstr", &fn_get_errorstr);
+    func(ctx, dest, str);
+}
+
+pub inline fn uci_import(ctx: [*c]c.uci_context, stream: [*c]c.FILE, name: [*c]const u8, package: [*c][*c]c.uci_package, single: bool) !c_int {
+    const func = try loadFunction(uci_import_fn, "uci_import", &fn_import);
+    return func(ctx, stream, name, package, single);
+}
+
+pub inline fn uci_export(ctx: [*c]c.uci_context, stream: [*c]c.FILE, package: [*c]c.uci_package, header: bool) !c_int {
+    const func = try loadFunction(uci_export_fn, "uci_export", &fn_export);
+    return func(ctx, stream, package, header);
+}
+
+pub inline fn uci_load(ctx: [*c]c.uci_context, name: [*c]const u8, package: [*c][*c]c.uci_package) !c_int {
+    const func = try loadFunction(uci_load_fn, "uci_load", &fn_load);
+    return func(ctx, name, package);
+}
+
+pub inline fn uci_unload(ctx: [*c]c.uci_context, p: [*c]c.uci_package) !c_int {
+    const func = try loadFunction(uci_unload_fn, "uci_unload", &fn_unload);
+    return func(ctx, p);
+}
+
+pub inline fn uci_lookup_ptr(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr, str: [*c]u8, extended: bool) !c_int {
+    const func = try loadFunction(uci_lookup_ptr_fn, "uci_lookup_ptr", &fn_lookup_ptr);
+    return func(ctx, ptr, str, extended);
+}
+
+pub inline fn uci_add_section(ctx: [*c]c.uci_context, p: [*c]c.uci_package, @"type": [*c]const u8, res: [*c][*c]c.uci_section) !c_int {
+    const func = try loadFunction(uci_add_section_fn, "uci_add_section", &fn_add_section);
+    return func(ctx, p, @"type", res);
+}
+
+pub inline fn uci_set(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_set_fn, "uci_set", &fn_set);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_add_list(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_add_list_fn, "uci_add_list", &fn_add_list);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_del_list(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_del_list_fn, "uci_del_list", &fn_del_list);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_reorder_section(ctx: [*c]c.uci_context, s: [*c]c.uci_section, pos: c_int) !c_int {
+    const func = try loadFunction(uci_reorder_section_fn, "uci_reorder_section", &fn_reorder_section);
+    return func(ctx, s, pos);
+}
+
+pub inline fn uci_rename(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_rename_fn, "uci_rename", &fn_rename);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_delete(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_delete_fn, "uci_delete", &fn_delete);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_save(ctx: [*c]c.uci_context, p: [*c]c.uci_package) !c_int {
+    const func = try loadFunction(uci_save_fn, "uci_save", &fn_save);
+    return func(ctx, p);
+}
+
+pub inline fn uci_commit(ctx: [*c]c.uci_context, p: [*c][*c]c.uci_package, overwrite: bool) !c_int {
+    const func = try loadFunction(uci_commit_fn, "uci_commit", &fn_commit);
+    return func(ctx, p, overwrite);
+}
+
+pub inline fn uci_list_configs(ctx: [*c]c.uci_context, list: [*c][*c][*c]u8) !c_int {
+    const func = try loadFunction(uci_list_configs_fn, "uci_list_configs", &fn_list_configs);
+    return func(ctx, list);
+}
+
+pub inline fn uci_set_savedir(ctx: [*c]c.uci_context, dir: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_set_savedir_fn, "uci_set_savedir", &fn_set_savedir);
+    return func(ctx, dir);
+}
+
+pub inline fn uci_set_confdir(ctx: [*c]c.uci_context, dir: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_set_confdir_fn, "uci_set_confdir", &fn_set_confdir);
+    return func(ctx, dir);
+}
+
+pub inline fn uci_set_conf2dir(ctx: [*c]c.uci_context, dir: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_set_conf2dir_fn, "uci_set_conf2dir", &fn_set_conf2dir);
+    return func(ctx, dir);
+}
+
+pub inline fn uci_add_delta_path(ctx: [*c]c.uci_context, dir: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_add_delta_path_fn, "uci_add_delta_path", &fn_add_delta_path);
+    return func(ctx, dir);
+}
+
+pub inline fn uci_revert(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr) !c_int {
+    const func = try loadFunction(uci_revert_fn, "uci_revert", &fn_revert);
+    return func(ctx, ptr);
+}
+
+pub inline fn uci_parse_argument(ctx: [*c]c.uci_context, stream: [*c]c.FILE, str: [*c][*c]u8, result: [*c][*c]u8) !c_int {
+    const func = try loadFunction(uci_parse_argument_fn, "uci_parse_argument", &fn_parse_argument);
+    return func(ctx, stream, str, result);
+}
+
+pub inline fn uci_set_backend(ctx: [*c]c.uci_context, name: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_set_backend_fn, "uci_set_backend", &fn_set_backend);
+    return func(ctx, name);
+}
+
+pub inline fn uci_validate_text(str: [*c]const u8) !bool {
+    const func = try loadFunction(uci_validate_text_fn, "uci_validate_text", &fn_validate_text);
+    return func(str);
+}
+
+pub inline fn uci_parse_ptr(ctx: [*c]c.uci_context, ptr: [*c]c.uci_ptr, str: [*c]u8) !c_int {
+    const func = try loadFunction(uci_parse_ptr_fn, "uci_parse_ptr", &fn_parse_ptr);
+    return func(ctx, ptr, str);
+}
+
+pub inline fn uci_lookup_next(ctx: [*c]c.uci_context, e: [*c][*c]c.uci_element, list: [*c]c.uci_list, name: [*c]const u8) !c_int {
+    const func = try loadFunction(uci_lookup_next_fn, "uci_lookup_next", &fn_lookup_next);
+    return func(ctx, e, list, name);
+}
+
+pub inline fn uci_parse_section(s: [*c]c.uci_section, opts: [*c]const c.uci_parse_option, n_opts: c_int, tb: [*c][*c]c.uci_option) !void {
+    const func = try loadFunction(uci_parse_section_fn, "uci_parse_section", &fn_parse_section);
+    func(s, opts, n_opts, tb);
+}
+
+pub inline fn uci_hash_options(tb: [*c][*c]c.uci_option, n_opts: c_int) !u32 {
+    const func = try loadFunction(uci_hash_options_fn, "uci_hash_options", &fn_hash_options);
+    return func(tb, n_opts);
+}
+
+pub inline fn isLoaded() bool {
+    return lib_handle != null;
 }
