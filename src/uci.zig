@@ -52,6 +52,83 @@ pub const UciPackage = struct {
         try toUciError(result);
         self.pkg = null;
     }
+
+    pub fn save(self: UciPackage) !void {
+        if (self.ctx == null or self.pkg == null) {
+            return UciError.UciErrInval;
+        }
+
+        const result = try uci_loader.uci_save(self.ctx, self.pkg);
+        try toUciError(result);
+    }
+
+    /// Commit changes to this package. Note: commit may update the package pointer.
+    pub fn commit(self: *UciPackage, overwrite: bool) !void {
+        if (self.ctx == null or self.pkg == null) {
+            return UciError.UciErrInval;
+        }
+
+        const result = try uci_loader.uci_commit(self.ctx, &self.pkg, overwrite);
+        try toUciError(result);
+    }
+
+    pub fn addSection(self: UciPackage, section_type: [*c]const u8) !UciSection {
+        if (self.ctx == null or self.pkg == null) {
+            return UciError.UciErrInval;
+        }
+
+        var section: [*c]c.uci_section = null;
+        const result = try uci_loader.uci_add_section(self.ctx, self.pkg, section_type, &section);
+        try toUciError(result);
+        return UciSection{ .section = section };
+    }
+};
+
+pub const UciSection = struct {
+    section: [*c]c.uci_section,
+
+    pub fn isNull(self: UciSection) bool {
+        return self.section == null;
+    }
+};
+
+pub const UciPtr = struct {
+    ptr: c.uci_ptr,
+
+    pub fn init() UciPtr {
+        return .{ .ptr = std.mem.zeroes(c.uci_ptr) };
+    }
+
+    pub fn isLookupComplete(self: UciPtr) bool {
+        return (self.ptr.flags & c.UCI_LOOKUP_COMPLETE) != 0;
+    }
+};
+
+pub const UciStringList = struct {
+    list: [*c][*c]u8,
+
+    pub fn isNull(self: UciStringList) bool {
+        return self.list == null;
+    }
+
+    /// Frees memory allocated by `uci_list_configs`.
+    pub fn deinit(self: *UciStringList) void {
+        if (self.list == null) return;
+
+        var i: usize = 0;
+        while (self.list[i] != null) : (i += 1) {
+            std.c.free(self.list[i]);
+        }
+        std.c.free(self.list);
+        self.list = null;
+    }
+
+    pub fn get(self: UciStringList, index: usize) ?[*c]const u8 {
+        if (self.list == null) return null;
+        const item = self.list[index];
+        if (item == null) return null;
+        return item;
+    }
 };
 
 pub const UciContext = struct {
@@ -131,14 +208,102 @@ pub const UciContext = struct {
             };
         }
     }
+
+    pub fn lookupPtr(self: UciContext, ptr: *UciPtr, str: [*c]u8, extended: bool) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_lookup_ptr(self.ctx, @ptrCast(&ptr.ptr), str, extended);
+        try toUciError(result);
+    }
+
+    pub fn parsePtr(self: UciContext, ptr: *UciPtr, str: [*c]u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_parse_ptr(self.ctx, @ptrCast(&ptr.ptr), str);
+        try toUciError(result);
+    }
+
+    pub fn set(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_set(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn addList(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_add_list(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn delList(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_del_list(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn rename(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_rename(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn delete(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_delete(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn revert(self: UciContext, ptr: *UciPtr) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_revert(self.ctx, @ptrCast(&ptr.ptr));
+        try toUciError(result);
+    }
+
+    pub fn reorderSection(self: UciContext, section: UciSection, pos: c_int) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        if (section.section == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_reorder_section(self.ctx, section.section, pos);
+        try toUciError(result);
+    }
+
+    pub fn setSavedir(self: UciContext, dir: [*c]const u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_set_savedir(self.ctx, dir);
+        try toUciError(result);
+    }
+
+    pub fn setConfdir(self: UciContext, dir: [*c]const u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_set_confdir(self.ctx, dir);
+        try toUciError(result);
+    }
+
+    pub fn setConf2dir(self: UciContext, dir: [*c]const u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_set_conf2dir(self.ctx, dir);
+        try toUciError(result);
+    }
+
+    pub fn addDeltaPath(self: UciContext, dir: [*c]const u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_add_delta_path(self.ctx, dir);
+        try toUciError(result);
+    }
+
+    pub fn setBackend(self: UciContext, name: [*c]const u8) !void {
+        if (self.ctx == null) return UciError.UciErrInval;
+        const result = try uci_loader.uci_set_backend(self.ctx, name);
+        try toUciError(result);
+    }
+
+    pub fn listConfigs(self: UciContext) !UciStringList {
+        if (self.ctx == null) return UciError.UciErrInval;
+
+        var list: [*c][*c]u8 = null;
+        const result = try uci_loader.uci_list_configs(self.ctx, &list);
+        try toUciError(result);
+        return .{ .list = list };
+    }
 };
 
-/// Get all sections and options from a UCI package
-pub fn listConfigSections(_: std.mem.Allocator, package: [*c]c.uci_package) !void {
-    // 简化实现：由于我们现在使用 opaque 类型，
-    // 实际的遍历需要通过 C 函数接口
-    std.debug.print("Package loaded successfully!\n", .{});
-    // print [*c]*c.uci_context
-
-    _ = package;
+pub fn validateText(str: [*c]const u8) !bool {
+    return try uci_loader.uci_validate_text(str);
 }
