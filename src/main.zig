@@ -45,7 +45,31 @@ pub fn listConfigSections(_: std.mem.Allocator, package: uci.UciPackage) !void {
     // 简化实现：由于我们现在使用 opaque 类型，
     // 实际的遍历需要通过 C 函数接口
     std.debug.print("Package loaded successfully!\n", .{});
-    // print [*c]*c.uci_context
 
-    _ = package;
+    var sec_it = uci.sections(package);
+    while (sec_it.next()) |sec| {
+        const sec_name = uci.cStr(sec.name());
+        const sec_type = uci.cStr(sec.sectionType());
+        std.debug.print("section: {s} ({s})\n", .{ sec_name, sec_type });
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (opt.isString()) {
+                std.debug.print("  {s} = {s}\n", .{ opt_name, uci.cStr(opt.getString()) });
+            } else if (opt.isList()) {
+                std.debug.print("  {s} = [", .{opt_name});
+                var val_it = opt.values();
+                var first = true;
+                while (val_it.next()) |val| {
+                    if (!first) std.debug.print(", ", .{});
+                    first = false;
+                    std.debug.print("{s}", .{uci.cStr(val)});
+                }
+                std.debug.print("]\n", .{});
+            } else {
+                std.debug.print("  {s} = <unknown>\n", .{opt_name});
+            }
+        }
+    }
 }
