@@ -7,6 +7,11 @@ const std = @import("std");
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
 pub fn build(b: *std.Build) void {
+    const enable_json = b.option(bool, "json", "Enable JSON config support") orelse false;
+    const options = b.addOptions();
+    options.addOption(bool, "enable_json", enable_json);
+    const options_mod = options.createModule();
+
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we set the default to x86_64-linux-musl
     // for OpenWrt compatibility, but can be overridden.
@@ -45,6 +50,8 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+
+    mod.addImport("build_options", options_mod);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -89,6 +96,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "PortWeaver", .module = mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
