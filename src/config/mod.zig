@@ -17,10 +17,9 @@ pub const parseProtocol = types.parseProtocol;
 pub const dupeIfNonEmpty = types.dupeIfNonEmpty;
 
 const provider = @import("provider.zig");
-pub const Provider = provider.Provider;
 pub const UciProvider = provider.UciProvider;
 pub const JsonProvider = provider.JsonProvider;
-pub const loadFromProvider = provider.loadFromProvider;
+pub const loadFrom = provider.loadFrom;
 
 pub const loadFromUci = @import("uci_loader.zig").loadFromUci;
 

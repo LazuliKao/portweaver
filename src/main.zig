@@ -1,12 +1,11 @@
 const std = @import("std");
-const uci = @import("uci.zig");
+const uci = @import("uci/mod.zig");
 
 pub fn main() !void {
     // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     // defer arena.deinit();
     // const allocator = arena.allocator();
 
-    // 不再需要手动调用 initLibUci，函数会在首次使用时自动延迟加载
     try printFirewallConfig();
 }
 

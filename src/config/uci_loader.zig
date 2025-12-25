@@ -1,5 +1,5 @@
 const std = @import("std");
-const uci = @import("../uci.zig");
+const uci = @import("../utils/uci.zig");
 const types = @import("types.zig");
 
 fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !types.Project {

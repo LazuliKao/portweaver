@@ -1,7 +1,25 @@
 const std = @import("std");
 const libuci = @import("libuci.zig");
-
 const c = libuci.c;
+
+fn toUciError(code: c_int) !void {
+    return switch (code) {
+        c.UCI_OK => {},
+        c.UCI_ERR_MEM => UciError.UciErrMem,
+        c.UCI_ERR_INVAL => UciError.UciErrInval,
+        c.UCI_ERR_NOTFOUND => UciError.UciErrNotfound,
+        c.UCI_ERR_IO => UciError.UciErrIo,
+        c.UCI_ERR_PARSE => UciError.UciErrParse,
+        c.UCI_ERR_DUPLICATE => UciError.UciErrDuplicate,
+        c.UCI_ERR_UNKNOWN => UciError.UciErrUnknown,
+        c.UCI_ERR_LAST => UciError.UciErrLast,
+        else => UciError.UciErrUnknown,
+    };
+}
+
+fn listToElement(node: *c.uci_list) *c.uci_element {
+    return @fieldParentPtr("list", node);
+}
 pub const UciError = error{
     UciOk,
     UciErrMem,
@@ -15,22 +33,6 @@ pub const UciError = error{
     LibNotLoaded,
     LibLoadFailed,
 };
-
-/// Convert UCI error code to Zig error type
-pub fn toUciError(code: c_int) !void {
-    return switch (code) {
-        c.UCI_OK => {}, // UCI_OK
-        c.UCI_ERR_MEM => UciError.UciErrMem,
-        c.UCI_ERR_INVAL => UciError.UciErrInval,
-        c.UCI_ERR_NOTFOUND => UciError.UciErrNotfound,
-        c.UCI_ERR_IO => UciError.UciErrIo,
-        c.UCI_ERR_PARSE => UciError.UciErrParse,
-        c.UCI_ERR_DUPLICATE => UciError.UciErrDuplicate,
-        c.UCI_ERR_UNKNOWN => UciError.UciErrUnknown,
-        c.UCI_ERR_LAST => UciError.UciErrLast,
-        else => UciError.UciErrUnknown,
-    };
-}
 
 pub const UciPackage = struct {
     ctx: [*c]c.uci_context,
@@ -149,11 +151,6 @@ pub const UciOption = struct {
         return UciValueIterator.init(&self.option.*.v.list);
     }
 };
-
-fn listToElement(node: *c.uci_list) *c.uci_element {
-    return @fieldParentPtr("list", node);
-}
-
 pub const UciSectionIterator = struct {
     head: ?*c.uci_list,
     cur: ?*c.uci_list,
@@ -432,19 +429,3 @@ pub const UciContext = struct {
         return .{ .list = list };
     }
 };
-
-pub fn cStr(ptr: ?[*c]const u8) []const u8 {
-    if (ptr == null) return "";
-    return std.mem.span(@as([*:0]const u8, @ptrCast(ptr.?)));
-}
-
-pub fn sections(package: UciPackage) UciSectionIterator {
-    if (package.pkg == null) {
-        return UciSectionIterator.init(null);
-    }
-    return UciSectionIterator.init(&package.pkg.*.sections);
-}
-
-pub fn validateText(str: [*c]const u8) !bool {
-    return try libuci.uci_validate_text(str);
-}

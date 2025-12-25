@@ -301,5 +301,3 @@ pub inline fn uci_hash_options(tb: [*c][*c]c.uci_option, n_opts: c_int) !u32 {
 pub inline fn isLoaded() bool {
     return lib_handle != null;
 }
-
-pub const config = @import("config.zig");
