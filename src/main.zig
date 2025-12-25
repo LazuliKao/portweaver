@@ -1,8 +1,14 @@
 const std = @import("std");
 const uci = @import("uci/mod.zig");
 const firewall = @import("impl/firewall.zig");
+const app_forward = @import("impl/app_forward.zig");
+const config = @import("config/mod.zig");
 
 pub fn main() !void {
+    // 示例：演示如何使用应用层转发
+    try demoAppForward();
+
+    // 原有的防火墙配置功能
     try printFirewallConfig();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -11,6 +17,15 @@ pub fn main() !void {
     firewall.reloadFirewall(allocator) catch |err| {
         std.debug.print("Error reloading firewall: {}\n", .{err});
     };
+}
+
+/// 演示应用层端口转发功能
+pub fn demoAppForward() !void {
+    std.debug.print("=== Application Layer Port Forwarding Demo ===\n", .{});
+    std.debug.print("To enable app-layer forwarding, set 'enable_app_forward = true' in config\n", .{});
+    std.debug.print("Example: Forward TCP port 8080 to 127.0.0.1:80\n", .{});
+    std.debug.print("See example_config.json and APP_FORWARD.md for more details\n", .{});
+    std.debug.print("==============================================\n\n", .{});
 }
 
 /// Print all firewall configuration settings

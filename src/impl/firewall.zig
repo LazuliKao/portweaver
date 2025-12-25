@@ -328,8 +328,8 @@ pub fn applyFirewallRulesForProject(
 
     // 如果需要添加防火墙转发
     if (project.add_firewall_forward) {
-        const default_src_zones = [_][]const u8{ "wan" };
-        const default_dest_zones = [_][]const u8{ "lan" };
+        const default_src_zones = [_][]const u8{"wan"};
+        const default_dest_zones = [_][]const u8{"lan"};
 
         const src_zones = if (project.src_zones.len != 0) project.src_zones else default_src_zones[0..];
         const dest_zones = if (project.dest_zones.len != 0) project.dest_zones else default_dest_zones[0..];

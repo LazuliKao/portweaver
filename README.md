@@ -1,6 +1,43 @@
 # PortWeaver
 Port forwarding utils for OpenWrt
 
+## 功能特性
+
+- ✅ **防火墙规则集成**：自动配置 OpenWrt 防火墙规则
+- ✅ **应用层端口转发**：纯 Zig 实现的 TCP/UDP 转发（类似 socat）
+- ✅ **UCI 配置支持**：原生支持 OpenWrt UCI 配置系统
+- ✅ **JSON 配置支持**：可选的 JSON 配置文件格式
+- ✅ **多协议支持**：TCP、UDP 或同时支持
+- ✅ **IPv4/IPv6**：支持多种地址族
+
+## 应用层端口转发（新功能）
+
+PortWeaver 现在支持纯 Zig 实现的应用层端口转发，无需依赖系统防火墙。详细文档请参考：
+
+📖 **[应用层转发完整文档](APP_FORWARD.md)**
+
+### 快速开始
+
+在配置中添加 `enable_app_forward` 字段启用应用层转发：
+
+```json
+{
+  "remark": "HTTP转发",
+  "listen_port": 8080,
+  "target_address": "127.0.0.1",
+  "target_port": 80,
+  "protocol": "tcp",
+  "enable_app_forward": true
+}
+```
+
+特性：
+- 🚀 支持 TCP 和 UDP 协议
+- 🔄 自动双向数据转发
+- 🧵 多线程并发处理
+- 📝 详细的日志输出
+- 🎯 适合开发和测试环境
+
 ## 配置文件
 
 每条“项目/规则”需要包含以下字段：
@@ -43,6 +80,7 @@ config project 'rdp'
 - `target_port`/`dst_port`/`目标端口`
 - `open_firewall_port`/`firewall_open`/`打开防火墙端口`
 - `add_firewall_forward`/`firewall_forward`/`添加防火墙转发`
+- `enable_app_forward`/`app_forward`/`启用应用层转发` （新增）
 
 ### JSON 配置（可选）
 
@@ -68,8 +106,11 @@ JSON 文件格式：顶层可以是 `projects` 数组，或直接是数组。
 			"target_address": "192.168.1.100",
 			"target_port": 3389,
 			"open_firewall_port": true,
-			"add_firewall_forward": true
+			"add_firewall_forward": true,
+			"enable_app_forward": false
 		}
 	]
 }
 ```
+
+完整配置示例请参考 [example_config.json](example_config.json)。

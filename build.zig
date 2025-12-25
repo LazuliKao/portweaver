@@ -16,11 +16,11 @@ pub fn build(b: *std.Build) void {
     // what target to build for. Here we set the default to x86_64-linux-musl
     // for OpenWrt compatibility, but can be overridden.
     const target = b.standardTargetOptions(.{
-        .default_target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .musl,
-        },
+        // .default_target = .{
+        //     .cpu_arch = .x86_64,
+        //     .os_tag = .linux,
+        //     .abi = .musl,
+        // },
     });
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not

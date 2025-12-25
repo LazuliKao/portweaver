@@ -45,6 +45,8 @@ pub const Project = struct {
     open_firewall_port: bool = false,
     /// 添加防火墙转发
     add_firewall_forward: bool = false,
+    /// 启用应用层端口转发（使用 Zig 网络库实现，类似 socat）
+    enable_app_forward: bool = false,
 
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);

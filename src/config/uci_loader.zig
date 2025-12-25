@@ -1,5 +1,5 @@
 const std = @import("std");
-const uci = @import("../utils/uci.zig");
+const uci = @import("../uci/mod.zig");
 const types = @import("types.zig");
 
 fn appendZoneString(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {

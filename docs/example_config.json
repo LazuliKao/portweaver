@@ -1,0 +1,50 @@
+{
+  "projects": [
+    {
+      "remark": "TCP转发示例 - HTTP",
+      "listen_port": 8080,
+      "target_address": "127.0.0.1",
+      "target_port": 80,
+      "protocol": "tcp",
+      "family": "any",
+      "enable_app_forward": true,
+      "open_firewall_port": false,
+      "add_firewall_forward": false
+    },
+    {
+      "remark": "UDP转发示例 - DNS",
+      "listen_port": 5353,
+      "target_address": "8.8.8.8",
+      "target_port": 53,
+      "protocol": "udp",
+      "family": "ipv4",
+      "enable_app_forward": true,
+      "open_firewall_port": false,
+      "add_firewall_forward": false
+    },
+    {
+      "remark": "TCP+UDP转发示例",
+      "listen_port": 9000,
+      "target_address": "192.168.1.100",
+      "target_port": 9000,
+      "protocol": "both",
+      "family": "any",
+      "enable_app_forward": true,
+      "open_firewall_port": false,
+      "add_firewall_forward": false
+    },
+    {
+      "remark": "防火墙规则示例（不启用应用层转发）",
+      "listen_port": 8443,
+      "target_address": "192.168.1.10",
+      "target_port": 443,
+      "protocol": "tcp",
+      "family": "any",
+      "enable_app_forward": false,
+      "open_firewall_port": true,
+      "add_firewall_forward": true,
+      "src_zones": ["wan"],
+      "dest_zones": ["lan"]
+    }
+  ]
+}

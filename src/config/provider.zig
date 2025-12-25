@@ -1,5 +1,5 @@
 const std = @import("std");
-const uci = @import("../utils/uci.zig");
+const uci = @import("../uci/mod.zig");
 const build_options = @import("build_options");
 const types = @import("types.zig");
 const uci_loader = @import("uci_loader.zig");
