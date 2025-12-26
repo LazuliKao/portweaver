@@ -3,7 +3,7 @@ const build_options = @import("build_options");
 const config = @import("config/mod.zig");
 const firewall = @import("impl/uci_firewall.zig");
 const app_forward = @import("impl/app_forward.zig");
-
+const uci = @import("uci/mod.zig");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -14,7 +14,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // 加载配置
-    const cfg = try loadConfig(allocator, args);
+    var cfg = try loadConfig(allocator, args);
     defer cfg.deinit(allocator);
 
     std.debug.print("PortWeaver starting with {d} project(s)...\n", .{cfg.projects.len});
@@ -35,7 +35,10 @@ fn loadConfig(allocator: std.mem.Allocator, args: []const []const u8) !config.Co
     } else {
         // UCI 模式：直接从 UCI 加载配置
         std.debug.print("Loading configuration from UCI...\n", .{});
-        return try config.loadFromUci(allocator);
+        // Allocate UCI context
+        var uci_ctx = try uci.UciContext.alloc();
+        defer uci_ctx.free();
+        return try config.loadFromUci(allocator, uci_ctx, "portweaver");
     }
 }
 

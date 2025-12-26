@@ -2,7 +2,7 @@ const std = @import("std");
 const uci = @import("../uci/mod.zig");
 const types = @import("types.zig");
 
-fn appendZoneString(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
+fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return;
     try list.append(try allocator.dupe(u8, trimmed));
@@ -19,13 +19,13 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
     var have_target_address = false;
     var have_target_port = false;
 
-    var src_zones_list = std.ArrayList([]const u8).init(allocator);
+    var src_zones_list = std.array_list.Managed([]const u8).init(allocator);
     defer src_zones_list.deinit();
     errdefer {
         for (src_zones_list.items) |z| allocator.free(z);
     }
 
-    var dest_zones_list = std.ArrayList([]const u8).init(allocator);
+    var dest_zones_list = std.array_list.Managed([]const u8).init(allocator);
     defer dest_zones_list.deinit();
     errdefer {
         for (dest_zones_list.items) |z| allocator.free(z);
@@ -129,7 +129,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     if (pkg.isNull()) return types.ConfigError.MissingField;
     defer pkg.unload() catch {};
 
-    var list = std.ArrayList(types.Project).init(allocator);
+    var list = std.array_list.Managed(types.Project).init(allocator);
     errdefer {
         for (list.items) |*p| p.deinit(allocator);
         list.deinit();
