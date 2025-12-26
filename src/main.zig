@@ -1,93 +1,94 @@
 const std = @import("std");
-const uci = @import("uci/mod.zig");
-const firewall = @import("impl/firewall.zig");
-const app_forward = @import("impl/app_forward.zig");
+const build_options = @import("build_options");
 const config = @import("config/mod.zig");
+const firewall = @import("impl/uci_firewall.zig");
+const app_forward = @import("impl/app_forward.zig");
 
 pub fn main() !void {
-    // 示例：演示如何使用应用层转发
-    try demoAppForward();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // 原有的防火墙配置功能
-    try printFirewallConfig();
+    // 解析命令行参数
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    firewall.reloadFirewall(allocator) catch |err| {
-        std.debug.print("Error reloading firewall: {}\n", .{err});
-    };
+    // 加载配置
+    const cfg = try loadConfig(allocator, args);
+    defer cfg.deinit(allocator);
+
+    std.debug.print("PortWeaver starting with {d} project(s)...\n", .{cfg.projects.len});
+
+    // 应用配置并启动服务
+    try applyConfig(allocator, cfg);
+
+    std.debug.print("PortWeaver started successfully.\n", .{});
 }
 
-/// 演示应用层端口转发功能
-pub fn demoAppForward() !void {
-    std.debug.print("=== Application Layer Port Forwarding Demo ===\n", .{});
-    std.debug.print("To enable app-layer forwarding, set 'enable_app_forward = true' in config\n", .{});
-    std.debug.print("Example: Forward TCP port 8080 to 127.0.0.1:80\n", .{});
-    std.debug.print("See example_config.json and APP_FORWARD.md for more details\n", .{});
-    std.debug.print("==============================================\n\n", .{});
-}
-
-/// Print all firewall configuration settings
-pub fn printFirewallConfig() !void {
-    std.debug.print("Loading firewall configuration...\n", .{});
-
-    // Allocate UCI context
-    var uci_ctx = try uci.UciContext.alloc();
-    defer uci_ctx.free();
-
-    uci_ctx.perror("UCI context allocated");
-
-    // // Try to load the firewall config
-    const config_name: [*c]const u8 = "firewall";
-    var package = uci_ctx.load(config_name) catch |err| {
-        std.debug.print("Error loading firewall config: {}\n", .{err});
-        uci_ctx.perror(config_name);
-        return;
-    };
-
-    if (!package.isNull()) {
-        defer package.unload() catch |err| {
-            std.debug.print("Error unloading package: {}\n", .{err});
-        };
-
-        std.debug.print("Firewall configuration:\n", .{});
-        try listConfigSections(package);
+/// 根据编译选项和命令行参数加载配置
+fn loadConfig(allocator: std.mem.Allocator, args: []const []const u8) !config.Config {
+    if (build_options.enable_json) {
+        // JSON 模式：需要通过 -c 参数指定配置文件
+        const config_file = try parseConfigFile(args);
+        std.debug.print("Loading configuration from JSON file: {s}\n", .{config_file});
+        return try config.loadFromJsonFile(allocator, config_file);
     } else {
-        std.debug.print("Firewall package is null\n", .{});
+        // UCI 模式：直接从 UCI 加载配置
+        std.debug.print("Loading configuration from UCI...\n", .{});
+        return try config.loadFromUci(allocator);
     }
 }
 
-/// Get all sections and options from a UCI package
-pub fn listConfigSections(package: uci.UciPackage) !void {
-    // 简化实现：由于我们现在使用 opaque 类型，
-    // 实际的遍历需要通过 C 函数接口
-    std.debug.print("Package loaded successfully!\n", .{});
-
-    var sec_it = uci.sections(package);
-    while (sec_it.next()) |sec| {
-        const sec_name = uci.cStr(sec.name());
-        const sec_type = uci.cStr(sec.sectionType());
-        std.debug.print("section: {s} ({s})\n", .{ sec_name, sec_type });
-
-        var opt_it = sec.options();
-        while (opt_it.next()) |opt| {
-            const opt_name = uci.cStr(opt.name());
-            if (opt.isString()) {
-                std.debug.print("  {s} = {s}\n", .{ opt_name, uci.cStr(opt.getString()) });
-            } else if (opt.isList()) {
-                std.debug.print("  {s} = [", .{opt_name});
-                var val_it = opt.values();
-                var first = true;
-                while (val_it.next()) |val| {
-                    if (!first) std.debug.print(", ", .{});
-                    first = false;
-                    std.debug.print("{s}", .{uci.cStr(val)});
-                }
-                std.debug.print("]\n", .{});
+/// 解析命令行参数中的配置文件路径
+fn parseConfigFile(args: []const []const u8) ![]const u8 {
+    var i: usize = 1; // 跳过程序名称
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-c")) {
+            if (i + 1 < args.len) {
+                return args[i + 1];
             } else {
-                std.debug.print("  {s} = <unknown>\n", .{opt_name});
+                std.debug.print("Error: -c option requires a config file path\n", .{});
+                return error.MissingConfigFile;
             }
+        }
+    }
+
+    // 如果没有指定配置文件，使用默认路径
+    std.debug.print("No config file specified, using default: config.json\n", .{});
+    return "config.json";
+}
+
+/// 应用配置：设置防火墙规则并启动应用层转发
+fn applyConfig(allocator: std.mem.Allocator, cfg: config.Config) !void {
+    for (cfg.projects, 0..) |project, i| {
+        if (!project.enabled) {
+            std.debug.print("Project {d} ({s}) is disabled, skipping.\n", .{ i + 1, project.remark });
+            continue;
+        }
+
+        std.debug.print("Applying project {d}: {s}\n", .{ i + 1, project.remark });
+        std.debug.print("  Listen: :{d} -> Target: {s}:{d}\n", .{
+            project.listen_port,
+            project.target_address,
+            project.target_port,
+        });
+
+        // 应用防火墙规则
+        if (!build_options.enable_json) {
+            // UCI 模式下重新加载防火墙
+            if (i == cfg.projects.len - 1) {
+                // 只在最后一个项目后重新加载防火墙
+                firewall.reloadFirewall(allocator) catch |err| {
+                    std.debug.print("Warning: Failed to reload firewall: {}\n", .{err});
+                };
+            }
+        }
+
+        // 启动应用层端口转发（如果启用）
+        if (project.enable_app_forward) {
+            std.debug.print("  Starting application layer forwarding...\n", .{});
+            // TODO: 实现应用层转发的实际启动逻辑
+            // 这里需要启动独立的转发线程或异步任务
         }
     }
 }
