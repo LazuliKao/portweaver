@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "PortWeaver",
+        .name = "portweaver",
         .root_module = b.createModule(.{
             .link_libc = true,
             // .strip = true,
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "PortWeaver", .module = mod },
+                .{ .name = "portweaver", .module = mod },
                 .{ .name = "build_options", .module = options_mod },
             },
         }),
