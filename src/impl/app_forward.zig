@@ -304,52 +304,154 @@ pub fn startForwarding(allocator: std.mem.Allocator, project: types.Project) !vo
 
     std.debug.print("[Forward] Starting application-layer forwarding for: {s}\n", .{project.remark});
 
-    // 根据协议启动相应的转发器
-    switch (project.protocol) {
-        .tcp => {
-            var tcp_forwarder = TcpForwarder.init(
-                allocator,
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-                project.family,
-            );
-            try tcp_forwarder.start();
-        },
-        .udp => {
-            var udp_forwarder = UdpForwarder.init(
-                allocator,
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-                project.family,
-            );
-            defer udp_forwarder.deinit();
-            try udp_forwarder.start();
-        },
-        .both => {
-            // 同时启动 TCP 和 UDP 转发
-            const tcp_thread = try std.Thread.spawn(.{}, startTcpForward, .{
-                allocator,
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-                project.family,
-            });
-            tcp_thread.detach();
+    // 检查是单端口模式还是多端口模式
+    if (project.port_mappings.len > 0) {
+        // 多端口模式：为每个映射启动转发
+        for (project.port_mappings) |mapping| {
+            try startForwardingForMapping(allocator, project, mapping);
+        }
+        
+        // 主线程等待
+        std.Thread.sleep(std.time.ns_per_s * 365 * 24 * 60 * 60); // 1 year
+    } else {
+        // 单端口模式：使用原有逻辑
+        switch (project.protocol) {
+            .tcp => {
+                var tcp_forwarder = TcpForwarder.init(
+                    allocator,
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                    project.family,
+                );
+                try tcp_forwarder.start();
+            },
+            .udp => {
+                var udp_forwarder = UdpForwarder.init(
+                    allocator,
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                    project.family,
+                );
+                defer udp_forwarder.deinit();
+                try udp_forwarder.start();
+            },
+            .both => {
+                // 同时启动 TCP 和 UDP 转发
+                const tcp_thread = try std.Thread.spawn(.{}, startTcpForward, .{
+                    allocator,
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                    project.family,
+                });
+                tcp_thread.detach();
 
-            const udp_thread = try std.Thread.spawn(.{}, startUdpForward, .{
-                allocator,
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-                project.family,
-            });
-            udp_thread.detach();
+                const udp_thread = try std.Thread.spawn(.{}, startUdpForward, .{
+                    allocator,
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                    project.family,
+                });
+                udp_thread.detach();
 
-            // 主线程等待
-            std.Thread.sleep(std.time.ns_per_s * 365 * 24 * 60 * 60); // 1 year
-        },
+                // 主线程等待
+                std.Thread.sleep(std.time.ns_per_s * 365 * 24 * 60 * 60); // 1 year
+            },
+        }
+    }
+}
+
+/// 解析端口范围字符串，返回起始和结束端口
+fn parsePortRange(port_str: []const u8) !struct { start: u16, end: u16 } {
+    const trimmed = std.mem.trim(u8, port_str, " \t\r\n");
+    
+    if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
+        // 端口范围
+        const start_str = trimmed[0..dash_pos];
+        const end_str = trimmed[dash_pos + 1..];
+        
+        const start_port = try types.parsePort(start_str);
+        const end_port = try types.parsePort(end_str);
+        
+        return .{ .start = start_port, .end = end_port };
+    } else {
+        // 单个端口
+        const port = try types.parsePort(trimmed);
+        return .{ .start = port, .end = port };
+    }
+}
+
+/// 为单个端口映射启动转发
+fn startForwardingForMapping(
+    allocator: std.mem.Allocator,
+    project: types.Project,
+    mapping: types.PortMapping,
+) !void {
+    const listen_range = try parsePortRange(mapping.listen_port);
+    const target_range = try parsePortRange(mapping.target_port);
+    
+    // 验证端口范围长度一致
+    const listen_count = listen_range.end - listen_range.start + 1;
+    const target_count = target_range.end - target_range.start + 1;
+    
+    if (listen_count != target_count) {
+        std.debug.print("[Forward] Error: Port range mismatch - listen {d} ports, target {d} ports\n", .{
+            listen_count,
+            target_count,
+        });
+        return ForwardError.InvalidAddress;
+    }
+    
+    // 为范围内的每个端口启动转发
+    var i: u16 = 0;
+    while (i < listen_count) : (i += 1) {
+        const listen_port = listen_range.start + i;
+        const target_port = target_range.start + i;
+        
+        switch (mapping.protocol) {
+            .tcp => {
+                const tcp_thread = try std.Thread.spawn(.{}, startTcpForward, .{
+                    allocator,
+                    listen_port,
+                    project.target_address,
+                    target_port,
+                    project.family,
+                });
+                tcp_thread.detach();
+            },
+            .udp => {
+                const udp_thread = try std.Thread.spawn(.{}, startUdpForward, .{
+                    allocator,
+                    listen_port,
+                    project.target_address,
+                    target_port,
+                    project.family,
+                });
+                udp_thread.detach();
+            },
+            .both => {
+                const tcp_thread = try std.Thread.spawn(.{}, startTcpForward, .{
+                    allocator,
+                    listen_port,
+                    project.target_address,
+                    target_port,
+                    project.family,
+                });
+                tcp_thread.detach();
+
+                const udp_thread = try std.Thread.spawn(.{}, startUdpForward, .{
+                    allocator,
+                    listen_port,
+                    project.target_address,
+                    target_port,
+                    project.family,
+                });
+                udp_thread.detach();
+            },
+        }
     }
 }
 

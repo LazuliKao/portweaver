@@ -50,11 +50,12 @@ fn addUciListOption(
 }
 
 /// 添加防火墙接受规则 (firewall rule)
+/// 支持端口范围如 "8080-8090" 或单个端口如 "8080"
 pub fn addFirewallAcceptRule(
     ctx: uci.UciContext,
     allocator: std.mem.Allocator,
     proto: []const u8,
-    listen_port: u16,
+    port_str: []const u8,
     remark: []const u8,
     family: ?types.AddressFamily,
 ) !void {
@@ -68,8 +69,8 @@ pub fn addFirewallAcceptRule(
     // 构建规则名称: PORTWEAVER_{port}_{proto}_{remark}
     const rule_name = try std.fmt.allocPrint(
         allocator,
-        "PORTWEAVER_{d}_{s}_{s}",
-        .{ listen_port, proto, remark },
+        "PORTWEAVER_{s}_{s}_{s}",
+        .{ port_str, proto, remark },
     );
     defer allocator.free(rule_name);
 
@@ -77,8 +78,6 @@ pub fn addFirewallAcceptRule(
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", "*");
 
-    const port_str = try std.fmt.allocPrint(allocator, "{d}", .{listen_port});
-    defer allocator.free(port_str);
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_port", port_str);
 
     // 处理协议 (tcp,udp 需要拆分为列表)
@@ -106,15 +105,16 @@ pub fn addFirewallAcceptRule(
 }
 
 /// 添加防火墙 NAT 规则
+/// 支持端口范围
 pub fn addFirewallNat(
     ctx: uci.UciContext,
     allocator: std.mem.Allocator,
     src_zone: []const u8,
     proto: []const u8,
-    listen_port: u16,
+    listen_port_str: []const u8,
     dest_zone: []const u8,
     dest_ip: []const u8,
-    dest_port: u16,
+    dest_port_str: []const u8,
     remark: []const u8,
     family: ?types.AddressFamily,
 ) !void {
@@ -126,8 +126,8 @@ pub fn addFirewallNat(
 
     const rule_name = try std.fmt.allocPrint(
         allocator,
-        "PORTWEAVER_{d}_{s}_{s}",
-        .{ listen_port, proto, remark },
+        "PORTWEAVER_{s}_{s}_{s}",
+        .{ listen_port_str, proto, remark },
     );
     defer allocator.free(rule_name);
 
@@ -141,9 +141,6 @@ pub fn addFirewallNat(
     }
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_ip", dest_ip);
-
-    const dest_port_str = try std.fmt.allocPrint(allocator, "{d}", .{dest_port});
-    defer allocator.free(dest_port_str);
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_port", dest_port_str);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "target", "ACCEPT");
@@ -164,15 +161,16 @@ pub fn addFirewallNat(
 }
 
 /// 添加防火墙重定向规则 (DNAT)
+/// 支持端口范围
 pub fn addFirewallRedirectRule(
     ctx: uci.UciContext,
     allocator: std.mem.Allocator,
     src_zone: []const u8,
     proto: []const u8,
-    listen_port: u16,
+    listen_port_str: []const u8,
     dest_zone: []const u8,
     dest_ip: []const u8,
-    dest_port: u16,
+    dest_port_str: []const u8,
     remark: []const u8,
     family: ?types.AddressFamily,
 ) !void {
@@ -182,10 +180,10 @@ pub fn addFirewallRedirectRule(
         allocator,
         src_zone,
         proto,
-        listen_port,
+        listen_port_str,
         dest_zone,
         dest_ip,
-        dest_port,
+        dest_port_str,
         remark,
         family,
     );
@@ -199,16 +197,14 @@ pub fn addFirewallRedirectRule(
 
     const rule_name = try std.fmt.allocPrint(
         allocator,
-        "PORTWEAVER_{d}_{s}_{s}",
-        .{ listen_port, proto, remark },
+        "PORTWEAVER_{s}_{s}_{s}",
+        .{ listen_port_str, proto, remark },
     );
     defer allocator.free(rule_name);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", src_zone);
 
-    const listen_port_str = try std.fmt.allocPrint(allocator, "{d}", .{listen_port});
-    defer allocator.free(listen_port_str);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src_dport", listen_port_str);
 
     var proto_iter = std.mem.splitSequence(u8, proto, ",");
@@ -219,8 +215,6 @@ pub fn addFirewallRedirectRule(
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest", dest_zone);
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_ip", dest_ip);
 
-    const dest_port_str = try std.fmt.allocPrint(allocator, "{d}", .{dest_port});
-    defer allocator.free(dest_port_str);
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_port", dest_port_str);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "target", "DNAT");
@@ -292,62 +286,126 @@ pub fn applyFirewallRulesForProject(
     allocator: std.mem.Allocator,
     project: types.Project,
 ) !void {
-    // 获取协议字符串
-    const proto = switch (project.protocol) {
-        .tcp => "tcp",
-        .udp => "udp",
-        .both => "tcp,udp",
-    };
-
     const family: ?types.AddressFamily = if (project.family == .any) null else project.family;
 
-    // 如果需要打开防火墙端口
-    if (project.open_firewall_port) {
-        // 处理 tcp,udp 需要分别添加规则
-        if (project.protocol == .both) {
-            // IPv4 和 IPv6 分别处理
-            if (project.family == .any or project.family == .ipv4) {
-                try addFirewallAcceptRule(ctx, allocator, "tcp", project.listen_port, project.remark, .ipv4);
-                try addFirewallAcceptRule(ctx, allocator, "udp", project.listen_port, project.remark, .ipv4);
+    // 检查是单端口模式还是多端口模式
+    if (project.port_mappings.len > 0) {
+        // 多端口模式：为每个映射添加规则
+        for (project.port_mappings) |mapping| {
+            const proto = switch (mapping.protocol) {
+                .tcp => "tcp",
+                .udp => "udp",
+                .both => "tcp,udp",
+            };
+
+            // 如果需要打开防火墙端口
+            if (project.open_firewall_port) {
+                if (mapping.protocol == .both) {
+                    if (project.family == .any or project.family == .ipv4) {
+                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, .ipv4);
+                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, .ipv4);
+                    }
+                    if (project.family == .any or project.family == .ipv6) {
+                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, .ipv6);
+                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, .ipv6);
+                    }
+                } else {
+                    if (project.family == .any) {
+                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, null);
+                    } else {
+                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, family);
+                    }
+                }
             }
-            if (project.family == .any or project.family == .ipv6) {
-                try addFirewallAcceptRule(ctx, allocator, "tcp", project.listen_port, project.remark, .ipv6);
-                try addFirewallAcceptRule(ctx, allocator, "udp", project.listen_port, project.remark, .ipv6);
-            }
-        } else {
-            // 单协议情况
-            if (project.family == .any) {
-                // 不指定 family 时添加规则
-                try addFirewallAcceptRule(ctx, allocator, proto, project.listen_port, project.remark, null);
-            } else {
-                // 指定了 family
-                try addFirewallAcceptRule(ctx, allocator, proto, project.listen_port, project.remark, family);
+
+            // 如果需要添加防火墙转发
+            if (project.add_firewall_forward) {
+                const default_src_zones = [_][]const u8{"wan"};
+                const default_dest_zones = [_][]const u8{"lan"};
+
+                const src_zones = if (project.src_zones.len != 0) project.src_zones else default_src_zones[0..];
+                const dest_zones = if (project.dest_zones.len != 0) project.dest_zones else default_dest_zones[0..];
+
+                for (src_zones) |src_zone| {
+                    for (dest_zones) |dest_zone| {
+                        try addFirewallRedirectRule(
+                            ctx,
+                            allocator,
+                            src_zone,
+                            proto,
+                            mapping.listen_port,
+                            dest_zone,
+                            project.target_address,
+                            mapping.target_port,
+                            project.remark,
+                            family,
+                        );
+                    }
+                }
             }
         }
-    }
+    } else {
+        // 单端口模式：使用原有逻辑
+        const proto = switch (project.protocol) {
+            .tcp => "tcp",
+            .udp => "udp",
+            .both => "tcp,udp",
+        };
 
-    // 如果需要添加防火墙转发
-    if (project.add_firewall_forward) {
-        const default_src_zones = [_][]const u8{"wan"};
-        const default_dest_zones = [_][]const u8{"lan"};
+        const listen_port_str = try std.fmt.allocPrint(allocator, "{d}", .{project.listen_port});
+        defer allocator.free(listen_port_str);
 
-        const src_zones = if (project.src_zones.len != 0) project.src_zones else default_src_zones[0..];
-        const dest_zones = if (project.dest_zones.len != 0) project.dest_zones else default_dest_zones[0..];
+        const target_port_str = try std.fmt.allocPrint(allocator, "{d}", .{project.target_port});
+        defer allocator.free(target_port_str);
 
-        for (src_zones) |src_zone| {
-            for (dest_zones) |dest_zone| {
-                try addFirewallRedirectRule(
-                    ctx,
-                    allocator,
-                    src_zone,
-                    proto,
-                    project.listen_port,
-                    dest_zone,
-                    project.target_address,
-                    project.target_port,
-                    project.remark,
-                    family,
-                );
+        // 如果需要打开防火墙端口
+        if (project.open_firewall_port) {
+            // 处理 tcp,udp 需要分别添加规则
+            if (project.protocol == .both) {
+                // IPv4 和 IPv6 分别处理
+                if (project.family == .any or project.family == .ipv4) {
+                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, .ipv4);
+                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, .ipv4);
+                }
+                if (project.family == .any or project.family == .ipv6) {
+                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, .ipv6);
+                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, .ipv6);
+                }
+            } else {
+                // 单协议情况
+                if (project.family == .any) {
+                    // 不指定 family 时添加规则
+                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, null);
+                } else {
+                    // 指定了 family
+                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, family);
+                }
+            }
+        }
+
+        // 如果需要添加防火墙转发
+        if (project.add_firewall_forward) {
+            const default_src_zones = [_][]const u8{"wan"};
+            const default_dest_zones = [_][]const u8{"lan"};
+
+            const src_zones = if (project.src_zones.len != 0) project.src_zones else default_src_zones[0..];
+            const dest_zones = if (project.dest_zones.len != 0) project.dest_zones else default_dest_zones[0..];
+
+            for (src_zones) |src_zone| {
+                for (dest_zones) |dest_zone| {
+                    try addFirewallRedirectRule(
+                        ctx,
+                        allocator,
+                        src_zone,
+                        proto,
+                        listen_port_str,
+                        dest_zone,
+                        project.target_address,
+                        target_port_str,
+                        project.remark,
+                        family,
+                    );
+                }
             }
         }
     }

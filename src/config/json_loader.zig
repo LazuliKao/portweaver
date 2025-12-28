@@ -35,6 +35,21 @@ fn parseJsonString(v: std.json.Value) ![]const u8 {
     };
 }
 
+fn parseJsonPortString(v: std.json.Value, allocator: std.mem.Allocator) ![]const u8 {
+    const s = switch (v) {
+        .integer => |i| {
+            if (i <= 0 or i > 65535) return types.ConfigError.InvalidValue;
+            return try std.fmt.allocPrint(allocator, "{d}", .{i});
+        },
+        .string => |str| str,
+        else => return types.ConfigError.InvalidValue,
+    };
+    
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    try types.validatePortString(trimmed);
+    return try allocator.dupe(u8, trimmed);
+}
+
 fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return;
@@ -106,6 +121,12 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             for (dest_zones_list.items) |z| allocator.free(z);
         }
 
+        var port_mappings_list = std.array_list.Managed(types.PortMapping).init(allocator);
+        defer port_mappings_list.deinit();
+        errdefer {
+            for (port_mappings_list.items) |*pm| pm.deinit(allocator);
+        }
+
         if (jsonGetAliased(obj, &.{ "remark", "note", "备注" })) |v| {
             const s = try parseJsonString(v);
             project.remark = try types.dupeIfNonEmpty(allocator, s);
@@ -159,10 +180,66 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             project.add_firewall_forward = try parseJsonBool(v);
         }
 
-        if (!have_listen_port or !have_target_address or !have_target_port) {
-            if (have_target_address) allocator.free(project.target_address);
+        if (jsonGetAliased(obj, &.{ "enable_app_forward", "app_forward", "启用应用层转发" })) |v| {
+            project.enable_app_forward = try parseJsonBool(v);
+        }
+
+        // 解析 port_mappings 数组
+        if (jsonGetAliased(obj, &.{ "port_mappings", "forwards", "端口映射" })) |v| {
+            if (v != .array) return types.ConfigError.InvalidValue;
+            
+            for (v.array.items) |mapping_item| {
+                if (mapping_item != .object) return types.ConfigError.InvalidValue;
+                const mapping_obj = mapping_item.object;
+                
+                var port_mapping = types.PortMapping{
+                    .listen_port = undefined,
+                    .target_port = undefined,
+                };
+                
+                var have_listen = false;
+                var have_target = false;
+                
+                if (jsonGetAliased(mapping_obj, &.{ "listen_port", "src_port", "监听端口" })) |port_v| {
+                    port_mapping.listen_port = try parseJsonPortString(port_v, allocator);
+                    have_listen = true;
+                }
+                
+                if (jsonGetAliased(mapping_obj, &.{ "target_port", "dst_port", "目标端口" })) |port_v| {
+                    port_mapping.target_port = try parseJsonPortString(port_v, allocator);
+                    have_target = true;
+                }
+                
+                if (jsonGetAliased(mapping_obj, &.{ "protocol", "proto", "协议" })) |proto_v| {
+                    const s = try parseJsonString(proto_v);
+                    port_mapping.protocol = try types.parseProtocol(s);
+                }
+                
+                if (!have_listen or !have_target) {
+                    if (have_listen) allocator.free(port_mapping.listen_port);
+                    if (have_target) allocator.free(port_mapping.target_port);
+                    return types.ConfigError.MissingField;
+                }
+                
+                try port_mappings_list.append(port_mapping);
+            }
+        }
+
+        // 验证配置：单端口模式或多端口模式二选一
+        const has_single_port = have_listen_port and have_target_port;
+        const has_port_mappings = port_mappings_list.items.len > 0;
+
+        if (!have_target_address) {
             if (project.remark.len != 0) allocator.free(project.remark);
             return types.ConfigError.MissingField;
+        }
+
+        if (has_single_port == has_port_mappings) {
+            // 两者都有或都没有都是错误
+            if (have_target_address) allocator.free(project.target_address);
+            if (project.remark.len != 0) allocator.free(project.remark);
+            for (port_mappings_list.items) |*pm| pm.deinit(allocator);
+            return types.ConfigError.InvalidValue;
         }
 
         if (src_zones_list.items.len != 0) {
@@ -170,6 +247,10 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         }
         if (dest_zones_list.items.len != 0) {
             project.dest_zones = try dest_zones_list.toOwnedSlice();
+        }
+        
+        if (port_mappings_list.items.len != 0) {
+            project.port_mappings = try port_mappings_list.toOwnedSlice();
         }
 
         try list.append(project);

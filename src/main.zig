@@ -84,11 +84,17 @@ fn applyConfig(allocator: std.mem.Allocator, cfg: config.Config) !void {
             }
 
             std.debug.print("Applying project {d}: {s}\n", .{ i + 1, project.remark });
-            std.debug.print("  Listen: :{d} -> Target: {s}:{d}\n", .{
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-            });
+            if (project.port_mappings.len > 0) {
+                std.debug.print("  Mode: Port Mappings ({d} mapping(s))\n", .{project.port_mappings.len});
+                std.debug.print("  Target: {s}\n", .{project.target_address});
+            } else {
+                std.debug.print("  Mode: Single Port\n", .{});
+                std.debug.print("  Listen: :{d} -> Target: {s}:{d}\n", .{
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                });
+            }
 
             // 应用防火墙规则
             std.debug.print("  Applying firewall rules...\n", .{});
@@ -127,11 +133,17 @@ fn applyConfig(allocator: std.mem.Allocator, cfg: config.Config) !void {
             }
 
             std.debug.print("Applying project {d}: {s}\n", .{ i + 1, project.remark });
-            std.debug.print("  Listen: :{d} -> Target: {s}:{d}\n", .{
-                project.listen_port,
-                project.target_address,
-                project.target_port,
-            });
+            if (project.port_mappings.len > 0) {
+                std.debug.print("  Mode: Port Mappings ({d} mapping(s))\n", .{project.port_mappings.len});
+                std.debug.print("  Target: {s}\n", .{project.target_address});
+            } else {
+                std.debug.print("  Mode: Single Port\n", .{});
+                std.debug.print("  Listen: :{d} -> Target: {s}:{d}\n", .{
+                    project.listen_port,
+                    project.target_address,
+                    project.target_port,
+                });
+            }
 
             // 启动应用层端口转发（如果启用）
             if (project.enable_app_forward) {

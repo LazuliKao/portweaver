@@ -1,0 +1,89 @@
+{
+  "projects": [
+    {
+      "remark": "范围端口转发示例 - Web服务器集群",
+      "target_address": "192.168.1.100",
+      "family": "any",
+      "enable_app_forward": true,
+      "open_firewall_port": true,
+      "add_firewall_forward": false,
+      "port_mappings": [
+        {
+          "listen_port": "8080-8090",
+          "target_port": "80-90",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    {
+      "remark": "多端口映射示例 - 游戏服务器",
+      "target_address": "192.168.1.200",
+      "family": "any",
+      "enable_app_forward": true,
+      "open_firewall_port": true,
+      "add_firewall_forward": false,
+      "port_mappings": [
+        {
+          "listen_port": "25565",
+          "target_port": "25565",
+          "protocol": "tcp"
+        },
+        {
+          "listen_port": "19132",
+          "target_port": "19132",
+          "protocol": "udp"
+        },
+        {
+          "listen_port": "8123",
+          "target_port": "8123",
+          "protocol": "both"
+        }
+      ]
+    },
+    {
+      "remark": "单端口模式示例 - HTTP",
+      "target_address": "127.0.0.1",
+      "listen_port": 8080,
+      "target_port": 80,
+      "protocol": "tcp",
+      "family": "any",
+      "enable_app_forward": true,
+      "open_firewall_port": false,
+      "add_firewall_forward": false
+    },
+    {
+      "remark": "防火墙规则示例 - HTTPS",
+      "listen_port": 8443,
+      "target_address": "192.168.1.10",
+      "target_port": 443,
+      "protocol": "tcp",
+      "family": "any",
+      "enable_app_forward": false,
+      "open_firewall_port": true,
+      "add_firewall_forward": true,
+      "src_zones": [
+        "wan"
+      ],
+      "dest_zones": [
+        "lan"
+      ]
+    },
+    {
+      "remark": "范围端口 + 防火墙转发",
+      "target_address": "192.168.1.50",
+      "family": "ipv4",
+      "enable_app_forward": false,
+      "open_firewall_port": true,
+      "add_firewall_forward": true,
+      "src_zones": ["wan"],
+      "dest_zones": ["lan"],
+      "port_mappings": [
+        {
+          "listen_port": "3000-3010",
+          "target_port": "3000-3010",
+          "protocol": "tcp"
+        }
+      ]
+    }
+  ]
+}

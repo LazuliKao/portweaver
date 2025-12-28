@@ -19,6 +19,22 @@ pub const Protocol = enum {
     udp,
 };
 
+/// 端口映射：单个监听端口到单个目标端口的映射
+pub const PortMapping = struct {
+    /// 监听端口（支持范围如 "8080-8090" 或单个端口如 "8080"）
+    listen_port: []const u8,
+    /// 目标端口（支持范围如 "80-90" 或单个端口如 "80"）
+    target_port: []const u8,
+    /// 协议: TCP+UDP / TCP / UDP
+    protocol: Protocol = .tcp,
+
+    pub fn deinit(self: *PortMapping, allocator: std.mem.Allocator) void {
+        allocator.free(self.listen_port);
+        allocator.free(self.target_port);
+        self.* = undefined;
+    }
+};
+
 /// One port-forwarding project/rule.
 pub const Project = struct {
     /// 是否启用此规则
@@ -33,14 +49,16 @@ pub const Project = struct {
     dest_zones: []const []const u8 = &[_][]const u8{},
     /// 地址族限制: IPv4 和 IPv6 / IPv4 / IPv6
     family: AddressFamily = .any,
-    /// 协议: TCP+UDP / TCP / UDP
+    /// 协议: TCP+UDP / TCP / UDP （仅在使用单端口模式时有效）
     protocol: Protocol = .both,
-    /// 监听端口
+    /// 监听端口（单端口模式，与 port_mappings 互斥）
     listen_port: u16,
     /// 目标地址
     target_address: []const u8,
-    /// 目标端口
+    /// 目标端口（单端口模式，与 port_mappings 互斥）
     target_port: u16,
+    /// 端口映射列表（多端口/范围端口模式，与 listen_port/target_port 互斥）
+    port_mappings: []PortMapping = &[_]PortMapping{},
     /// 打开防火墙端口
     open_firewall_port: bool = true,
     /// 添加防火墙转发
@@ -61,7 +79,19 @@ pub const Project = struct {
             allocator.free(self.dest_zones);
         }
         allocator.free(self.target_address);
+        if (self.port_mappings.len != 0) {
+            for (self.port_mappings) |*pm| pm.deinit(allocator);
+            allocator.free(self.port_mappings);
+        }
         self.* = undefined;
+    }
+
+    /// 检查配置是否有效（单端口模式和多端口模式不能同时使用）
+    pub fn isValid(self: *const Project) bool {
+        const has_single_port = self.listen_port != 0 and self.target_port != 0;
+        const has_port_mappings = self.port_mappings.len > 0;
+        // 必须恰好选择一种模式
+        return (has_single_port and !has_port_mappings) or (!has_single_port and has_port_mappings);
     }
 };
 
@@ -96,6 +126,28 @@ pub fn parsePort(val: []const u8) !u16 {
     return @intCast(port_u32);
 }
 
+/// 验证端口字符串（可以是单个端口如 "8080" 或端口范围如 "8080-8090"）
+pub fn validatePortString(val: []const u8) !void {
+    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+    if (trimmed.len == 0) return ConfigError.InvalidValue;
+
+    // 检查是否是端口范围
+    if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
+        if (dash_pos == 0 or dash_pos == trimmed.len - 1) return ConfigError.InvalidValue;
+
+        const start_str = trimmed[0..dash_pos];
+        const end_str = trimmed[dash_pos + 1 ..];
+
+        const start_port = try parsePort(start_str);
+        const end_port = try parsePort(end_str);
+
+        if (start_port >= end_port) return ConfigError.InvalidValue;
+    } else {
+        // 单个端口
+        _ = try parsePort(trimmed);
+    }
+}
+
 pub fn parseFamily(val: []const u8) !AddressFamily {
     const trimmed = std.mem.trim(u8, val, " \t\r\n");
 
@@ -111,7 +163,7 @@ pub fn parseProtocol(val: []const u8) !Protocol {
     const trimmed = std.mem.trim(u8, val, " \t\r\n");
 
     if (trimmed.len == 0) return .both;
-    if (eqlIgnoreCase(trimmed, "both") or eqlIgnoreCase(trimmed, "tcp+udp") or eqlIgnoreCase(trimmed, "TCP+UDP") or eqlIgnoreCase(trimmed, "tcpudp") or eqlIgnoreCase(trimmed, "TCP和UDP") or eqlIgnoreCase(trimmed, "TCP 与 UDP") or eqlIgnoreCase(trimmed, "TCP 和 UDP")) return .both;
+    if (eqlIgnoreCase(trimmed, "both") or eqlIgnoreCase(trimmed, "tcp+udp") or eqlIgnoreCase(trimmed, "all") or eqlIgnoreCase(trimmed, "TCP+UDP") or eqlIgnoreCase(trimmed, "tcpudp") or eqlIgnoreCase(trimmed, "TCP和UDP") or eqlIgnoreCase(trimmed, "TCP 与 UDP") or eqlIgnoreCase(trimmed, "TCP 和 UDP")) return .both;
     if (eqlIgnoreCase(trimmed, "tcp") or eqlIgnoreCase(trimmed, "TCP")) return .tcp;
     if (eqlIgnoreCase(trimmed, "udp") or eqlIgnoreCase(trimmed, "UDP")) return .udp;
 
