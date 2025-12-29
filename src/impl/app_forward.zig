@@ -310,7 +310,7 @@ pub fn startForwarding(allocator: std.mem.Allocator, project: types.Project) !vo
         for (project.port_mappings) |mapping| {
             try startForwardingForMapping(allocator, project, mapping);
         }
-        
+
         // 主线程等待
         std.Thread.sleep(std.time.ns_per_s * 365 * 24 * 60 * 60); // 1 year
     } else {
@@ -367,15 +367,15 @@ pub fn startForwarding(allocator: std.mem.Allocator, project: types.Project) !vo
 /// 解析端口范围字符串，返回起始和结束端口
 fn parsePortRange(port_str: []const u8) !struct { start: u16, end: u16 } {
     const trimmed = std.mem.trim(u8, port_str, " \t\r\n");
-    
+
     if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
         // 端口范围
         const start_str = trimmed[0..dash_pos];
-        const end_str = trimmed[dash_pos + 1..];
-        
+        const end_str = trimmed[dash_pos + 1 ..];
+
         const start_port = try types.parsePort(start_str);
         const end_port = try types.parsePort(end_str);
-        
+
         return .{ .start = start_port, .end = end_port };
     } else {
         // 单个端口
@@ -392,11 +392,11 @@ fn startForwardingForMapping(
 ) !void {
     const listen_range = try parsePortRange(mapping.listen_port);
     const target_range = try parsePortRange(mapping.target_port);
-    
+
     // 验证端口范围长度一致
     const listen_count = listen_range.end - listen_range.start + 1;
     const target_count = target_range.end - target_range.start + 1;
-    
+
     if (listen_count != target_count) {
         std.debug.print("[Forward] Error: Port range mismatch - listen {d} ports, target {d} ports\n", .{
             listen_count,
@@ -404,13 +404,13 @@ fn startForwardingForMapping(
         });
         return ForwardError.InvalidAddress;
     }
-    
+
     // 为范围内的每个端口启动转发
     var i: u16 = 0;
     while (i < listen_count) : (i += 1) {
         const listen_port = listen_range.start + i;
         const target_port = target_range.start + i;
-        
+
         switch (mapping.protocol) {
             .tcp => {
                 const tcp_thread = try std.Thread.spawn(.{}, startTcpForward, .{

@@ -44,7 +44,7 @@ fn parseJsonPortString(v: std.json.Value, allocator: std.mem.Allocator) ![]const
         .string => |str| str,
         else => return types.ConfigError.InvalidValue,
     };
-    
+
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     try types.validatePortString(trimmed);
     return try allocator.dupe(u8, trimmed);
@@ -74,6 +74,10 @@ fn parseJsonZones(
 }
 
 pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.Config {
+    if (std.fs.cwd().access(path, .{}) == null) {
+        std.debug.print("File not found: {s}\n", .{path});
+        return types.ConfigError.FileNotFound;
+    }
     const json_text = std.fs.cwd().readFileAlloc(allocator, path, 1 << 20) catch return types.ConfigError.JsonParseError;
     defer allocator.free(json_text);
 
@@ -187,40 +191,40 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         // 解析 port_mappings 数组
         if (jsonGetAliased(obj, &.{ "port_mappings", "forwards", "端口映射" })) |v| {
             if (v != .array) return types.ConfigError.InvalidValue;
-            
+
             for (v.array.items) |mapping_item| {
                 if (mapping_item != .object) return types.ConfigError.InvalidValue;
                 const mapping_obj = mapping_item.object;
-                
+
                 var port_mapping = types.PortMapping{
                     .listen_port = undefined,
                     .target_port = undefined,
                 };
-                
+
                 var have_listen = false;
                 var have_target = false;
-                
+
                 if (jsonGetAliased(mapping_obj, &.{ "listen_port", "src_port", "监听端口" })) |port_v| {
                     port_mapping.listen_port = try parseJsonPortString(port_v, allocator);
                     have_listen = true;
                 }
-                
+
                 if (jsonGetAliased(mapping_obj, &.{ "target_port", "dst_port", "目标端口" })) |port_v| {
                     port_mapping.target_port = try parseJsonPortString(port_v, allocator);
                     have_target = true;
                 }
-                
+
                 if (jsonGetAliased(mapping_obj, &.{ "protocol", "proto", "协议" })) |proto_v| {
                     const s = try parseJsonString(proto_v);
                     port_mapping.protocol = try types.parseProtocol(s);
                 }
-                
+
                 if (!have_listen or !have_target) {
                     if (have_listen) allocator.free(port_mapping.listen_port);
                     if (have_target) allocator.free(port_mapping.target_port);
                     return types.ConfigError.MissingField;
                 }
-                
+
                 try port_mappings_list.append(port_mapping);
             }
         }
@@ -248,7 +252,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         if (dest_zones_list.items.len != 0) {
             project.dest_zones = try dest_zones_list.toOwnedSlice();
         }
-        
+
         if (port_mappings_list.items.len != 0) {
             project.port_mappings = try port_mappings_list.toOwnedSlice();
         }
