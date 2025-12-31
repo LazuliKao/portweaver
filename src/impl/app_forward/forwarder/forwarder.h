@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "uv.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,12 @@ typedef enum {
 typedef struct tcp_forwarder tcp_forwarder_t;
 typedef struct udp_forwarder udp_forwarder_t;
 
+// Internal forward declaration for UDP client session
+typedef struct udp_client_session udp_client_session_t;
+
+// Expose an implementation alias used by the C file
+typedef struct udp_forwarder udp_forwarder_t_impl;
+
 // Memory allocator callbacks (for Zig allocator integration)
 typedef void* (*alloc_fn)(void* ctx, size_t size);
 typedef void (*free_fn)(void* ctx, void* ptr);
@@ -28,6 +35,20 @@ typedef struct {
     alloc_fn alloc;
     free_fn free;
 } allocator_t;
+
+// Full UDP forwarder definition (kept here so C code can access members)
+struct udp_forwarder {
+	allocator_t *allocator;
+	allocator_t allocator_storage;
+	uv_loop_t *loop;
+	uv_udp_t server;
+	char *target_address;
+	uint16_t target_port;
+	addr_family_t family;
+	int running;
+	udp_client_session_t *sessions;
+	struct sockaddr_storage cached_dest_addr;
+};
 
 // TCP Forwarder API
 tcp_forwarder_t* tcp_forwarder_create(
