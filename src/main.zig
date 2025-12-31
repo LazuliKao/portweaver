@@ -7,7 +7,50 @@ const Io = std.Io;
 // 仅在 UCI 模式下导入 UCI 相关模块
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
+pub fn test1() !void {
+    const network = @import("impl/network.zig");
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // get the name of the server
+    var args_iter = try std.process.argsWithAllocator(allocator);
+    defer args_iter.deinit();
+
+    _ = args_iter.next() orelse return error.MissingArgument;
+
+    // const server_name = args_iter.next() orelse "Server Name";
+
+    // Create a UDP socket
+    try network.init();
+    defer network.deinit();
+    var sock = try network.Socket.create(.ipv4, .udp);
+    defer sock.close();
+
+    const endpoint = network.EndPoint{
+        .address = network.Address{
+            .ipv4 = network.Address.IPv4.any,
+        },
+        .port = 8080,
+    };
+
+    // Setup the readloop
+    std.debug.print("Sending UDP messages to multicast address {f}\n", .{endpoint});
+    var threaded: Io.Threaded = .init_single_threaded;
+    // var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    while (true) {
+        try sock.bind(endpoint);
+        // try sock.listen(endpoint);
+        // _ = try sock.sendTo(endpoint, server_name);
+        io.sleep(std.Io.Duration.fromSeconds(1), .awake) catch {};
+    }
+}
 pub fn main() !void {
+    try test1();
+
     const GPAType = std.heap.GeneralPurposeAllocator(.{});
     var gpa: ?GPAType = null;
     // 默认使用 c_allocator
@@ -203,3 +246,5 @@ fn startForwardingThread(io: Io, allocator: std.mem.Allocator, project: config.P
         }
     };
 }
+
+// test "test" {}

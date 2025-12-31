@@ -1,9 +1,9 @@
 const std = @import("std");
 const Io = std.Io;
-const net = Io.net;
-const posix = std.posix;
-const builtin = @import("builtin");
 const types = @import("../config/types.zig");
+const tcp = @import("forwarders/tcp.zig");
+const udp = @import("forwarders/udp.zig");
+
 pub const ForwardError = error{
     ListenFailed,
     ConnectFailed,
@@ -12,7 +12,6 @@ pub const ForwardError = error{
     InvalidAddress,
 };
 
-const BUFFER_SIZE = 1 * 1024;
 const THREAD_STACK_SIZE = 64 * 1024;
 
 pub inline fn getThreadConfig() std.Thread.SpawnConfig {
@@ -20,172 +19,6 @@ pub inline fn getThreadConfig() std.Thread.SpawnConfig {
         .stack_size = THREAD_STACK_SIZE,
     };
 }
-/// TCP 转发器
-pub const TcpForwarder = struct {
-    allocator: std.mem.Allocator,
-    listen_port: u16,
-    target_address: []const u8,
-    target_port: u16,
-    family: types.AddressFamily,
-    server: ?net.Server,
-    running: std.atomic.Value(bool),
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        listen_port: u16,
-        target_address: []const u8,
-        target_port: u16,
-        family: types.AddressFamily,
-    ) TcpForwarder {
-        return .{
-            .allocator = allocator,
-            .listen_port = listen_port,
-            .target_address = target_address,
-            .target_port = target_port,
-            .family = family,
-            .server = null,
-            .running = std.atomic.Value(bool).init(false),
-        };
-    }
-
-    pub fn start(self: *TcpForwarder, io: Io) !void {
-        self.running.store(true, .seq_cst);
-
-        const address = switch (self.family) {
-            .ipv4 => net.IpAddress.parseIp4("0.0.0.0", self.listen_port) catch return ForwardError.ListenFailed,
-            .ipv6 => net.IpAddress.parseIp6("::", self.listen_port) catch return ForwardError.ListenFailed,
-            .any => net.IpAddress.parseIp6("::", self.listen_port) catch
-                net.IpAddress.parseIp4("0.0.0.0", self.listen_port) catch return ForwardError.ListenFailed,
-        };
-
-        var server = try address.listen(io, .{
-            .reuse_address = true,
-        });
-
-        self.server = server;
-
-        std.debug.print("[TCP] Listening on port {d}, forwarding to {s}:{d}\n", .{
-            self.listen_port,
-            self.target_address,
-            self.target_port,
-        });
-
-        while (self.running.load(.seq_cst)) {
-            // 接受连接
-            const stream = server.accept(io) catch |err| {
-                if (self.running.load(.seq_cst)) {
-                    std.debug.print("[TCP] Accept error: {any}\n", .{err});
-                }
-                continue;
-            };
-
-            const thread = std.Thread.spawn(getThreadConfig(), handleTcpConnection, .{
-                io,
-                stream,
-                self.target_address,
-                self.target_port,
-            }) catch |err| {
-                std.debug.print("[TCP] Failed to spawn thread: {any}\n", .{err});
-                stream.close(io);
-                continue;
-            };
-            thread.detach();
-        }
-    }
-
-    pub fn stop(self: *TcpForwarder) void {
-        self.running.store(false, .seq_cst);
-        if (self.server) |*server| {
-            server.deinit();
-            self.server = null;
-        }
-    }
-
-    fn handleTcpConnection(
-        io: Io,
-        stream: net.Stream,
-        target_address: []const u8,
-        target_port: u16,
-    ) void {
-        defer stream.close(io);
-
-        const client_addr = stream.socket.address;
-        std.debug.print("[TCP] New connection from {any}\n", .{client_addr});
-
-        // 连接到目标服务器
-        const address = Io.net.IpAddress.parse(target_address, target_port) catch |err| {
-            std.debug.print("[TCP] Invalid target address {s}:{d}: {any}\n", .{ target_address, target_port, err });
-            return;
-        };
-
-        const target = address.connect(io, .{ .mode = .stream }) catch |err| {
-            std.debug.print("[TCP] Failed to connect to target {s}:{d}: {any}\n", .{ target_address, target_port, err });
-            return;
-        };
-        defer target.close(io);
-
-        std.debug.print("[TCP] Connected to target {s}:{d}\n", .{ target_address, target_port });
-
-        var client_stream = stream;
-        var target_stream = target;
-
-        // 启动一个线程负责 "Client -> Target"，当前线程负责 "Target -> Client"。
-
-        const forward_thread = std.Thread.spawn(getThreadConfig(), forwardData, .{ &client_stream, &target_stream, "client->target" }) catch |err| {
-            std.debug.print("[TCP] Failed to spawn forward thread: {any}\n", .{err});
-            return;
-        };
-        // 在当前线程执行反向转发
-        forwardData(&target_stream, &client_stream, "target->client");
-
-        // 等待发送线程结束（通常是因为一方关闭了连接）
-        forward_thread.join();
-    }
-
-    fn forwardData(src: *net.Stream, dst: *net.Stream, direction: []const u8) void {
-        var buffer: [BUFFER_SIZE]u8 = undefined;
-
-        while (true) {
-            const n = streamRead(src, &buffer) catch |err| {
-                if (err != error.EndOfStream and err != error.ConnectionReset and err != error.BrokenPipe) {
-                    // 仅打印非正常关闭的错误
-                    std.debug.print("[TCP] Read error ({s}): {any}\n", .{ direction, err });
-                }
-                break;
-            };
-
-            dstWriteAll(dst, buffer[0..n]) catch |err| {
-                if (err != error.BrokenPipe and err != error.ConnectionReset) {
-                    std.debug.print("[TCP] Write error ({s}): {any}\n", .{ direction, err });
-                }
-                break;
-            };
-        }
-    }
-
-    fn streamRead(stream: *net.Stream, buffer: []u8) !usize {
-        // if (builtin.os.tag == .windows) {
-        const n = posix.recv(stream.socket.handle, buffer, 0) catch |err| return err;
-        if (n == 0) return error.EndOfStream;
-        return n;
-        // }
-        // Io.Reader.readSliceShort(r: *Reader, buffer: []u8)
-        // return stream.reader( buffer);
-    }
-
-    fn dstWriteAll(stream: *net.Stream, data: []const u8) !void {
-        // if (builtin.os.tag == .windows) {
-        var sent: usize = 0;
-        while (sent < data.len) {
-            const n = posix.send(stream.socket.handle, data[sent..], 0) catch |err| return err;
-            if (n == 0) return error.Unexpected;
-            sent += n;
-        }
-        return;
-        // }
-        // try stream.writeAll(data);
-    }
-};
 
 // /// UDP 转发器
 // pub const UdpForwarder = struct {
@@ -319,7 +152,6 @@ pub const TcpForwarder = struct {
 //         }
 //     }
 // };
-
 /// 启动一个端口转发项目
 pub fn startForwarding(io: Io, allocator: std.mem.Allocator, project: types.Project) !void {
     if (!project.enable_app_forward) {
@@ -344,7 +176,7 @@ pub fn startForwarding(io: Io, allocator: std.mem.Allocator, project: types.Proj
         // 单端口模式：使用原有逻辑
         switch (project.protocol) {
             .tcp => {
-                var tcp_forwarder = TcpForwarder.init(
+                var tcp_forwarder = tcp.TcpForwarder.init(
                     allocator,
                     project.listen_port,
                     project.target_address,
@@ -354,15 +186,15 @@ pub fn startForwarding(io: Io, allocator: std.mem.Allocator, project: types.Proj
                 try tcp_forwarder.start(io);
             },
             .udp => {
-                //TODO: UDP
-                // var udp_forwarder = UdpForwarder.init(
+
+                // var udp_forwarder = udp.UdpForwarder.init(
                 //     allocator,
                 //     project.listen_port,
                 //     project.target_address,
                 //     project.target_port,
                 //     project.family,
                 // );
-                // defer udp_forwarder.deinit();
+                // defer udp_forwarder.stop();
                 // try udp_forwarder.start();
             },
             .both => {
@@ -498,7 +330,7 @@ fn startTcpForward(
     family: types.AddressFamily,
 ) void {
     // 这是一个长时间运行的线程，栈大小保持默认或者稍微减小均可
-    var tcp_forwarder = TcpForwarder.init(allocator, listen_port, target_address, target_port, family);
+    var tcp_forwarder = tcp.TcpForwarder.init(allocator, listen_port, target_address, target_port, family);
     tcp_forwarder.start(io) catch |err| {
         std.debug.print("[TCP] Forward error: {any}\n", .{err});
     };
@@ -516,9 +348,7 @@ fn startUdpForward(
     _ = target_address;
     _ = target_port;
     _ = family;
-    //TODO: UDP
-    // var udp_forwarder = UdpForwarder.init(allocator, listen_port, target_address, target_port, family);
-    // defer udp_forwarder.deinit();
+    // var udp_forwarder = udp.UdpForwarder.init(allocator, listen_port, target_address, target_port, family);
     // udp_forwarder.start() catch |err| {
     //     std.debug.print("[UDP] Forward error: {any}\n", .{err});
     // };

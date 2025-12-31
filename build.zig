@@ -16,11 +16,11 @@ pub fn build(b: *std.Build) void {
     // what target to build for. Here we set the default to x86_64-linux-musl
     // for OpenWrt compatibility, but can be overridden.
     const target = b.standardTargetOptions(.{
-        .default_target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .musl,
-        },
+        // .default_target = .{
+        //     .cpu_arch = .x86_64,
+        //     .os_tag = .linux,
+        //     .abi = .musl,
+        // },
     });
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
@@ -52,7 +52,6 @@ pub fn build(b: *std.Build) void {
     });
 
     mod.addImport("build_options", options_mod);
-
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -97,10 +96,13 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "portweaver", .module = mod },
                 .{ .name = "build_options", .module = options_mod },
+                .{
+                    .name = "network",
+                    .module = b.dependency("network", .{}).module("network"),
+                },
             },
         }),
     });
-
     // Add C include paths for UCI library headers
     exe.root_module.addIncludePath(b.path("deps/uci"));
 

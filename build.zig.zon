@@ -25,13 +25,21 @@
     .fingerprint = 0x1a28099a7a2a2ba3, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0-dev",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .network = .{
+            .url = "https://github.com/dtasada/zig-network/archive/a4380b1ad79af484dd4e9bd7f72ecd957da545e2.tar.gz",
+            .hash = "network-0.1.0-Pm-Agq0xAQAgowlYG1vobWdv7WnaQjfxQi-xUiI6BSM5",
+        },
+        .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/archive/46fa9b74bafb0b9c151a8035fdb6b01ec68581e4.tar.gz",
+            .hash = "libxev-0.0.0-86vtc0IbEwDsp-ljrhdEWhf2TYBvSrqqgNAPQwtfX8Eg",
+        },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
