@@ -227,8 +227,9 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("src"));
 
     // Add C forwarder implementation
+    exe.addIncludePath(b.path("src/impl/app_forward/forwarder"));
     exe.addCSourceFile(.{
-        .file = b.path("src/forwarder.c"),
+        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
         .flags = &.{},
     });
 
