@@ -141,9 +141,14 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
 pub fn build(b: *std.Build) void {
-    const uci_mode = b.option(bool, "uci", "UCI Mode") orelse false;
     const options = b.addOptions();
-    options.addOption(bool, "uci_mode", uci_mode);
+
+    const uci = b.option(bool, "uci", "UCI Mode") orelse false;
+    options.addOption(bool, "uci_mode", uci);
+
+    const ubus = b.option(bool, "ubus", "Ubus Support") orelse false;
+    options.addOption(bool, "ubus_mode", ubus);
+
     const options_mod = options.createModule();
 
     // Standard target options allow the person running `zig build` to choose
@@ -257,6 +262,12 @@ pub fn build(b: *std.Build) void {
 
     // Add C include paths for UCI library headers
     exe.addIncludePath(b.path("deps/uci"));
+    // Add C include paths for Ubus library headers
+    exe.addAfterIncludePath(b.path("deps/openwrt-tools"));
+    exe.addSystemIncludePath(b.path("deps/openwrt-tools"));
+    exe.addSystemFrameworkPath(b.path("deps/openwrt-tools"));
+    exe.addIncludePath(b.path("deps/openwrt-tools"));
+    exe.addIncludePath(b.path("deps/ubus"));
 
     // For dynamic linking at runtime
     exe.linkage = .dynamic;
