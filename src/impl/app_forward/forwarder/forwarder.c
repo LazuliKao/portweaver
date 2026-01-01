@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
-#undef DEBUG 
+#define DEBUG
 #ifdef DEBUG
 // --- Memory Allocator Helpers ---
 
@@ -91,7 +91,7 @@ static int alloc_map_remove(void *user_ptr, size_t *size_out, const char **file_
             else
                 alloc_map_head = cur->next;
             uv_mutex_unlock(&alloc_map_lock);
-            fprintf(stderr, "[alloc_map_remove] removing user=%p size=%zu current_size=%d (%s:%d)\n", user_ptr, cur->size, link_list_len(alloc_map_head), cur->file, cur->line);
+            // fprintf(stderr, "[alloc_map_remove] removing user=%p size=%zu current_size=%d (%s:%d)\n", user_ptr, cur->size, link_list_len(alloc_map_head), cur->file, cur->line);
             free(cur);
             return 1;
         }
@@ -116,11 +116,11 @@ static void *data_alloc(size_t size, const char *file, int line)
     /* Track ownership */
     alloc_map_add(user_ptr, size, file, line);
 
-    fprintf(stderr, "[data_alloc] alloc user=%p header=%p size=%zu (%s:%d) (malloc)\n", user_ptr, (void *)p, size, file, line);
+    // fprintf(stderr, "[data_alloc] alloc user=%p header=%p size=%zu (%s:%d) (malloc)\n", user_ptr, (void *)p, size, file, line);
 
     return user_ptr;
 }
-
+static int period = 1;
 static void data_free(void *ptr, const char *file, int line)
 {
     if (!ptr)
@@ -159,7 +159,19 @@ static void data_free(void *ptr, const char *file, int line)
     }
     else
     {
-        fprintf(stderr, "[data_free] ptr %p removed from alloc_map (size=%zu at %s:%d)\n", ptr, tracked_size, tracked_file ? tracked_file : "?", tracked_line);
+        // fprintf(stderr, "[data_free] ptr %p removed from alloc_map (size=%zu at %s:%d)\n", ptr, tracked_size, tracked_file ? tracked_file : "?", tracked_line);
+        if (period++ > 10)
+        {
+            period = 0;
+            fprintf(stderr, "[data_free] alloc_map current size: %d\n", link_list_len(alloc_map_head));
+            for (alloc_entry_t *e = alloc_map_head; e != NULL; e = e->next)
+            {
+                // track the magic number
+                int current_magic = 0;
+                memcpy(&current_magic, (uint8_t *)e->ptr - sizeof(uint32_t) * 2, sizeof(uint32_t));
+                fprintf(stderr, "  -> user=%p size=%zu (%s:%d) magic=0x%08x\n", e->ptr, e->size, e->file ? e->file : "?", e->line, current_magic);
+            }
+        }
     }
 
     magic = 0;
@@ -546,7 +558,15 @@ typedef struct udp_client_session
     int client_addr_len;
     struct udp_forwarder *fwd;
     struct udp_client_session *next;
+    uv_timer_t timeout_timer; // timer for session timeout
+    uint64_t last_activity;   // timestamp of last activity (milliseconds)
 } udp_client_session_t;
+
+// Session timeout in milliseconds (5 minutes of inactivity)
+#define UDP_SESSION_TIMEOUT_MS 300000
+
+static void udp_session_close_cb(uv_handle_t *handle);
+static void udp_session_timeout_cb(uv_timer_t *timer);
 
 static void udp_on_send(uv_udp_send_t *req, int status)
 {
@@ -559,6 +579,70 @@ static void udp_on_send(uv_udp_send_t *req, int status)
     if (req->data)
         DATA_FREE(fwd, req->data);
     DATA_FREE(fwd, fw);
+}
+
+// Remove session from forwarder's session list
+static void udp_session_remove(udp_forwarder_t_impl *fwd, udp_client_session_t *session)
+{
+    udp_client_session_t **pp = &fwd->sessions;
+    while (*pp)
+    {
+        if (*pp == session)
+        {
+            *pp = session->next;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+// Close callback for UDP session (called after all handles are closed)
+static void udp_session_close_cb(uv_handle_t *handle)
+{
+    if (!handle || !handle->data)
+        return;
+    udp_client_session_t *session = (udp_client_session_t *)handle->data;
+    
+    // Check if this is the sock handle (the last one to close)
+    if (handle == (uv_handle_t *)&session->sock)
+    {
+        // Remove from session list and free
+        udp_session_remove((udp_forwarder_t_impl *)session->fwd, session);
+        DATA_FREE(session->fwd, session);
+    }
+}
+
+// Timer callback to check and cleanup inactive sessions
+static void udp_session_timeout_cb(uv_timer_t *timer)
+{
+    udp_client_session_t *session = (udp_client_session_t *)timer->data;
+    if (!session)
+        return;
+    
+    uint64_t now = uv_now(timer->loop);
+    uint64_t elapsed = now - session->last_activity;
+    
+    if (elapsed >= UDP_SESSION_TIMEOUT_MS)
+    {
+        fprintf(stderr, "[udp_session_timeout] closing inactive session (elapsed=%llu ms)\n", (unsigned long long)elapsed);
+        
+        // Stop receiving on the socket
+        uv_udp_recv_stop(&session->sock);
+        
+        // Close timer first
+        if (!uv_is_closing((uv_handle_t *)&session->timeout_timer))
+            uv_close((uv_handle_t *)&session->timeout_timer, NULL);
+        
+        // Close socket (will trigger udp_session_close_cb)
+        if (!uv_is_closing((uv_handle_t *)&session->sock))
+            uv_close((uv_handle_t *)&session->sock, udp_session_close_cb);
+    }
+    else
+    {
+        // Reschedule timer for remaining time
+        uint64_t remaining = UDP_SESSION_TIMEOUT_MS - elapsed;
+        uv_timer_start(&session->timeout_timer, udp_session_timeout_cb, remaining, 0);
+    }
 }
 
 static void tcp_walk_close_cb(uv_handle_t *handle, void *arg)
@@ -615,6 +699,9 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
     udp_client_session_t *session = (udp_client_session_t *)handle->data;
     if (nread > 0)
     {
+        // Update activity timestamp
+        session->last_activity = uv_now(handle->loop);
+        
         // forward to original client via the server socket
         fwd_udp_send_req_t *fw = (fwd_udp_send_req_t *)DATA_ALLOC(session->fwd, sizeof(fwd_udp_send_req_t));
         if (!fw)
@@ -658,6 +745,15 @@ static udp_client_session_t *udp_session_create(udp_forwarder_t_impl *fwd, const
     memcpy(&s->client_addr, client_addr, addr_len);
     uv_udp_init(fwd->loop, &s->sock);
     s->sock.data = s;
+    
+    // Initialize timeout timer
+    uv_timer_init(fwd->loop, &s->timeout_timer);
+    s->timeout_timer.data = s;
+    s->last_activity = uv_now(fwd->loop);
+    
+    // Start timeout timer
+    uv_timer_start(&s->timeout_timer, udp_session_timeout_cb, UDP_SESSION_TIMEOUT_MS, 0);
+    
     // bind ephemeral port (0)
     if (fwd->family == ADDR_FAMILY_IPV6)
     {
@@ -707,6 +803,11 @@ static void udp_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
                 DATA_FREE((struct udp_forwarder *)fwd, buf->base);
                 return;
             }
+        }
+        else
+        {
+            // Update activity timestamp for existing session
+            session->last_activity = uv_now(fwd->loop);
         }
 
         fwd_udp_send_req_t *fw = (fwd_udp_send_req_t *)DATA_ALLOC((struct udp_forwarder *)fwd, sizeof(fwd_udp_send_req_t));
@@ -815,14 +916,10 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
     // run loop until all handles closed
     while (uv_loop_alive(fwd->loop))
         uv_run(fwd->loop, UV_RUN_DEFAULT);
-    // free session structs (their handles are closed)
-    udp_client_session_t *it = fwd->sessions;
-    while (it)
-    {
-        udp_client_session_t *next = it->next;
-        DATA_FREE(fwd, it);
-        it = next;
-    }
+    // free session structs (their handles are closed by uv_walk)
+    // Note: sessions will be freed by udp_session_close_cb when their handles close
+    // Just clear the list pointer to avoid dangling references
+    fwd->sessions = NULL;
     if (fwd->target_address)
         free(fwd->target_address);
     // [FIX] close and free loop
