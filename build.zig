@@ -263,9 +263,7 @@ pub fn build(b: *std.Build) void {
     // Add C include paths for UCI library headers
     exe.addIncludePath(b.path("deps/uci"));
     // Add C include paths for Ubus library headers
-    exe.addAfterIncludePath(b.path("deps/openwrt-tools"));
-    exe.addSystemIncludePath(b.path("deps/openwrt-tools"));
-    exe.addSystemFrameworkPath(b.path("deps/openwrt-tools"));
+    exe.addIncludePath(b.path("deps/fix"));
     exe.addIncludePath(b.path("deps/openwrt-tools"));
     exe.addIncludePath(b.path("deps/ubus"));
 
