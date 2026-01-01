@@ -37,12 +37,12 @@ pub const TcpForwarder = struct {
             c_family,
             if (enable_stats) 1 else 0,
         );
-        
+
         if (forwarder_ptr == null) {
             std.debug.print("[TCP] ERROR: Failed to create TCP forwarder on port {d}\n", .{listen_port});
             return ForwardError.ListenFailed;
         }
-        
+
         self.forwarder = forwarder_ptr.?;
 
         return self;
