@@ -76,8 +76,15 @@ const RuntimeState = struct {
         for (self.projects) |p| {
             if (p.enabled) running += 1;
             active_ports += p.active_ports;
-            bytes_in += p.bytes_in;
-            bytes_out += p.bytes_out;
+            // on-demand stats: query forwarder handles for real-time traffic data
+            if (p.enabled and std.mem.eql(u8, p.status, STATUS_RUNNING)) {
+                const s = app_forward.getProjectStats(p.id);
+                bytes_in += s.bytes_in;
+                bytes_out += s.bytes_out;
+            } else {
+                bytes_in += p.bytes_in;
+                bytes_out += p.bytes_out;
+            }
         }
 
         const status: [:0]const u8 = if (self.projects.len == 0)
