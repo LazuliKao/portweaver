@@ -48,6 +48,12 @@ pub fn main() !void {
         while (true) {
             std.Thread.sleep(std.time.ns_per_s);
         }
+    } else if (build_options.ubus_mode) {
+        // 如果只有 UBUS 模式，保持程序运行
+        std.log.info("UBUS server is running. Press Ctrl+C to stop.\n", .{});
+        while (true) {
+            std.Thread.sleep(std.time.ns_per_s);
+        }
     }
 }
 /// 根据编译选项和命令行参数加载配置

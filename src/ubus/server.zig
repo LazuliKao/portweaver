@@ -13,7 +13,7 @@ const ProjectState = struct {
     remark: [:0]u8,
     enabled: bool,
     status: [:0]const u8,
-    active_sessions: u32 = 0,
+    active_ports: u32 = 0,
     bytes_in: u64 = 0,
     bytes_out: u64 = 0,
     last_changed: u64,
@@ -22,7 +22,7 @@ const ProjectState = struct {
 const GlobalSnapshot = struct {
     status: [:0]const u8,
     total_projects: u32,
-    active_sessions: u32,
+    active_ports: u32,
     total_bytes_in: u64,
     total_bytes_out: u64,
     uptime: u64,
@@ -68,12 +68,12 @@ const RuntimeState = struct {
         defer self.mutex.unlock();
 
         var running: usize = 0;
-        var active_sessions: u32 = 0;
+        var active_ports: u32 = 0;
         var bytes_in: u64 = 0;
         var bytes_out: u64 = 0;
         for (self.projects) |p| {
             if (p.enabled) running += 1;
-            active_sessions += p.active_sessions;
+            active_ports += p.active_ports;
             bytes_in += p.bytes_in;
             bytes_out += p.bytes_out;
         }
@@ -91,7 +91,7 @@ const RuntimeState = struct {
         return .{
             .status = status,
             .total_projects = @intCast(self.projects.len),
-            .active_sessions = active_sessions,
+            .active_ports = active_ports,
             .total_bytes_in = bytes_in,
             .total_bytes_out = bytes_out,
             .uptime = now - self.start_ts,
@@ -116,7 +116,7 @@ const method_names = struct {
 const field_names = struct {
     pub const status: [:0]const u8 = "status";
     pub const total_projects: [:0]const u8 = "total_projects";
-    pub const active_sessions: [:0]const u8 = "active_sessions";
+    pub const active_ports: [:0]const u8 = "active_ports";
     pub const total_bytes_in: [:0]const u8 = "total_bytes_in";
     pub const total_bytes_out: [:0]const u8 = "total_bytes_out";
     pub const uptime: [:0]const u8 = "uptime";
@@ -228,7 +228,7 @@ fn handleGetStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.u
 
     addString(&buf, field_names.status, snapshot.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addU32(&buf, field_names.total_projects, snapshot.total_projects) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-    addU32(&buf, field_names.active_sessions, snapshot.active_sessions) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU32(&buf, field_names.active_ports, snapshot.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addU64(&buf, field_names.total_bytes_in, snapshot.total_bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addU64(&buf, field_names.total_bytes_out, snapshot.total_bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addU64(&buf, field_names.uptime, snapshot.uptime) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -263,7 +263,7 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         addString(&buf, field_names.remark, p.remark) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addBool(&buf, field_names.enabled, p.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.status, p.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addU32(&buf, field_names.active_sessions, p.active_sessions) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU32(&buf, field_names.active_ports, p.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.bytes_in, p.bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.bytes_out, p.bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.last_changed, p.last_changed) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
