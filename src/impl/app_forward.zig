@@ -19,7 +19,7 @@ pub const UdpForwarder = udp_uv.UdpForwarder;
 // Helper: create and initialize a TCP forwarder. If fatal_on_fail is true, it will set startup status on failure.
 fn createTcpForwarder(
     allocator: std.mem.Allocator,
-    projectHandle: *project_status.ProjectHandles,
+    projectHandle: *project_status.ProjectHandle,
     listen_port: u16,
     target_address: []const u8,
     target_port: u16,
@@ -38,7 +38,7 @@ fn createTcpForwarder(
 
 fn createUdpForwarder(
     allocator: std.mem.Allocator,
-    projectHandle: *project_status.ProjectHandles,
+    projectHandle: *project_status.ProjectHandle,
     listen_port: u16,
     target_address: []const u8,
     target_port: u16,
@@ -55,13 +55,13 @@ fn createUdpForwarder(
     return fwd;
 }
 
-fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandles, fwd: *TcpForwarder) !void {
+fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandle, fwd: *TcpForwarder) !void {
     try projectHandle.registerTcpHandle(fwd);
     const tcp_thread = try std.Thread.spawn(getThreadConfig(), startTcpForward, .{fwd});
     tcp_thread.detach();
 }
 
-fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandles, fwd: *UdpForwarder) !void {
+fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, fwd: *UdpForwarder) !void {
     try projectHandle.registerUdpHandle(fwd);
     const udp_thread = try std.Thread.spawn(getThreadConfig(), startUdpForward, .{fwd});
     udp_thread.detach();
@@ -120,7 +120,7 @@ fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandles, fwd: *UdpF
 // }
 
 /// Start a port forwarding project
-pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandles) !void {
+pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
     if (!projectHandle.cfg.enable_app_forward) {
         return;
     }
@@ -154,7 +154,7 @@ fn parsePortRange(port_str: []const u8) !common.PortRange {
 /// 为单个端口映射启动转发
 fn startForwardingForMapping(
     allocator: std.mem.Allocator,
-    projectHandle: *project_status.ProjectHandles,
+    projectHandle: *project_status.ProjectHandle,
     mapping: types.PortMapping,
 ) !void {
     const listen_range = try parsePortRange(mapping.listen_port);

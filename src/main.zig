@@ -35,7 +35,7 @@ pub fn main() !void {
     @import("impl/app_forward/uv.zig").printVersion();
     std.debug.print("PortWeaver starting with {d} project(s)...\n", .{cfg.projects.len});
 
-    var handles: std.array_list.Managed(project_status.ProjectHandles) = .init(allocator);
+    var handles: std.array_list.Managed(project_status.ProjectHandle) = .init(allocator);
     defer {
         project_status.stopAll(&handles);
     }
@@ -99,12 +99,12 @@ fn parseConfigFile(args: []const []const u8) ![]const u8 {
     std.debug.print("No config file specified, using default: config.json\n", .{});
     return "config.json";
 }
-fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandles), project: config.Project) !void {
+fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandle), project: config.Project) !void {
     if (!project.enabled) {
         std.debug.print("Project {d} ({s}) is disabled, skipping.\n", .{ id + 1, project.remark });
         return;
     }
-    const handle: project_status.ProjectHandles = .init(allocator, id, project);
+    const handle: project_status.ProjectHandle = .init(allocator, id, project);
     handles.append(handle) catch |err| {
         std.debug.print("Error: Failed to append project handles: {any}\n", .{err});
         return err;
@@ -115,7 +115,7 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_lis
     }
 }
 /// 应用配置：设置防火墙规则并启动应用层转发
-fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandles), cfg: config.Config) !bool {
+fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandle), cfg: config.Config) !bool {
     var has_app_forward = false;
 
     // 初始化 UCI 上下文（如果需要配置防火墙）
@@ -221,7 +221,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
 }
 
 /// 在独立线程中启动转发
-fn startForwardingThread(allocator: std.mem.Allocator, handle: *project_status.ProjectHandles) void {
+fn startForwardingThread(allocator: std.mem.Allocator, handle: *project_status.ProjectHandle) void {
     std.debug.print("[FORWARDING_THREAD] Starting for project {d} ({s}), enable_app_forward={}, enable_stats={}\n", .{ handle.id, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_stats });
     app_forward.startForwarding(allocator, handle) catch |err| {
         std.debug.print("Error: Failed to start forwarding for {s}: {any}\n", .{ handle.cfg.remark, err });

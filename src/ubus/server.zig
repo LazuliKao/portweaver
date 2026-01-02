@@ -21,13 +21,13 @@ const GlobalSnapshot = struct {
 const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
-    projects: std.array_list.Managed(project_status.ProjectHandles),
+    projects: std.array_list.Managed(project_status.ProjectHandle),
     remarks: [][:0]const u8,
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Thread.Mutex = .{},
 
-    pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandles)) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         const now = currentTs();
         state.* = .{
@@ -134,7 +134,7 @@ const field_names = struct {
     pub const error_code: [:0]const u8 = "error_code";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandles)) !void {
+pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
     if (g_state != null) return;
     const state = try RuntimeState.init(allocator, projects);
     g_state = state;
