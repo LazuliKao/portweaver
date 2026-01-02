@@ -40,7 +40,7 @@ pub fn main() !void {
     project_status.stopAll(&handles);
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, cfg.projects) catch |err| {
+        ubus_server.start(allocator, handles) catch |err| {
             std.debug.print("Warning: Failed to start ubus server: {any}\n", .{err});
         };
     }

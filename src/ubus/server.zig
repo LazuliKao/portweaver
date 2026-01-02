@@ -4,7 +4,7 @@ const app_forward = @import("../impl/app_forward.zig");
 const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
 const c = ubox.c;
-
+const project_status = @import("../impl/project_status.zig");
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
 const STATUS_DEGRADED: [:0]const u8 = "degraded";
@@ -21,28 +21,28 @@ const GlobalSnapshot = struct {
 const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
-    projects: []const types.Project,
+    projects: std.array_list.Managed(project_status.ProjectHandles),
     remarks: [][:0]const u8,
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Thread.Mutex = .{},
 
-    pub fn init(allocator: std.mem.Allocator, projects: []const types.Project) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandles)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         const now = currentTs();
         state.* = .{
             .allocator = allocator,
             .start_ts = now,
             .projects = projects,
-            .remarks = try allocator.alloc([:0]const u8, projects.len),
-            .enabled = try allocator.alloc(bool, projects.len),
-            .last_changed = try allocator.alloc(u64, projects.len),
+            .remarks = try allocator.alloc([:0]const u8, projects.items.len),
+            .enabled = try allocator.alloc(bool, projects.items.len),
+            .last_changed = try allocator.alloc(u64, projects.items.len),
         };
 
-        for (projects, 0..) |project, idx| {
-            const remark_z = try allocator.dupeZ(u8, project.remark);
+        for (projects.items, 0..) |project, idx| {
+            const remark_z = try allocator.dupeZ(u8, project.cfg.remark);
             state.remarks[idx] = remark_z;
-            state.enabled[idx] = project.enabled;
+            state.enabled[idx] = project.cfg.enabled;
             state.last_changed[idx] = now;
         }
 
@@ -66,21 +66,20 @@ const RuntimeState = struct {
         var enabled_projects: u32 = 0;
         var success_projects: u32 = 0;
         var active_ports: u32 = 0;
-        var bytes_in: u64 = 0;
-        var bytes_out: u64 = 0;
+        // TODO: bytes_in and bytes_out should be collected from forwarder instances
+        // const bytes_in: u64 = 0;
+        // const bytes_out: u64 = 0;
 
         var i: usize = 0;
-        while (i < self.projects.len) : (i += 1) {
-            const info = app_forward.getProjectRuntimeInfo(i);
+        while (i < self.projects.items.len) : (i += 1) {
+            const project = &self.projects.items[i];
             if (self.enabled[i]) {
                 enabled_projects += 1;
-                if (info.startup_status == .success) {
+                if (project.startup_status == .success) {
                     success_projects += 1;
                 }
             }
-            active_ports += info.active_ports;
-            bytes_in += info.bytes_in;
-            bytes_out += info.bytes_out;
+            active_ports += project.active_ports;
         }
 
         // 判断整体状态：当启用的项目数为0时是STOPPED，当启用项目全部启动成功时是RUNNING，否则是DEGRADED
@@ -94,10 +93,10 @@ const RuntimeState = struct {
         const now = currentTs();
         return .{
             .status = status,
-            .total_projects = @intCast(self.projects.len),
+            .total_projects = @intCast(self.projects.items.len),
             .active_ports = active_ports,
-            .total_bytes_in = bytes_in,
-            .total_bytes_out = bytes_out,
+            .total_bytes_in = 0, // TODO: collect from forwarder instances
+            .total_bytes_out = 0, // TODO: collect from forwarder instances
             .uptime = now - self.start_ts,
         };
     }
@@ -135,7 +134,7 @@ const field_names = struct {
     pub const error_code: [:0]const u8 = "error_code";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: []const types.Project) !void {
+pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandles)) !void {
     if (g_state != null) return;
     const state = try RuntimeState.init(allocator, projects);
     g_state = state;
@@ -262,26 +261,27 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
     defer state.mutex.unlock();
 
     var i: usize = 0;
-    while (i < state.projects.len) : (i += 1) {
+    while (i < state.projects.items.len) : (i += 1) {
         const item = ubox.blobmsgOpenNested(&buf, null, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         if (item == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
 
-        const info = app_forward.getProjectRuntimeInfo(i);
+        const project = &state.projects.items[i];
 
         addU32(&buf, field_names.id, @intCast(i)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.remark, state.remarks[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addBool(&buf, field_names.enabled, state.enabled[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.status, if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addString(&buf, field_names.startup_status, info.startup_status.toString()) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addString(&buf, field_names.startup_status, project.startup_status.toString()) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
-        addU32(&buf, field_names.active_ports, info.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addU64(&buf, field_names.bytes_in, info.bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addU64(&buf, field_names.bytes_out, info.bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU32(&buf, field_names.active_ports, project.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        // TODO: bytes_in and bytes_out should be collected from forwarder instances
+        addU64(&buf, field_names.bytes_in, 0) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU64(&buf, field_names.bytes_out, 0) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.last_changed, state.last_changed[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
         // 如果启动失败，返回错误代码
-        if (info.startup_status == .failed and info.error_code != 0) {
-            addI32(&buf, field_names.error_code, info.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (project.startup_status == .failed and project.error_code != 0) {
+            addI32(&buf, field_names.error_code, project.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         }
 
         ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -312,7 +312,7 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     const enabled_flag = c.blobmsg_get_bool(tb[1].?);
 
     state.mutex.lock();
-    if (idx >= state.projects.len) {
+    if (idx >= state.projects.items.len) {
         state.mutex.unlock();
         return c.UBUS_STATUS_INVALID_ARGUMENT;
     }
