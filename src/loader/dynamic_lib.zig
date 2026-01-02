@@ -98,7 +98,7 @@ pub const DynamicLibLoader = struct {
         }
 
         return self.lib_handle.?.lookup(T, name) orelse {
-            std.debug.print("Failed to lookup function: {s}\n", .{name});
+            std.log.debug("Failed to lookup function: {s}\n", .{name});
             return error.FunctionNotFound;
         };
     }

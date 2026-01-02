@@ -258,15 +258,15 @@ pub const UciContext = struct {
 
     /// Allocate a new UCI context
     pub fn alloc() !UciContext {
-        std.debug.print("Calling uci_alloc_context...\n", .{});
+        std.log.debug("Calling uci_alloc_context...\n", .{});
         const ctx = try libuci.uci_alloc_context();
-        std.debug.print("uci_alloc_context returned: {*}\n", .{ctx});
+        std.log.debug("uci_alloc_context returned: {*}\n", .{ctx});
         if (ctx == null) {
-            std.debug.print("Failed to allocate UCI context\n", .{});
+            std.log.debug("Failed to allocate UCI context\n", .{});
             return UciError.UciErrMem;
         }
 
-        std.debug.print("Successfully allocated UCI context\n", .{});
+        std.log.debug("Successfully allocated UCI context\n", .{});
         return UciContext{
             .ctx = ctx,
         };
@@ -276,7 +276,7 @@ pub const UciContext = struct {
     pub fn free(self: UciContext) void {
         if (self.ctx != null) {
             libuci.uci_free_context(self.ctx) catch |err| {
-                std.debug.print("Error freeing context: {}\n", .{err});
+                std.log.debug("Error freeing context: {}\n", .{err});
             };
         }
     }
@@ -288,12 +288,12 @@ pub const UciContext = struct {
         }
 
         var package: [*c]c.uci_package = null;
-        std.debug.print(
+        std.log.debug(
             "Calling uci_load with ctx={*}, name={s}, package_ptr={*}\n",
             .{ self.ctx, std.mem.span(name), &package },
         );
         const result = try libuci.uci_load(self.ctx, name, &package);
-        std.debug.print("uci_load returned: {}, package={*}\n", .{ result, package });
+        std.log.debug("uci_load returned: {}, package={*}\n", .{ result, package });
 
         try toUciError(result);
         return UciPackage{ .ctx = self.ctx, .pkg = package };
@@ -330,7 +330,7 @@ pub const UciContext = struct {
     pub fn perror(self: UciContext, prefix: [*c]const u8) void {
         if (self.ctx != null) {
             libuci.uci_perror(self.ctx, prefix) catch |err| {
-                std.debug.print("Error in perror: {}\n", .{err});
+                std.log.debug("Error in perror: {}\n", .{err});
             };
         }
     }

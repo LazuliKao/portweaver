@@ -54,7 +54,7 @@ pub const UdpForwarder = struct {
             &error_code,
         );
         if (forwarder == null) {
-            std.debug.print("[UDP] ERROR on port {d}: error_code={d}\n", .{ self.listen_port, error_code });
+            std.log.debug("[UDP] ERROR on port {d}: error_code={d}\n", .{ self.listen_port, error_code });
             self.last_error_code = error_code;
             out_error_code.* = error_code;
             return ForwardError.ListenFailed;
@@ -80,7 +80,7 @@ pub const UdpForwarder = struct {
             return ForwardError.ListenFailed;
         }
 
-        std.debug.print("[UDP] Listening on port {d}, forwarding to {s}:{d}\n", .{
+        std.log.debug("[UDP] Listening on port {d}, forwarding to {s}:{d}\n", .{
             self.listen_port,
             self.target_address,
             self.target_port,

@@ -48,7 +48,7 @@ pub const TcpForwarder = struct {
         );
 
         if (forwarder_ptr == null) {
-            std.debug.print("[TCP] ERROR on port {d}: error_code={d}\n", .{ listen_port, error_code });
+            std.log.debug("[TCP] ERROR on port {d}: error_code={d}\n", .{ listen_port, error_code });
             out_error_code.* = error_code;
             self.last_error_code = error_code;
             return ForwardError.ListenFailed;
