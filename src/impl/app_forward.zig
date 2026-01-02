@@ -67,58 +67,6 @@ fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, fwd: *UdpFo
     udp_thread.detach();
 }
 
-// pub fn getProjectStats(project_id: usize) common.TrafficStats {
-//     g_handles_mutex.lock();
-//     defer g_handles_mutex.unlock();
-//     if (project_id >= g_handles.items.len) {
-//         return .{ .bytes_in = 0, .bytes_out = 0 };
-//     }
-//     const h = g_handles.items[project_id];
-//     var stats = common.TrafficStats{ .bytes_in = 0, .bytes_out = 0 };
-//     if (h.tcp_handles) |tcp_list| {
-//         for (tcp_list.items) |t| {
-//             const s = tcp_uv.getStatsRaw(t);
-//             stats.bytes_in += s.bytes_in;
-//             stats.bytes_out += s.bytes_out;
-//         }
-//     }
-//     if (h.udp_handles) |udp_list| {
-//         for (udp_list.items) |u| {
-//             const s = udp_uv.getStatsRaw(u);
-//             stats.bytes_in += s.bytes_in;
-//             stats.bytes_out += s.bytes_out;
-//         }
-//     }
-//     return stats;
-// }
-
-// pub fn getProjectRuntimeInfo(project_id: usize) project_status.ProjectRuntimeInfo {
-//     const h = g_handles.items[project_id];
-//     var bytes_in: u64 = 0;
-//     var bytes_out: u64 = 0;
-//     if (h.tcp_handles) |tcp_list| {
-//         for (tcp_list.items) |t| {
-//             const s = tcp_uv.getStatsRaw(t);
-//             bytes_in += s.bytes_in;
-//             bytes_out += s.bytes_out;
-//         }
-//     }
-//     if (h.udp_handles) |udp_list| {
-//         for (udp_list.items) |u| {
-//             const s = udp_uv.getStatsRaw(u);
-//             bytes_in += s.bytes_in;
-//             bytes_out += s.bytes_out;
-//         }
-//     }
-//     return .{
-//         .active_ports = h.active_ports,
-//         .bytes_in = bytes_in,
-//         .bytes_out = bytes_out,
-//         .startup_status = h.startup_status,
-//         .error_code = h.error_code,
-//     };
-// }
-
 /// Start a port forwarding project
 pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
     if (!projectHandle.cfg.enable_app_forward) {

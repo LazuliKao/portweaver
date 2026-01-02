@@ -1,6 +1,7 @@
 const std = @import("std");
 const uv = @import("uv.zig");
 const common = @import("common.zig");
+const TrafficStats = @import("../project_status.zig").TrafficStats;
 
 pub const ForwardError = common.ForwardError;
 
@@ -107,7 +108,7 @@ pub const UdpForwarder = struct {
         return self.last_error_code;
     }
 
-    pub fn getStats(self: *UdpForwarder) common.TrafficStats {
+    pub fn getStats(self: *UdpForwarder) TrafficStats {
         if (self.forwarder) |f| {
             const c_stats = c.udp_forwarder_get_stats(f);
             return .{

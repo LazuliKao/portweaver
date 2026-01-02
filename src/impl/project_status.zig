@@ -29,6 +29,12 @@ pub const ProjectRuntimeInfo = struct {
     startup_status: StartupStatus,
     error_code: i32,
 };
+
+pub const TrafficStats = struct {
+    bytes_in: u64,
+    bytes_out: u64,
+};
+
 pub const ProjectHandle = struct {
     allocator: std.mem.Allocator,
     startup_status: StartupStatus = .disabled,
@@ -77,6 +83,34 @@ pub const ProjectHandle = struct {
     pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
+    }
+
+    pub fn getProjectStats(self: *ProjectHandle) TrafficStats {
+        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0 };
+        // Sum stats from all TCP forwarders
+        for (self.tcp_forwarders.items) |fwd| {
+            const s = fwd.getStats();
+            stats.bytes_in += s.bytes_in;
+            stats.bytes_out += s.bytes_out;
+        }
+        // Sum stats from all UDP forwarders
+        for (self.udp_forwarders.items) |fwd| {
+            const s = fwd.getStats();
+            stats.bytes_in += s.bytes_in;
+            stats.bytes_out += s.bytes_out;
+        }
+        return stats;
+    }
+
+    pub fn getProjectRuntimeInfo(self: *ProjectHandle) ProjectRuntimeInfo {
+        const s = self.getProjectStats();
+        return .{
+            .active_ports = self.active_ports,
+            .bytes_in = s.bytes_in,
+            .bytes_out = s.bytes_out,
+            .startup_status = self.startup_status,
+            .error_code = self.error_code,
+        };
     }
 };
 pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {

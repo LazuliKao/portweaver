@@ -1,7 +1,7 @@
 const std = @import("std");
 const uv = @import("uv.zig");
 const common = @import("common.zig");
-
+const TrafficStats = @import("../project_status.zig").TrafficStats;
 pub const ForwardError = common.ForwardError;
 
 const c = uv.c;
@@ -88,7 +88,7 @@ pub const TcpForwarder = struct {
         return self.last_error_code;
     }
 
-    pub fn getStats(self: *TcpForwarder) common.TrafficStats {
+    pub fn getStats(self: *TcpForwarder) TrafficStats {
         const c_stats = c.tcp_forwarder_get_stats(self.forwarder);
         return .{
             .bytes_in = c_stats.bytes_in,
@@ -96,8 +96,3 @@ pub const TcpForwarder = struct {
         };
     }
 };
-
-pub fn getStatsRaw(fwd: *c.tcp_forwarder_t) common.TrafficStats {
-    const c_stats = c.tcp_forwarder_get_stats(fwd);
-    return .{ .bytes_in = c_stats.bytes_in, .bytes_out = c_stats.bytes_out };
-}

@@ -19,11 +19,6 @@ pub const AddressFamily = types.AddressFamily;
 pub const Project = types.Project;
 pub const PortMapping = types.PortMapping;
 
-pub const TrafficStats = struct {
-    bytes_in: u64,
-    bytes_out: u64,
-};
-
 pub const PortRange = struct { start: u16, end: u16 };
 
 pub fn parsePortRange(port_str: []const u8) !PortRange {

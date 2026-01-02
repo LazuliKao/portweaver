@@ -66,9 +66,8 @@ const RuntimeState = struct {
         var enabled_projects: u32 = 0;
         var success_projects: u32 = 0;
         var active_ports: u32 = 0;
-        // TODO: bytes_in and bytes_out should be collected from forwarder instances
-        // const bytes_in: u64 = 0;
-        // const bytes_out: u64 = 0;
+        var bytes_in: u64 = 0;
+        var bytes_out: u64 = 0;
 
         var i: usize = 0;
         while (i < self.projects.items.len) : (i += 1) {
@@ -80,6 +79,11 @@ const RuntimeState = struct {
                 }
             }
             active_ports += project.active_ports;
+
+            // Collect traffic stats from the project
+            const info = project.getProjectRuntimeInfo();
+            bytes_in += info.bytes_in;
+            bytes_out += info.bytes_out;
         }
 
         // 判断整体状态：当启用的项目数为0时是STOPPED，当启用项目全部启动成功时是RUNNING，否则是DEGRADED
@@ -95,8 +99,8 @@ const RuntimeState = struct {
             .status = status,
             .total_projects = @intCast(self.projects.items.len),
             .active_ports = active_ports,
-            .total_bytes_in = 0, // TODO: collect from forwarder instances
-            .total_bytes_out = 0, // TODO: collect from forwarder instances
+            .total_bytes_in = bytes_in,
+            .total_bytes_out = bytes_out,
             .uptime = now - self.start_ts,
         };
     }
@@ -273,15 +277,16 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         addString(&buf, field_names.status, if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.startup_status, project.startup_status.toString()) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
+        const info = project.getProjectRuntimeInfo();
+
         addU32(&buf, field_names.active_ports, project.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        // TODO: bytes_in and bytes_out should be collected from forwarder instances
-        addU64(&buf, field_names.bytes_in, 0) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addU64(&buf, field_names.bytes_out, 0) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU64(&buf, field_names.bytes_in, info.bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU64(&buf, field_names.bytes_out, info.bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.last_changed, state.last_changed[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
-        // 如果启动失败，返回错误代码
-        if (project.startup_status == .failed and project.error_code != 0) {
-            addI32(&buf, field_names.error_code, project.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        // 如果启动失败，返回错误代码（使用运行时信息）
+        if (info.startup_status == .failed and info.error_code != 0) {
+            addI32(&buf, field_names.error_code, info.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         }
 
         ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
