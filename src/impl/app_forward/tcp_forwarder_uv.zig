@@ -1,7 +1,8 @@
 const std = @import("std");
 const uv = @import("uv.zig");
 const common = @import("common.zig");
-const TrafficStats = @import("../project_status.zig").TrafficStats;
+const project_status = @import("../project_status.zig");
+const TrafficStats = project_status.TrafficStats;
 pub const ForwardError = common.ForwardError;
 
 const c = uv.c;
@@ -60,10 +61,11 @@ pub const TcpForwarder = struct {
 
         return self;
     }
-    pub fn start(self: *TcpForwarder) !void {
+    pub fn start(self: *TcpForwarder, projectHandle: *project_status.ProjectHandle) !void {
         const r = c.tcp_forwarder_start(self.forwarder);
         if (r != 0) {
             self.last_error_code = r;
+            projectHandle.setStartupFailedCode(r);
             return ForwardError.ListenFailed;
         }
     }

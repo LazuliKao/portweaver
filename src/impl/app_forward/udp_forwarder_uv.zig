@@ -1,7 +1,8 @@
 const std = @import("std");
 const uv = @import("uv.zig");
 const common = @import("common.zig");
-const TrafficStats = @import("../project_status.zig").TrafficStats;
+const project_status = @import("../project_status.zig");
+const TrafficStats = project_status.TrafficStats;
 
 pub const ForwardError = common.ForwardError;
 
@@ -14,7 +15,6 @@ pub const UdpForwarder = struct {
     target_port: u16,
     family: common.AddressFamily,
     enable_stats: bool,
-    last_error_code: i32 = 0,
 
     forwarder: ?*c.udp_forwarder_t = null,
 
@@ -55,12 +55,10 @@ pub const UdpForwarder = struct {
         );
         if (forwarder == null) {
             std.log.debug("[UDP] ERROR on port {d}: error_code={d}", .{ self.listen_port, error_code });
-            self.last_error_code = error_code;
             out_error_code.* = error_code;
             return ForwardError.ListenFailed;
         }
         self.forwarder = forwarder;
-        self.last_error_code = 0;
         out_error_code.* = 0;
 
         return self;
@@ -74,7 +72,7 @@ pub const UdpForwarder = struct {
         }
     }
 
-    pub fn start(self: *UdpForwarder) !void {
+    pub fn start(self: *UdpForwarder, projectHandle: *project_status.ProjectHandle) !void {
         if (self.forwarder == null) {
             // Init should have created the forwarder already
             return ForwardError.ListenFailed;
@@ -88,10 +86,9 @@ pub const UdpForwarder = struct {
 
         const rc = c.udp_forwarder_start(self.forwarder.?);
         if (rc != 0) {
-            self.last_error_code = rc;
+            projectHandle.setStartupFailedCode(rc);
             return ForwardError.ListenFailed;
         }
-        self.last_error_code = 0;
     }
 
     pub fn stop(self: *UdpForwarder) void {
@@ -102,10 +99,6 @@ pub const UdpForwarder = struct {
 
     pub fn getHandle(self: *UdpForwarder) *c.udp_forwarder_t {
         return self.forwarder.?;
-    }
-
-    pub fn getLastErrorCode(self: *UdpForwarder) i32 {
-        return self.last_error_code;
     }
 
     pub fn getStats(self: *UdpForwarder) TrafficStats {
@@ -119,8 +112,3 @@ pub const UdpForwarder = struct {
         return .{ .bytes_in = 0, .bytes_out = 0 };
     }
 };
-
-pub fn getStatsRaw(fwd: *c.udp_forwarder_t) common.TrafficStats {
-    const c_stats = c.udp_forwarder_get_stats(fwd);
-    return .{ .bytes_in = c_stats.bytes_in, .bytes_out = c_stats.bytes_out };
-}

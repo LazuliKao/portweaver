@@ -101,12 +101,13 @@ fn parseConfigFile(args: []const []const u8) ![]const u8 {
     return "config.json";
 }
 fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandle), project: config.Project) !void {
-    const handle: project_status.ProjectHandle = .init(allocator, id, project);
+    var handle: project_status.ProjectHandle = .init(allocator, id, project);
     handles.append(handle) catch |err| {
         std.log.debug("Error: Failed to append project handles: {any}", .{err});
         return err;
     };
     if (!project.enabled) {
+        handle.setDisabled();
         std.log.debug("Project {d} ({s}) is disabled, skipping.", .{ id + 1, project.remark });
         return;
     }

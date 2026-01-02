@@ -68,9 +68,15 @@ pub const ProjectHandle = struct {
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
     }
-    pub inline fn setStartupFailed(self: *ProjectHandle, err_code: i32) void {
+    pub inline fn setStartupFailedCode(self: *ProjectHandle, err_code: i32) void {
         self.startup_status = .failed;
         self.error_code = err_code;
+    }
+    pub inline fn setDisabled(self: *ProjectHandle) void {
+        self.startup_status = .disabled;
+    }
+    pub inline fn setStartupFailed(self: *ProjectHandle) void {
+        self.startup_status = .failed;
     }
     pub inline fn setStartupSuccess(self: *ProjectHandle) void {
         self.startup_status = .success;
