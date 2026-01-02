@@ -30,7 +30,6 @@ pub fn main() !void {
 
     // 加载配置
     var cfg = try loadConfig(allocator, args);
-    defer cfg.deinit(allocator);
 
     @import("impl/app_forward/uv.zig").printVersion();
     std.debug.print("PortWeaver starting with {d} project(s)...\n", .{cfg.projects.len});
@@ -38,6 +37,8 @@ pub fn main() !void {
     var handles: std.array_list.Managed(project_status.ProjectHandle) = .init(allocator);
     defer {
         project_status.stopAll(&handles);
+        // Clean up config after stopping all threads
+        cfg.deinit(allocator);
     }
     // 预分配容量以避免重新分配
     try handles.ensureTotalCapacity(cfg.projects.len);
@@ -169,22 +170,6 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
         firewall.reloadFirewall(allocator) catch |err| {
             std.debug.print("Warning: Failed to reload firewall: {any}\n", .{err});
         };
-
-        // 所有handle添加完成后，启动线程
-        std.debug.print("Starting forwarding threads...\n", .{});
-        for (handles.items) |*handle| {
-            if (handle.cfg.enable_app_forward) {
-                std.debug.print("  Launching thread for project {d} ({s})...\n", .{ handle.id, handle.cfg.remark });
-                const thread = std.Thread.spawn(.{}, startForwardingThread, .{
-                    allocator,
-                    handle,
-                }) catch |err| {
-                    std.debug.print("Error: Failed to spawn forwarding thread: {any}\n", .{err});
-                    continue;
-                };
-                thread.detach();
-            }
-        }
     } else {
         // JSON 模式：只启动应用层转发
         for (cfg.projects, 0..) |project, i| {

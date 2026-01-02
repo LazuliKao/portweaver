@@ -9,7 +9,7 @@ pub const ForwardError = error{
     InvalidAddress,
 };
 
-pub const THREAD_STACK_SIZE = 4 * 1024;
+pub const THREAD_STACK_SIZE = 64 * 1024; // 64KB - reasonable for network I/O threads
 
 pub inline fn getThreadConfig() std.Thread.SpawnConfig {
     return .{ .stack_size = THREAD_STACK_SIZE };
