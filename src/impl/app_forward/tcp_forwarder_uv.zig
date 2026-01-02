@@ -13,7 +13,7 @@ pub const InitResult = struct {
 
 pub const TcpForwarder = struct {
     allocator: std.mem.Allocator,
-    forwarder: *c.tcp_forwarder_t,
+    forwarder: ?*c.tcp_forwarder_t,
     last_error_code: i32 = 0,
 
     pub fn init(
@@ -60,7 +60,6 @@ pub const TcpForwarder = struct {
 
         return self;
     }
-
     pub fn start(self: *TcpForwarder) !void {
         const r = c.tcp_forwarder_start(self.forwarder);
         if (r != 0) {
@@ -74,7 +73,11 @@ pub const TcpForwarder = struct {
     }
 
     pub fn deinit(self: *TcpForwarder) void {
-        c.tcp_forwarder_destroy(self.forwarder);
+        if (self.forwarder) |f| {
+            c.tcp_forwarder_stop(f);
+            c.tcp_forwarder_destroy(f);
+            self.forwarder = null;
+        }
     }
 
     pub fn getHandle(self: *TcpForwarder) *c.tcp_forwarder_t {

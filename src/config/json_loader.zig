@@ -36,18 +36,22 @@ fn parseJsonString(v: std.json.Value) ![]const u8 {
 }
 
 fn parseJsonPortString(v: std.json.Value, allocator: std.mem.Allocator) ![]const u8 {
-    const s = switch (v) {
+    switch (v) {
         .integer => |i| {
             if (i <= 0 or i > 65535) return types.ConfigError.InvalidValue;
-            return try std.fmt.allocPrint(allocator, "{d}", .{i});
+            // 对于整数，直接分配并返回，无需额外的 dupe
+            const result = try std.fmt.allocPrint(allocator, "{d}", .{i});
+            try types.validatePortString(result);
+            return result;
         },
-        .string => |str| str,
+        .string => |str| {
+            // 对于字符串，需要 trim 和 dupe（因为 JSON 缓冲区会被释放）
+            const trimmed = std.mem.trim(u8, str, " \t\r\n");
+            try types.validatePortString(trimmed);
+            return try allocator.dupe(u8, trimmed);
+        },
         else => return types.ConfigError.InvalidValue,
-    };
-
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
-    try types.validatePortString(trimmed);
-    return try allocator.dupe(u8, trimmed);
+    }
 }
 
 fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {

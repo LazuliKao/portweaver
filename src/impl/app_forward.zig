@@ -133,10 +133,15 @@ pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_sta
         return;
     }
     // Single-port mode
+    const listen_port_str = try common.portToString(projectHandle.cfg.listen_port, allocator);
+    defer allocator.free(listen_port_str);
+    const target_port_str = try common.portToString(projectHandle.cfg.target_port, allocator);
+    defer allocator.free(target_port_str);
+
     try startForwardingForMapping(allocator, projectHandle, .{ // convert to mapping
         .protocol = projectHandle.cfg.protocol,
-        .listen_port = try common.portToString(projectHandle.cfg.listen_port, allocator),
-        .target_port = try common.portToString(projectHandle.cfg.target_port, allocator),
+        .listen_port = listen_port_str,
+        .target_port = target_port_str,
     });
     projectHandle.setStartupSuccess();
 }

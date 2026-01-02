@@ -30,13 +30,19 @@ pub const ProjectRuntimeInfo = struct {
     error_code: i32,
 };
 pub const ProjectHandles = struct {
+    allocator: std.mem.Allocator,
     startup_status: StartupStatus = .disabled,
+    tcp_forwarders: std.array_list.Managed(*TcpForwarder),
+    udp_forwarders: std.array_list.Managed(*UdpForwarder),
     cfg: types.Project,
     error_code: i32 = 0,
     active_ports: u32 = 0,
     id: usize,
-    pub fn init(id: usize, cfg: types.Project) ProjectHandles {
+    pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandles {
         return ProjectHandles{
+            .tcp_forwarders = std.array_list.Managed(*TcpForwarder).init(allocator),
+            .udp_forwarders = std.array_list.Managed(*UdpForwarder).init(allocator),
+            .allocator = allocator,
             .id = id,
             .startup_status = .disabled,
             .cfg = cfg,
@@ -45,8 +51,16 @@ pub const ProjectHandles = struct {
         };
     }
     pub fn deinit(self: *ProjectHandles) void {
-        // 清理资源（如果有的话）
-        _ = self;
+        for (self.tcp_forwarders.items) |fwd| {
+            fwd.deinit();
+            self.allocator.destroy(fwd);
+        }
+        for (self.udp_forwarders.items) |fwd| {
+            fwd.deinit();
+            self.allocator.destroy(fwd);
+        }
+        self.tcp_forwarders.deinit();
+        self.udp_forwarders.deinit();
     }
     pub inline fn setStartupFailed(self: *ProjectHandles, err_code: i32) void {
         self.startup_status = .failed;
@@ -56,12 +70,14 @@ pub const ProjectHandles = struct {
         self.startup_status = .success;
         self.error_code = 0;
     }
-    pub inline fn registerTcpHandle(self: *ProjectHandles, _: *TcpForwarder) !void {
+    pub inline fn registerTcpHandle(self: *ProjectHandles, fwd: *TcpForwarder) !void {
         self.active_ports += 1;
+        try self.tcp_forwarders.append(fwd);
     }
 
-    pub inline fn registerUdpHandle(self: *ProjectHandles, _: *UdpForwarder) !void {
+    pub inline fn registerUdpHandle(self: *ProjectHandles, fwd: *UdpForwarder) !void {
         self.active_ports += 1;
+        try self.udp_forwarders.append(fwd);
     }
 };
 pub fn stopAll(handles: *std.array_list.Managed(ProjectHandles)) void {

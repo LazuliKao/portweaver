@@ -381,19 +381,29 @@ static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
 }
 
 // UDP buffer allocation callback (optimized for typical UDP packet size)
-#define UDP_BUFFER_SIZE 65536 // Max UDP datagram size
+// #define UDP_BUFFER_SIZE 65536 // Max UDP datagram size
 static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
 {
-    (void)suggested_size; // Ignore libuv suggestion, use optimized size
+    // (void)suggested_size; // Ignore libuv suggestion, use optimized size
+    // if (handle && handle->data)
+    // {
+    //     struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
+    //     buf->base = (char *)DATA_ALLOC(fwd, UDP_BUFFER_SIZE);
+    //     buf->len = UDP_BUFFER_SIZE;
+    //     return;
+    // }
+    // buf->base = (char *)malloc(UDP_BUFFER_SIZE);
+    // buf->len = UDP_BUFFER_SIZE;
+
     if (handle && handle->data)
     {
         struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
-        buf->base = (char *)DATA_ALLOC(fwd, UDP_BUFFER_SIZE);
-        buf->len = UDP_BUFFER_SIZE;
+        buf->base = (char *)DATA_ALLOC(fwd, suggested_size);
+        buf->len = suggested_size;
         return;
     }
-    buf->base = (char *)malloc(UDP_BUFFER_SIZE);
-    buf->len = UDP_BUFFER_SIZE;
+    buf->base = (char *)malloc(suggested_size);
+    buf->len = suggested_size;
 }
 
 // Compare two sockaddr structures for equality (supports IPv4 and IPv6)
@@ -479,26 +489,31 @@ tcp_forwarder_t *tcp_forwarder_create(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
-    int* out_error)
+    int *out_error)
 {
     // Allocate forwarder directly (no external allocator support)
     struct tcp_forwarder *fwd = NULL;
     fwd = (struct tcp_forwarder *)malloc(sizeof(struct tcp_forwarder));
-    if (!fwd) {
-        if (out_error) *out_error = FORWARDER_ERROR_MALLOC;
+    if (!fwd)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
 
     fwd->loop = uv_loop_new();
-    if (!fwd->loop) {
-        if (out_error) *out_error = FORWARDER_ERROR_MALLOC;
+    if (!fwd->loop)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
         free(fwd);
         return NULL;
     }
 
     uv_tcp_init(fwd->loop, &fwd->server);
     fwd->server.data = fwd;
+
     fwd->target_address = strdup(target_address);
     fwd->target_port = target_port;
     fwd->family = family;
@@ -533,23 +548,29 @@ tcp_forwarder_t *tcp_forwarder_create(
         memcpy(&addr, &addr4, sizeof(addr4));
     }
     int bind_result = uv_tcp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
-    if (bind_result != 0) {
+    if (bind_result != 0)
+    {
         // Determine specific error
         int error_code = FORWARDER_ERROR_BIND;
-        if (bind_result == UV_EADDRINUSE) {
+        if (bind_result == UV_EADDRINUSE)
+        {
             error_code = FORWARDER_ERROR_ADDRESS_IN_USE;
-        } else if (bind_result == UV_EACCES) {
+        }
+        else if (bind_result == UV_EACCES)
+        {
             error_code = FORWARDER_ERROR_PERMISSION_DENIED;
         }
-        if (out_error) *out_error = error_code;
+        if (out_error)
+            *out_error = error_code;
         uv_loop_close(fwd->loop);
         free(fwd->loop);
         free(fwd->target_address);
         free(fwd);
         return NULL;
     }
-    
-    if (out_error) *out_error = FORWARDER_OK;
+
+    if (out_error)
+        *out_error = FORWARDER_OK;
     return fwd;
 }
 
@@ -564,35 +585,16 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
 
 void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
 {
+    if (!forwarder)
+        return;
     if (forwarder->running)
     {
         uv_stop(forwarder->loop);
         forwarder->running = 0;
     }
 }
-
 void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
 {
-    if (!forwarder)
-        return;
-    // stop loop and close all handles; ensure per-connection ctx are freed by NULL
-    uv_stop(forwarder->loop);
-    uv_walk(forwarder->loop, tcp_walk_close_cb, forwarder);
-    while (uv_loop_alive(forwarder->loop))
-        uv_run(forwarder->loop, UV_RUN_DEFAULT);
-    // close and free loop to avoid memory leak
-    if (forwarder->loop)
-    {
-        uv_loop_close(forwarder->loop);
-        free(forwarder->loop);
-        forwarder->loop = NULL;
-    }
-
-    // cleanup any tracked allocations
-
-    if (forwarder->target_address)
-        free(forwarder->target_address);
-    free(forwarder);
 }
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
@@ -953,20 +955,24 @@ udp_forwarder_t *udp_forwarder_create(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
-    int* out_error)
+    int *out_error)
 {
     udp_forwarder_t_impl *fwd = NULL;
 
     fwd = (udp_forwarder_t_impl *)malloc(sizeof(udp_forwarder_t_impl));
-    if (!fwd) {
-        if (out_error) *out_error = FORWARDER_ERROR_MALLOC;
+    if (!fwd)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
 
     fwd->loop = uv_loop_new();
-    if (!fwd->loop) {
-        if (out_error) *out_error = FORWARDER_ERROR_MALLOC;
+    if (!fwd->loop)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
         free(fwd);
         return NULL;
     }
@@ -1010,22 +1016,28 @@ udp_forwarder_t *udp_forwarder_create(
         memcpy(&addr, &addr4, sizeof(addr4));
     }
     int bind_result = uv_udp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
-    if (bind_result != 0) {
+    if (bind_result != 0)
+    {
         int error_code = FORWARDER_ERROR_BIND;
-        if (bind_result == UV_EADDRINUSE) {
+        if (bind_result == UV_EADDRINUSE)
+        {
             error_code = FORWARDER_ERROR_ADDRESS_IN_USE;
-        } else if (bind_result == UV_EACCES) {
+        }
+        else if (bind_result == UV_EACCES)
+        {
             error_code = FORWARDER_ERROR_PERMISSION_DENIED;
         }
-        if (out_error) *out_error = error_code;
+        if (out_error)
+            *out_error = error_code;
         uv_loop_close(fwd->loop);
         free(fwd->loop);
         free(fwd->target_address);
         free(fwd);
         return NULL;
     }
-    
-    if (out_error) *out_error = FORWARDER_OK;
+
+    if (out_error)
+        *out_error = FORWARDER_OK;
     return (udp_forwarder_t *)fwd;
 }
 
@@ -1041,34 +1053,23 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     return uv_run(fwd->loop, UV_RUN_DEFAULT);
 }
 
+void udp_forwarder_stop(udp_forwarder_t *forwarder)
+{
+    if (!forwarder)
+        return;
+
+    if (forwarder->running)
+    {
+        udp_forwarder_t_impl *fwd = (udp_forwarder_t_impl *)forwarder;
+        uv_stop(fwd->loop);
+        forwarder->running = 0;
+    }
+}
 void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 {
-    udp_forwarder_t_impl *fwd = (udp_forwarder_t_impl *)forwarder;
-    if (!fwd)
+    if (!forwarder)
         return;
-    // stop loop and close all handles
-    uv_stop(fwd->loop);
-    // walk handles and close
-    uv_walk(fwd->loop, udp_walk_close_cb, fwd);
-    // run loop until all handles closed
-    while (uv_loop_alive(fwd->loop))
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-    // free session structs (their handles are closed by uv_walk)
-    // Note: sessions will be freed by udp_session_close_cb when their handles close
-    // Just clear the list pointer to avoid dangling references
-    fwd->sessions = NULL;
-    if (fwd->target_address)
-        free(fwd->target_address);
-    // [FIX] close and free loop
-    if (fwd->loop)
-    {
-        uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        fwd->loop = NULL;
-    }
-
-    // cleanup any tracked allocations
-    free(fwd);
+  
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)

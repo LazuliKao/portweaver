@@ -36,8 +36,13 @@ pub fn main() !void {
     std.debug.print("PortWeaver starting with {d} project(s)...\n", .{cfg.projects.len});
 
     var handles: std.array_list.Managed(project_status.ProjectHandles) = .init(allocator);
+    defer {
+        project_status.stopAll(&handles);
+    }
+    // 预分配容量以避免重新分配
+    try handles.ensureTotalCapacity(cfg.projects.len);
+
     // 应用配置并启动服务
-    project_status.stopAll(&handles);
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
     if (build_options.ubus_mode) {
         ubus_server.start(allocator, handles) catch |err| {
@@ -99,24 +104,14 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_lis
         std.debug.print("Project {d} ({s}) is disabled, skipping.\n", .{ id + 1, project.remark });
         return;
     }
-    var handle = project_status.ProjectHandles.init(id, project);
+    const handle: project_status.ProjectHandles = .init(allocator, id, project);
     handles.append(handle) catch |err| {
         std.debug.print("Error: Failed to append project handles: {any}\n", .{err});
         return err;
     };
-    // 启动应用层端口转发（如果启用）
+    // 应用层端口转发将在所有handle添加完成后统一启动
     if (project.enable_app_forward) {
-        std.debug.print("  Starting application layer forwarding...\n", .{});
-
-        // 为每个项目创建独立线程
-        const thread = std.Thread.spawn(.{}, startForwardingThread, .{
-            allocator,
-            &handle,
-        }) catch |err| {
-            std.debug.print("Error: Failed to spawn forwarding thread: {any}\n", .{err});
-            return;
-        };
-        thread.detach();
+        std.debug.print("  Will start application layer forwarding...\n", .{});
     }
 }
 /// 应用配置：设置防火墙规则并启动应用层转发
@@ -174,12 +169,48 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
         firewall.reloadFirewall(allocator) catch |err| {
             std.debug.print("Warning: Failed to reload firewall: {any}\n", .{err});
         };
+
+        // 所有handle添加完成后，启动线程
+        std.debug.print("Starting forwarding threads...\n", .{});
+        for (handles.items) |*handle| {
+            if (handle.cfg.enable_app_forward) {
+                std.debug.print("  Launching thread for project {d} ({s})...\n", .{ handle.id, handle.cfg.remark });
+                const thread = std.Thread.spawn(.{}, startForwardingThread, .{
+                    allocator,
+                    handle,
+                }) catch |err| {
+                    std.debug.print("Error: Failed to spawn forwarding thread: {any}\n", .{err});
+                    continue;
+                };
+                thread.detach();
+            }
+        }
     } else {
         // JSON 模式：只启动应用层转发
         for (cfg.projects, 0..) |project, i| {
             setupProject(allocator, i, handles, project) catch |err| {
                 std.debug.print("Error: Failed to setup project: {any}\n", .{err});
             };
+            if (project.enable_app_forward) {
+                has_app_forward = true;
+            }
+        }
+    }
+
+    // 所有handle添加完成后，启动线程
+    // 这样可以确保handles数组不会在线程运行时重新分配
+    std.debug.print("Starting forwarding threads...\n", .{});
+    for (handles.items) |*handle| {
+        if (handle.cfg.enable_app_forward) {
+            std.debug.print("  Launching thread for project {d} ({s})...\n", .{ handle.id, handle.cfg.remark });
+            const thread = std.Thread.spawn(.{}, startForwardingThread, .{
+                allocator,
+                handle,
+            }) catch |err| {
+                std.debug.print("Error: Failed to spawn forwarding thread: {any}\n", .{err});
+                continue;
+            };
+            thread.detach();
         }
     }
 

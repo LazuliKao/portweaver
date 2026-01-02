@@ -67,6 +67,7 @@ pub const UdpForwarder = struct {
 
     pub fn deinit(self: *UdpForwarder) void {
         if (self.forwarder) |f| {
+            c.udp_forwarder_stop(f);
             c.udp_forwarder_destroy(f);
             self.forwarder = null;
         }
