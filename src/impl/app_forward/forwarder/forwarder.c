@@ -517,6 +517,7 @@ tcp_forwarder_t *tcp_forwarder_create(
     fwd->target_address = strdup(target_address);
     fwd->target_port = target_port;
     fwd->family = family;
+    fwd->running = 0;
     fwd->enable_stats = enable_stats;
     // Initialize atomic counters
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
@@ -580,7 +581,9 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     if (r != 0)
         return r;
     forwarder->running = 1;
-    return uv_run(forwarder->loop, UV_RUN_DEFAULT);
+    int res = uv_run(forwarder->loop, UV_RUN_DEFAULT);
+    forwarder->running = 0;
+    return res;
 }
 
 void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
@@ -590,7 +593,6 @@ void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
     if (forwarder->running)
     {
         uv_stop(forwarder->loop);
-        forwarder->running = 0;
     }
 }
 void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
@@ -1048,28 +1050,27 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
         return UV_EINVAL;
     int r = uv_udp_recv_start(&fwd->server, udp_alloc_cb, udp_on_recv);
     if (r != 0)
-        return r;
+    return r;
     fwd->running = 1;
-    return uv_run(fwd->loop, UV_RUN_DEFAULT);
+    int res = uv_run(fwd->loop, UV_RUN_DEFAULT);
+    uv_udp_recv_stop(&fwd->server);
+    fwd->running = 0;
+    return res;
 }
 
 void udp_forwarder_stop(udp_forwarder_t *forwarder)
 {
     if (!forwarder)
         return;
-
     if (forwarder->running)
     {
-        udp_forwarder_t_impl *fwd = (udp_forwarder_t_impl *)forwarder;
-        uv_stop(fwd->loop);
-        forwarder->running = 0;
+        uv_stop(forwarder->loop);
     }
 }
 void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 {
     if (!forwarder)
         return;
-  
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)

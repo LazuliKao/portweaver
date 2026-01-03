@@ -40,10 +40,12 @@ pub const ProjectHandle = struct {
     startup_status: StartupStatus = .disabled,
     tcp_forwarders: std.array_list.Managed(*TcpForwarder),
     udp_forwarders: std.array_list.Managed(*UdpForwarder),
+    lock: std.Thread.Mutex = .{},
     cfg: types.Project,
     error_code: i32 = 0,
     active_ports: u32 = 0,
     id: usize,
+    runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandle {
         return ProjectHandle{
             .tcp_forwarders = std.array_list.Managed(*TcpForwarder).init(allocator),
@@ -82,14 +84,69 @@ pub const ProjectHandle = struct {
         self.startup_status = .success;
         self.error_code = 0;
     }
+    inline fn updateRuntimeStatus(self: *ProjectHandle) void {
+        if (self.active_ports > 0) {
+            self.runtime_enabled.store(true, .seq_cst);
+        } else {
+            self.runtime_enabled.store(false, .seq_cst);
+        }
+    }
+    inline fn findIndexOfTcpForwarder(self: *ProjectHandle, fwd: *TcpForwarder) !usize {
+        for (self.tcp_forwarders.items, 0..) |item, index| {
+            if (item == fwd) {
+                return index;
+            }
+        }
+        return error.NotFound;
+    }
+    inline fn findIndexOfUdpForwarder(self: *ProjectHandle, fwd: *UdpForwarder) !usize {
+        for (self.udp_forwarders.items, 0..) |item, index| {
+            if (item == fwd) {
+                return index;
+            }
+        }
+        return error.NotFound;
+    }
+    pub inline fn deregisterTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.active_ports -= 1;
+        const index = try self.findIndexOfTcpForwarder(fwd);
+        _ = self.tcp_forwarders.swapRemove(index);
+    }
     pub inline fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
         self.active_ports += 1;
         try self.tcp_forwarders.append(fwd);
     }
+    pub inline fn deregisterUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.active_ports -= 1;
+        const index = try self.findIndexOfUdpForwarder(fwd);
+        _ = self.udp_forwarders.swapRemove(index);
+    }
     pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
         self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
     }
+    // pub inline fn notifyTcpRunStatus(self: *ProjectHandle, fwd: *TcpForwarder, status: bool) void {
+    //     if (status) {
+    //         self.active_ports += 1;
+    //     } else {
+    //         self.active_ports -= 1;
+    //     }
+    // }
+    // pub inline fn notifyUdpRunStatus(self: *ProjectHandle, fwd: *UdpForwarder, status: bool) void {
+    //     if (status) {
+    //         self.active_ports += 1;
+    //     } else {
+    //         self.active_ports -= 1;
+    //     }
+    // }
 
     pub fn getProjectStats(self: *ProjectHandle) TrafficStats {
         var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0 };
@@ -117,6 +174,30 @@ pub const ProjectHandle = struct {
             .startup_status = self.startup_status,
             .error_code = self.error_code,
         };
+    }
+
+    /// Set runtime enabled state (controls forwarding without restarting threads)
+    pub fn setRuntimeEnabled(self: *ProjectHandle, enabled: bool) void {
+        const old = self.runtime_enabled.swap(enabled, .seq_cst);
+        if (old != enabled) {
+            if (enabled) {
+                std.log.info("Project {d} ({s}) runtime enabled", .{ self.id, self.cfg.remark });
+            } else {
+                std.log.info("Project {d} ({s}) runtime disabled - stopping forwarders", .{ self.id, self.cfg.remark });
+                // Stop all forwarders
+                for (self.tcp_forwarders.items) |fwd| {
+                    fwd.stop();
+                }
+                for (self.udp_forwarders.items) |fwd| {
+                    fwd.stop();
+                }
+            }
+        }
+    }
+
+    /// Get current runtime enabled state
+    pub fn isRuntimeEnabled(self: *ProjectHandle) bool {
+        return self.runtime_enabled.load(.seq_cst);
     }
 };
 pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {

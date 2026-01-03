@@ -22,7 +22,6 @@ const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
     projects: std.array_list.Managed(project_status.ProjectHandle),
-    remarks: [][:0]const u8,
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Thread.Mutex = .{},
@@ -34,14 +33,11 @@ const RuntimeState = struct {
             .allocator = allocator,
             .start_ts = now,
             .projects = projects,
-            .remarks = try allocator.alloc([:0]const u8, projects.items.len),
             .enabled = try allocator.alloc(bool, projects.items.len),
             .last_changed = try allocator.alloc(u64, projects.items.len),
         };
 
         for (projects.items, 0..) |project, idx| {
-            const remark_z = try allocator.dupeZ(u8, project.cfg.remark);
-            state.remarks[idx] = remark_z;
             state.enabled[idx] = project.cfg.enabled;
             state.last_changed[idx] = now;
         }
@@ -50,10 +46,6 @@ const RuntimeState = struct {
     }
 
     pub fn deinit(self: *RuntimeState) void {
-        for (self.remarks) |r| {
-            self.allocator.free(r);
-        }
-        self.allocator.free(self.remarks);
         self.allocator.free(self.enabled);
         self.allocator.free(self.last_changed);
         self.allocator.destroy(self);
@@ -272,7 +264,7 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         const project = &state.projects.items[i];
 
         addU32(&buf, field_names.id, @intCast(i)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        addString(&buf, field_names.remark, state.remarks[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        // addString(&buf, field_names.remark, state.remarks[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addBool(&buf, field_names.enabled, state.enabled[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.status, if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.startup_status, project.startup_status.toString()) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -321,9 +313,14 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
         state.mutex.unlock();
         return c.UBUS_STATUS_INVALID_ARGUMENT;
     }
-
+    // Update state and control actual forwarding
     state.enabled[idx] = enabled_flag;
     state.last_changed[idx] = currentTs();
+
+    // Actually enable/disable the project forwarding
+    var project = &state.projects.items[idx];
+    project.setRuntimeEnabled(enabled_flag);
+
     state.mutex.unlock();
 
     var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);

@@ -16,61 +16,6 @@ pub inline fn getThreadConfig() std.Thread.SpawnConfig {
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
 
-// Helper: create and initialize a TCP forwarder. If fatal_on_fail is true, it will set startup status on failure.
-fn createTcpForwarder(
-    allocator: std.mem.Allocator,
-    projectHandle: *project_status.ProjectHandle,
-    listen_port: u16,
-    target_address: []const u8,
-    target_port: u16,
-    family: types.AddressFamily,
-    enable_stats: bool,
-) !*TcpForwarder {
-    var error_code: i32 = 0;
-    const fwd = try allocator.create(TcpForwarder);
-    fwd.* = TcpForwarder.init(allocator, listen_port, target_address, target_port, family, enable_stats, &error_code) catch |err| {
-        allocator.destroy(fwd);
-        projectHandle.setStartupFailedCode(error_code);
-        return err;
-    };
-    return fwd;
-}
-
-fn createUdpForwarder(
-    allocator: std.mem.Allocator,
-    projectHandle: *project_status.ProjectHandle,
-    listen_port: u16,
-    target_address: []const u8,
-    target_port: u16,
-    family: types.AddressFamily,
-    enable_stats: bool,
-) !*UdpForwarder {
-    var error_code: i32 = 0;
-    const fwd = try allocator.create(UdpForwarder);
-    fwd.* = UdpForwarder.init(allocator, listen_port, target_address, target_port, family, enable_stats, &error_code) catch |err| {
-        allocator.destroy(fwd);
-        projectHandle.setStartupFailedCode(error_code);
-        return err;
-    };
-    return fwd;
-}
-
-fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandle, fwd: *TcpForwarder) !void {
-    std.log.debug("[startAndRegisterTcp] Entry - registering handle...", .{});
-    try projectHandle.registerTcpHandle(fwd);
-    std.log.debug("[startAndRegisterTcp] Handle registered, spawning thread...", .{});
-    const tcp_thread = try std.Thread.spawn(getThreadConfig(), startTcpForward, .{ projectHandle, fwd });
-    std.log.debug("[startAndRegisterTcp] Thread spawned, detaching...", .{});
-    tcp_thread.detach();
-    std.log.debug("[startAndRegisterTcp] Done", .{});
-}
-
-fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, fwd: *UdpForwarder) !void {
-    try projectHandle.registerUdpHandle(fwd);
-    const udp_thread = try std.Thread.spawn(getThreadConfig(), startUdpForward, .{ projectHandle, fwd });
-    udp_thread.detach();
-}
-
 /// Start a port forwarding project
 pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
     errdefer {
@@ -145,55 +90,74 @@ fn startForwardingForMapping(
 
         switch (mapping.protocol) {
             .tcp => {
-                const fwd = createTcpForwarder(allocator, projectHandle, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats) catch |err| {
-                    std.log.debug("[TCP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-                    continue;
-                };
-                std.log.debug("[startForwardingForMapping] Starting TCP forwarder on port {d}", .{listen_port});
-                // mapping: start inside thread and non-fatal
-                try startAndRegisterTcp(projectHandle, fwd);
+                try startAndRegisterTcp(projectHandle, allocator, listen_port, target_port);
             },
             .udp => {
-                const fwd = createUdpForwarder(allocator, projectHandle, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats) catch |err| {
-                    std.log.debug("[UDP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-                    continue;
-                };
-                try startAndRegisterUdp(projectHandle, fwd);
+                try startAndRegisterUdp(projectHandle, allocator, listen_port, target_port);
             },
             .both => {
-                const tcp_fwd = createTcpForwarder(allocator, projectHandle, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats) catch |err| {
-                    std.log.debug("[TCP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-                    continue;
-                };
-                const udp_fwd = createUdpForwarder(allocator, projectHandle, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats) catch |err| {
-                    std.log.debug("[UDP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-                    continue;
-                };
-                try startAndRegisterTcp(projectHandle, tcp_fwd);
-                try startAndRegisterUdp(projectHandle, udp_fwd);
+                try startAndRegisterTcp(projectHandle, allocator, listen_port, target_port);
+                try startAndRegisterUdp(projectHandle, allocator, listen_port, target_port);
             },
         }
     }
     std.log.debug("[startForwardingForMapping] All forwarders created and registered", .{});
 }
 
-fn startTcpForward(projectHandle: *project_status.ProjectHandle, tcp_forwarder: *TcpForwarder) void {
-    std.log.debug("[startTcpForward] Thread started", .{});
-    defer tcp_forwarder.deinit();
-    std.log.debug("[startTcpForward] Calling tcp_forwarder.start()...", .{});
+fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandle, allocator: std.mem.Allocator, listen_port: u16, target_port: u16) !void {
+    const fwd = TcpForwarder.init(allocator, projectHandle, listen_port, target_port) catch |err| {
+        std.log.debug("[TCP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
+        return;
+    };
+
+    const tcp_thread = try std.Thread.spawn(getThreadConfig(), loopTcpForward, .{ projectHandle, fwd });
+    tcp_thread.detach();
+}
+
+fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, allocator: std.mem.Allocator, listen_port: u16, target_port: u16) !void {
+    const fwd = UdpForwarder.init(allocator, projectHandle, listen_port, target_port) catch |err| {
+        std.log.debug("[UDP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
+        return;
+    };
+
+    const udp_thread = try std.Thread.spawn(getThreadConfig(), loopUdpForward, .{ projectHandle, fwd });
+    udp_thread.detach();
+}
+
+fn loopTcpForward(projectHandle: *project_status.ProjectHandle, tcp_forwarder: *TcpForwarder) void {
+    std.log.debug("[TcpForward] Thread started", .{});
+    defer {
+        projectHandle.deregisterTcpHandle(tcp_forwarder) catch {};
+        tcp_forwarder.deinit();
+    }
+    projectHandle.registerTcpHandle(tcp_forwarder) catch |err| {
+        std.log.debug("[TCP] Failed to register forwarder: {any}", .{err});
+        projectHandle.setStartupFailed();
+        return;
+    };
     tcp_forwarder.start(projectHandle) catch |err| {
         std.log.debug("[TCP] Failed to start forwarder: {any}", .{err});
         projectHandle.setStartupFailed();
         return;
     };
-    std.log.debug("[startTcpForward] Forwarder started successfully, entering event loop", .{});
+    std.log.debug("[TcpForward] Thread done.", .{});
 }
 
-fn startUdpForward(projectHandle: *project_status.ProjectHandle, udp_forwarder: *UdpForwarder) void {
-    defer udp_forwarder.deinit();
+fn loopUdpForward(projectHandle: *project_status.ProjectHandle, udp_forwarder: *UdpForwarder) void {
+    std.log.debug("[UdpForward] Thread started", .{});
+    defer {
+        projectHandle.deregisterUdpHandle(udp_forwarder) catch {};
+        udp_forwarder.deinit();
+    }
+    projectHandle.registerUdpHandle(udp_forwarder) catch |err| {
+        std.log.debug("[UDP] Failed to register forwarder: {any}", .{err});
+        projectHandle.setStartupFailed();
+        return;
+    };
     udp_forwarder.start(projectHandle) catch |err| {
         std.log.debug("[UDP] Failed to start forwarder: {any}", .{err});
         projectHandle.setStartupFailed();
         return;
     };
+    std.log.debug("[UdpForward] Thread done.", .{});
 }

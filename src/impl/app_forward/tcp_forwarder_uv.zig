@@ -7,17 +7,20 @@ pub const ForwardError = common.ForwardError;
 
 const c = uv.c;
 
-pub const InitResult = struct {
-    forwarder: TcpForwarder,
-    error_code: i32,
-};
-
 pub const TcpForwarder = struct {
     allocator: std.mem.Allocator,
     forwarder: ?*c.tcp_forwarder_t,
-    last_error_code: i32 = 0,
-
-    pub fn init(
+    pub fn init(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, listen_port: u16, target_port: u16) !*TcpForwarder {
+        var error_code: i32 = 0;
+        const fwd = try allocator.create(TcpForwarder);
+        fwd.* = TcpForwarder.setup(allocator, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
+            allocator.destroy(fwd);
+            projectHandle.setStartupFailedCode(error_code);
+            return err;
+        };
+        return fwd;
+    }
+    pub fn setup(
         allocator: std.mem.Allocator,
         listen_port: u16,
         target_address: []const u8,
@@ -38,40 +41,41 @@ pub const TcpForwarder = struct {
             .any => c.ADDR_FAMILY_ANY,
         };
 
-        var error_code: i32 = 0;
         const forwarder_ptr = c.tcp_forwarder_create(
             listen_port,
             target_z.ptr,
             target_port,
             c_family,
             if (enable_stats) 1 else 0,
-            &error_code,
+            out_error_code,
         );
 
         if (forwarder_ptr == null) {
-            std.log.debug("[TCP] ERROR on port {d}: error_code={d}", .{ listen_port, error_code });
-            out_error_code.* = error_code;
-            self.last_error_code = error_code;
+            std.log.debug("[TCP] ERROR on port {d}: error_code={d}", .{ listen_port, out_error_code.* });
             return ForwardError.ListenFailed;
         }
 
         self.forwarder = forwarder_ptr.?;
-        self.last_error_code = 0;
         out_error_code.* = 0;
 
         return self;
     }
     pub fn start(self: *TcpForwarder, projectHandle: *project_status.ProjectHandle) !void {
+        if (self.forwarder == null) {
+            // Init should have created the forwarder already
+            return ForwardError.ListenFailed;
+        }
         const r = c.tcp_forwarder_start(self.forwarder);
         if (r != 0) {
-            self.last_error_code = r;
             projectHandle.setStartupFailedCode(r);
             return ForwardError.ListenFailed;
         }
     }
 
     pub fn stop(self: *TcpForwarder) void {
-        c.tcp_forwarder_stop(self.forwarder);
+        if (self.forwarder) |f| {
+            c.tcp_forwarder_stop(f);
+        }
     }
 
     pub fn deinit(self: *TcpForwarder) void {
@@ -80,21 +84,17 @@ pub const TcpForwarder = struct {
             c.tcp_forwarder_destroy(f);
             self.forwarder = null;
         }
-    }
-
-    pub fn getHandle(self: *TcpForwarder) *c.tcp_forwarder_t {
-        return self.forwarder;
-    }
-
-    pub fn getLastErrorCode(self: *TcpForwarder) i32 {
-        return self.last_error_code;
+        self.allocator.destroy(self);
     }
 
     pub fn getStats(self: *TcpForwarder) TrafficStats {
-        const c_stats = c.tcp_forwarder_get_stats(self.forwarder);
-        return .{
-            .bytes_in = c_stats.bytes_in,
-            .bytes_out = c_stats.bytes_out,
-        };
+        if (self.forwarder) |f| {
+            const c_stats = c.tcp_forwarder_get_stats(f);
+            return .{
+                .bytes_in = c_stats.bytes_in,
+                .bytes_out = c_stats.bytes_out,
+            };
+        }
+        return .{ .bytes_in = 0, .bytes_out = 0 };
     }
 };
