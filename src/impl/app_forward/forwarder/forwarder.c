@@ -628,11 +628,18 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     if (r != 0)
         return r;
     forwarder->running = 1;
-    fprintf(stderr, "[tcp_forwarder_start]  loop up\n");
+    // fprintf(stderr, "[tcp_forwarder_start]  loop up\n");
     int res = uv_run(forwarder->loop, UV_RUN_DEFAULT);
     forwarder->running = 0;
-    fprintf(stderr, "[tcp_forwarder_start]  loop down\n");
-    return res;
+    // fprintf(stderr, "[tcp_forwarder_start]  loop down %d %s\n", res, uv_strerror(res));
+    if (res == 1) // 1 stands for still active handles
+    {
+        uv_run(forwarder->loop, UV_RUN_ONCE);
+        int lr = uv_loop_close(forwarder->loop);
+        // fprintf(stderr, "[tcp_forwarder_start]  loop close result %d %s\n", lr, uv_strerror(lr));
+        return lr;
+    }
+    return 0;
 }
 
 void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
@@ -647,6 +654,10 @@ void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
 }
 void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
 {
+    if (!forwarder)
+        return;
+    free(forwarder->target_address);
+    free(forwarder);
 }
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
@@ -1080,7 +1091,14 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     int res = uv_run(fwd->loop, UV_RUN_DEFAULT);
     uv_udp_recv_stop(&fwd->server);
     fwd->running = 0;
-    return res;
+        forwarder->running = 0;
+    if (res == 1) // 1 stands for still active handles
+    {
+        uv_run(forwarder->loop, UV_RUN_ONCE);
+        int lr = uv_loop_close(forwarder->loop);
+        return lr;
+    }
+    return 0;
 }
 
 void udp_forwarder_stop(udp_forwarder_t *forwarder)
@@ -1097,6 +1115,8 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 {
     if (!forwarder)
         return;
+    free(forwarder->target_address);
+    free(forwarder);
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)

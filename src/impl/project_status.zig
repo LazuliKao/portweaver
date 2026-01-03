@@ -63,12 +63,18 @@ pub const ProjectHandle = struct {
     }
     pub fn deinit(self: *ProjectHandle) void {
         for (self.tcp_forwarders.items) |fwd| {
-            fwd.deinit();
-            self.allocator.destroy(fwd);
+            fwd.stop();
         }
         for (self.udp_forwarders.items) |fwd| {
-            fwd.deinit();
-            self.allocator.destroy(fwd);
+            fwd.stop();
+        }
+        // up to 5s
+        const rate = 10;
+        for (0..10 * rate) |_| {
+            if (self.tcp_forwarders.items.len == 0 and self.udp_forwarders.items.len == 0) {
+                break;
+            }
+            std.Thread.sleep(std.time.ns_per_s / rate);
         }
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
