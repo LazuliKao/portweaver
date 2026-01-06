@@ -17,10 +17,11 @@ fn setUciOption(
     value: []const u8,
 ) !void {
     var ptr = uci.UciPtr.init();
-    const ptr_str = try std.fmt.allocPrint(
+    const ptr_str = try std.fmt.allocPrintSentinel(
         allocator,
         "{s}.{s}.{s}={s}",
         .{ package, section, option, value },
+        0,
     );
     defer allocator.free(ptr_str);
 
@@ -38,10 +39,11 @@ fn addUciListOption(
     value: []const u8,
 ) !void {
     var ptr = uci.UciPtr.init();
-    const ptr_str = try std.fmt.allocPrint(
+    const ptr_str = try std.fmt.allocPrintSentinel(
         allocator,
         "{s}.{s}.{s}={s}",
         .{ package, section, option, value },
+        0,
     );
     defer allocator.free(ptr_str);
 
@@ -269,7 +271,12 @@ pub fn clearFirewallRules(ctx: uci.UciContext, allocator: std.mem.Allocator) !vo
     // 删除找到的 sections
     for (sections_to_delete.items) |sec_name| {
         var ptr = uci.UciPtr.init();
-        const ptr_str = try std.fmt.allocPrint(allocator, "firewall.{s}", .{sec_name});
+        const ptr_str = try std.fmt.allocPrintSentinel(
+            allocator,
+            "firewall.{s}",
+            .{sec_name},
+            0,
+        );
         defer allocator.free(ptr_str);
 
         try ctx.parsePtr(&ptr, @constCast(@as([*c]u8, @ptrCast(ptr_str.ptr))));
