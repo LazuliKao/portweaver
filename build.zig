@@ -134,6 +134,104 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     return uv;
 }
 
+fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    const os_tag = target.result.os.tag;
+    const arch_tag = target.result.cpu.arch;
+    // 创建 Go 编译步骤
+    const libfrp_dir = "src/impl/frpc/libfrpc-go";
+    const output_name = "libfrp.a"; // 使用静态库格式
+
+    // 设置 Go 交叉编译变量
+    const goos = switch (os_tag) {
+        .windows => "windows",
+        .linux => "linux",
+        .macos => "darwin",
+        else => "linux",
+    };
+    // https://github.com/golang/go/blob/master/src/internal/syslist/syslist.go#L58
+
+    const goarch = switch (arch_tag) {
+        .x86 => "386",
+        .x86_64 => "amd64",
+        .aarch64 => "arm64",
+        .aarch64_be => "arm64be",
+        // .=>"amd64p32",
+        .arm => "arm",
+        .armeb => "armbe",
+        .loongarch64 => "loong64",
+        .mips => "mips",
+        .mipsel => "mipsle",
+        .mips64 => "mips64",
+        .mips64el => "mips64le",
+        // .=>"mips64p32",
+        // .=>"mips64p32le",
+        .powerpc => "ppc",
+        .powerpc64 => "ppc64",
+        .powerpc64le => "ppc64le",
+        .riscv32 => "riscv",
+        .riscv64 => "riscv64",
+        // .=>"s390",
+        .s390x => "s390x",
+        .sparc => "sparc",
+        .sparc64 => "sparc64",
+        // .=>"wasm",
+        else => @panic("Unsupported architecture"),
+    };
+
+    // 构建 Go 编译命令 - 使用 c-archive 模式生成静态库
+    const go_cmd =
+        if (optimize == .ReleaseSmall)
+            b.addSystemCommand(&.{
+                "go",
+                "build",
+                "-buildmode=c-archive",
+                "-trimpath",
+                "-ldflags=-s -extldflags=-static -w -buildid=",
+                "-o",
+                output_name,
+                "libfrp.go",
+            })
+        else
+            b.addSystemCommand(&.{
+                "go",
+                "build",
+                "-buildmode=c-archive",
+                "-o",
+                output_name,
+                "libfrp.go",
+            });
+
+    // 设置工作目录
+    go_cmd.setCwd(b.path(libfrp_dir));
+
+    // 设置交叉编译环境变量
+
+    go_cmd.addPathDir(b.path("wrapper").getPath(b));
+    go_cmd.setEnvironmentVariable("GOOS", goos);
+    go_cmd.setEnvironmentVariable("GOARCH", goarch);
+
+    // 获取 zig 可执行文件路径
+    const zig_exe = b.graph.zig_exe;
+
+    // 构建目标三元组
+    const target_triple = target.result.zigTriple(b.allocator) catch @panic("Failed to get target triple");
+
+    // 设置使用 zig cc/c++ 作为 C/C++ 编译器（交叉编译的关键）
+    // 需要用引号包裹路径以处理空格
+    const cc_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" cc -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
+    const cxx_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" c++ -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
+    const ar_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" ar", .{zig_exe}) catch @panic("OOM");
+    go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
+    go_cmd.setEnvironmentVariable("CC", cc_cmd);
+    go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
+    go_cmd.setEnvironmentVariable("AR", ar_cmd);
+    if (optimize == .ReleaseSmall) {
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
+    }
+    return &go_cmd.step;
+}
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -148,6 +246,9 @@ pub fn build(b: *std.Build) void {
 
     const ubus = b.option(bool, "ubus", "Ubus Support") orelse false;
     options.addOption(bool, "ubus_mode", ubus);
+
+    const frpc = b.option(bool, "frpc", "FRP Client Support") orelse false;
+    options.addOption(bool, "frpc_mode", frpc);
 
     const options_mod = options.createModule();
 
@@ -221,7 +322,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/impl/frpc/example.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -251,6 +352,19 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(uv);
     exe.addIncludePath(b.path("deps/libuv/include"));
     exe.addIncludePath(b.path("deps/libuv/src"));
+
+    // Build and link libfrp (Go shared library)
+    const libfrp_build_step = addLibFrp(b, target, optimize);
+
+    // 添加 libfrp 头文件路径
+    exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
+
+    // 静态链接 libfrp.a
+    const libfrp_path = b.path("src/impl/frpc/libfrpc-go/libfrp.a");
+    exe.addObjectFile(libfrp_path);
+
+    // 确保 libfrp 在可执行文件之前构建
+    exe.step.dependOn(libfrp_build_step);
 
     // Add C forwarder implementation
 
