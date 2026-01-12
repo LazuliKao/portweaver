@@ -77,6 +77,60 @@ fn parseJsonZones(
     }
 }
 
+fn parseJsonFrpForwards(
+    allocator: std.mem.Allocator,
+    v: std.json.Value,
+) ![]types.FrpForward {
+    var list = std.array_list.Managed(types.FrpForward).init(allocator);
+    errdefer {
+        for (list.items) |*f| f.deinit(allocator);
+        list.deinit();
+    }
+
+    switch (v) {
+        .string => |s| {
+            const fwd = try parseFrpForwardString(allocator, s);
+            try list.append(fwd);
+        },
+        .array => |a| {
+            for (a.items) |item| {
+                const s = try parseJsonString(item);
+                const fwd = try parseFrpForwardString(allocator, s);
+                try list.append(fwd);
+            }
+        },
+        else => return types.ConfigError.InvalidValue,
+    }
+
+    return try list.toOwnedSlice();
+}
+
+fn parseFrpForwardString(allocator: std.mem.Allocator, s: []const u8) !types.FrpForward {
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    if (trimmed.len == 0) return types.ConfigError.InvalidValue;
+
+    // 格式: "node_name:port" 或 "node_name"
+    if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
+        const node_name = std.mem.trim(u8, trimmed[0..colon_pos], " \t\r\n");
+        const port_str = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " \t\r\n");
+
+        if (node_name.len == 0) return types.ConfigError.InvalidValue;
+        const port = try types.parsePort(port_str);
+
+        return .{
+            .node_name = try allocator.dupe(u8, node_name),
+            .remote_port = port,
+        };
+    } else {
+        // 没有指定端口，默认为 0（可能由服务端分配）
+        if (trimmed.len == 0) return types.ConfigError.InvalidValue;
+        return .{
+            .node_name = try allocator.dupe(u8, trimmed),
+            .remote_port = 0,
+        };
+    }
+}
+
 pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.Config {
     std.fs.cwd().access(path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
@@ -223,6 +277,11 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     port_mapping.protocol = try types.parseProtocol(s);
                 }
 
+                // 解析 FRP 转发
+                if (jsonGetAliased(mapping_obj, &.{ "frp", "frp_forwards" })) |frp_v| {
+                    port_mapping.frp = try parseJsonFrpForwards(allocator, frp_v);
+                }
+
                 if (!have_listen or !have_target) {
                     if (have_listen) allocator.free(port_mapping.listen_port);
                     if (have_target) allocator.free(port_mapping.target_port);
@@ -264,5 +323,65 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         try list.append(project);
     }
 
-    return .{ .projects = try list.toOwnedSlice() };
+    // 解析 FRP 节点配置
+    var frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+    errdefer {
+        var it = frp_nodes.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        frp_nodes.deinit();
+    }
+
+    if (root == .object) {
+        if (jsonGetAliased(root.object, &.{ "frp", "frp_nodes" })) |frp_value| {
+            if (frp_value == .object) {
+                var node_it = frp_value.object.iterator();
+                while (node_it.next()) |entry| {
+                    const node_name = entry.key_ptr.*;
+                    const node_obj = entry.value_ptr.*;
+
+                    if (node_obj != .object) continue;
+
+                    var frp_node = types.FrpNode{
+                        .server = undefined,
+                        .port = 0,
+                    };
+
+                    var have_server = false;
+                    var have_port = false;
+
+                    if (jsonGetAliased(node_obj.object, &.{ "server", "host", "address" })) |v| {
+                        const s = try parseJsonString(v);
+                        const trimmed = std.mem.trim(u8, s, " \t\r\n");
+                        if (trimmed.len == 0) continue;
+                        frp_node.server = try allocator.dupe(u8, trimmed);
+                        have_server = true;
+                    }
+
+                    if (jsonGetAliased(node_obj.object, &.{"port"})) |v| {
+                        frp_node.port = try parseJsonPort(v);
+                        have_port = true;
+                    }
+
+                    if (jsonGetAliased(node_obj.object, &.{ "token", "auth_token" })) |v| {
+                        const s = try parseJsonString(v);
+                        frp_node.token = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (!have_server or !have_port) {
+                        if (have_server) allocator.free(frp_node.server);
+                        if (frp_node.token.len != 0) allocator.free(frp_node.token);
+                        continue;
+                    }
+
+                    const key = try allocator.dupe(u8, node_name);
+                    try frp_nodes.put(key, frp_node);
+                }
+            }
+        }
+    }
+
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes };
 }

@@ -322,7 +322,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/impl/frpc/example.zig"),
+            .root_source_file = b.path("src/main.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -353,18 +353,20 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("deps/libuv/include"));
     exe.addIncludePath(b.path("deps/libuv/src"));
 
-    // Build and link libfrp (Go shared library)
-    const libfrp_build_step = addLibFrp(b, target, optimize);
+    // Build and link libfrp (Go shared library) only when frpc support is enabled
+    if (frpc) {
+        const libfrp_build_step = addLibFrp(b, target, optimize);
 
-    // 添加 libfrp 头文件路径
-    exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
+        // 添加 libfrp 头文件路径
+        exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
 
-    // 静态链接 libfrp.a
-    const libfrp_path = b.path("src/impl/frpc/libfrpc-go/libfrp.a");
-    exe.addObjectFile(libfrp_path);
+        // 静态链接 libfrp.a
+        const libfrp_path = b.path("src/impl/frpc/libfrpc-go/libfrp.a");
+        exe.addObjectFile(libfrp_path);
 
-    // 确保 libfrp 在可执行文件之前构建
-    exe.step.dependOn(libfrp_build_step);
+        // 确保 libfrp 在可执行文件之前构建
+        exe.step.dependOn(libfrp_build_step);
+    }
 
     // Add C forwarder implementation
 
@@ -380,6 +382,10 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("deps/fix"));
     exe.addIncludePath(b.path("deps/openwrt-tools"));
     exe.addIncludePath(b.path("deps/ubus"));
+    if (frpc) {
+        // Add frpc include paths
+        exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
+    }
 
     // For dynamic linking at runtime
     exe.linkage = .dynamic;

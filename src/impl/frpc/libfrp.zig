@@ -1,21 +1,13 @@
 const std = @import("std");
-
-// C 函数声明
-extern "c" fn FrpInit() c_int;
-extern "c" fn FrpCreateClient(serverAddr: [*:0]const u8, serverPort: c_int, token: ?[*:0]const u8) c_int;
-extern "c" fn FrpAddTcpProxy(clientID: c_int, proxyName: [*:0]const u8, localIP: [*:0]const u8, localPort: c_int, remotePort: c_int) c_int;
-extern "c" fn FrpAddUdpProxy(clientID: c_int, proxyName: [*:0]const u8, localIP: [*:0]const u8, localPort: c_int, remotePort: c_int) c_int;
-extern "c" fn FrpStartClient(clientID: c_int) c_int;
-extern "c" fn FrpStopClient(clientID: c_int) c_int;
-extern "c" fn FrpDestroyClient(clientID: c_int) c_int;
-extern "c" fn FrpGetVersion() [*:0]u8;
-extern "c" fn FrpFreeString(str: [*:0]u8) void;
-extern "c" fn FrpCleanup() void;
+const c = @cImport({
+    @cInclude("libfrp.h");
+});
 
 pub const FrpError = error{
     InitFailed,
     CreateClientFailed,
     AddProxyFailed,
+    FlushFailed,
     StartFailed,
     StopFailed,
     DestroyFailed,
@@ -33,21 +25,19 @@ pub const FrpClient = struct {
 
     pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8) !FrpClient {
         // 初始化 FRP 库（只需要调用一次）
-        _ = FrpInit();
+        _ = c.FrpInit();
 
         // 将 Zig 字符串转换为 C 字符串
         const c_addr = try allocator.dupeZ(u8, server_addr);
         defer allocator.free(c_addr);
 
-        var c_token: ?[*:0]const u8 = null;
         var token_buf: ?[:0]u8 = null;
         if (token) |t| {
             token_buf = try allocator.dupeZ(u8, t);
-            c_token = token_buf.?;
         }
         defer if (token_buf) |tb| allocator.free(tb);
 
-        const client_id = FrpCreateClient(c_addr.ptr, @intCast(server_port), c_token);
+        const client_id = c.FrpCreateClient(c_addr.ptr, @intCast(server_port), if (token_buf) |tb| tb.ptr else null);
         if (client_id < 0) {
             return FrpError.CreateClientFailed;
         }
@@ -65,7 +55,7 @@ pub const FrpClient = struct {
         const c_ip = try self.allocator.dupeZ(u8, local_ip);
         defer self.allocator.free(c_ip);
 
-        const result = FrpAddTcpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
+        const result = c.FrpAddTcpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
         if (result < 0) {
             return FrpError.AddProxyFailed;
         }
@@ -78,62 +68,44 @@ pub const FrpClient = struct {
         const c_ip = try self.allocator.dupeZ(u8, local_ip);
         defer self.allocator.free(c_ip);
 
-        const result = FrpAddUdpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
+        const result = c.FrpAddUdpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
         if (result < 0) {
             return FrpError.AddProxyFailed;
         }
     }
 
+    pub fn flush(self: *FrpClient) !void {
+        const result = c.FrpFlushClient(self.id);
+        if (result < 0) return FrpError.FlushFailed;
+    }
+
     pub fn start(self: *FrpClient) !void {
-        const result = FrpStartClient(self.id);
+        const result = c.FrpStartClient(self.id);
         if (result < 0) {
             return FrpError.StartFailed;
         }
     }
 
     pub fn stop(self: *FrpClient) !void {
-        const result = FrpStopClient(self.id);
+        const result = c.FrpStopClient(self.id);
         if (result < 0) {
             return FrpError.StopFailed;
         }
     }
 
     pub fn deinit(self: *FrpClient) void {
-        _ = FrpDestroyClient(self.id);
+        _ = c.FrpDestroyClient(self.id);
     }
 };
 
 pub fn getVersion(allocator: std.mem.Allocator) ![]const u8 {
-    const c_version = FrpGetVersion();
-    defer FrpFreeString(c_version);
+    const c_version = c.FrpGetVersion();
+    defer c.FrpFreeString(c_version);
 
     const len = std.mem.len(c_version);
     return try allocator.dupe(u8, c_version[0..len]);
 }
 
 pub fn cleanup() void {
-    FrpCleanup();
-}
-
-// 测试用例
-test "frp client basic usage" {
-    const allocator = std.testing.allocator;
-
-    // 获取版本
-    const version = try getVersion(allocator);
-    defer allocator.free(version);
-    std.debug.print("FRP Version: {s}\n", .{version});
-
-    // 创建客户端
-    var client = try FrpClient.init(allocator, "127.0.0.1", 7000, null);
-    defer client.deinit();
-
-    // 添加代理
-    try client.addTcpProxy("ssh", "127.0.0.1", 22, 6000);
-    try client.addUdpProxy("dns", "127.0.0.1", 53, 6053);
-
-    // 注意：这里不真正启动客户端，因为需要真实的 FRP 服务器
-    // try client.start();
-    // std.time.sleep(2 * std.time.ns_per_s);
-    // try client.stop();
+    c.FrpCleanup();
 }

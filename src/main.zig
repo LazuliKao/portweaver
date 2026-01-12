@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
+const frp_forward = if (build_options.frpc_mode) @import("impl/frp_forward.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
 const builtin = @import("builtin");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
@@ -37,6 +38,9 @@ pub fn main() !void {
     var handles: std.array_list.Managed(project_status.ProjectHandle) = .init(allocator);
     defer {
         project_status.stopAll(&handles);
+        if (build_options.frpc_mode) {
+            frp_forward.stopAll();
+        }
         // Clean up config after stopping all threads
         cfg.deinit(allocator);
     }
@@ -189,6 +193,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
             const thread = std.Thread.spawn(.{}, startForwardingThread, .{
                 allocator,
                 handle,
+                &cfg.frp_nodes,
             }) catch |err| {
                 std.log.debug("Error: Failed to spawn forwarding thread: {any}", .{err});
                 continue;
@@ -202,7 +207,11 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
 }
 
 /// 在独立线程中启动转发
-fn startForwardingThread(allocator: std.mem.Allocator, handle: *project_status.ProjectHandle) void {
+fn startForwardingThread(
+    allocator: std.mem.Allocator,
+    handle: *project_status.ProjectHandle,
+    frp_nodes: *const std.StringHashMap(config.FrpNode),
+) void {
     std.log.debug("[FORWARDING_THREAD] Starting for project {d} ({s}), enable_app_forward={}, enable_stats={}", .{ handle.id, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_stats });
     app_forward.startForwarding(allocator, handle) catch |err| {
         std.log.debug("Error: Failed to start forwarding for {s}: {any}", .{ handle.cfg.remark, err });
@@ -212,4 +221,10 @@ fn startForwardingThread(allocator: std.mem.Allocator, handle: *project_status.P
             }
         }
     };
+
+    if (build_options.frpc_mode) {
+        frp_forward.startForwarding(allocator, handle, frp_nodes) catch |err| {
+            std.log.debug("Error: Failed to start FRP forwarding for {s}: {any}", .{ handle.cfg.remark, err });
+        };
+    }
 }

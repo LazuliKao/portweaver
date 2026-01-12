@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/fatedier/frp/client"
@@ -45,8 +44,9 @@ type clientWrapper struct {
 func main() {}
 
 //export FrpInit
-func FrpInit() C.int {
-	return 0
+func FrpInit() {
+	// log.InitLogger("output.txt", "debug", 7, true)
+
 }
 
 //export FrpCreateClient
@@ -178,27 +178,43 @@ func FrpAddUdpProxy(
 	return 0
 }
 
-//export FrpStartClient
-func FrpStartClient(clientID C.int) C.int {
-	// log.InitLogger("output.txt", "debug", 7, true)
+func makeProxyConfigurers(proxies []v1.TypedProxyConfig) []v1.ProxyConfigurer {
+	// 转换代理配置为 ProxyConfigurer 类型
+	proxyConfigurers := make([]v1.ProxyConfigurer, 0, len(proxies))
+	for _, p := range proxies {
+		proxyConfigurers = append(proxyConfigurers, p.ProxyConfigurer)
+	}
+	return proxyConfigurers
+}
+
+//export FrpFlushClient
+func FrpFlushClient(clientID C.int) C.int {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
-
 	if !ok {
 		return -1
 	}
+	wrapper.service.UpdateAllConfigurer(makeProxyConfigurers(wrapper.proxies), nil)
+	return 0
+}
 
-	// 转换代理配置为 ProxyConfigurer 类型
-	proxyConfigurers := make([]v1.ProxyConfigurer, 0, len(wrapper.proxies))
-	for _, p := range wrapper.proxies {
-		proxyConfigurers = append(proxyConfigurers, p.ProxyConfigurer)
+//export FrpStartClient
+func FrpStartClient(clientID C.int) C.int {
+	clientsMutex.RLock()
+	wrapper, ok := clients[int(clientID)]
+	clientsMutex.RUnlock()
+	if !ok {
+		return -1
+	}
+	if wrapper.service != nil {
+		return -3
 	}
 
 	// 使用新的 API 创建 FRP 客户端服务
 	svr, err := client.NewService(client.ServiceOptions{
 		Common:      wrapper.config,
-		ProxyCfgs:   proxyConfigurers,
+		ProxyCfgs:   makeProxyConfigurers(wrapper.proxies),
 		VisitorCfgs: nil,
 	})
 	if err != nil {
@@ -215,7 +231,6 @@ func FrpStartClient(clientID C.int) C.int {
 			fmt.Printf("FRP client error: %v\n", err)
 		}
 	}()
-
 	return 0
 }
 
@@ -231,9 +246,7 @@ func FrpStopClient(clientID C.int) C.int {
 
 	// 取消上下文以停止服务
 	wrapper.cancel()
-
-	// 等待服务完全停止
-	time.Sleep(100 * time.Millisecond)
+	wrapper.service = nil
 
 	return 0
 }
@@ -250,7 +263,7 @@ func FrpDestroyClient(clientID C.int) C.int {
 
 	// 确保服务已停止
 	wrapper.cancel()
-	time.Sleep(100 * time.Millisecond)
+	wrapper.service = nil
 
 	// 从全局map中删除
 	delete(clients, int(clientID))

@@ -26,12 +26,18 @@
         {
           "listen_port": 8080,
           "target_port": 80,
-          "protocol": "tcp"
+          "protocol": "tcp",
+          "frp": [
+            "node1:9888"
+          ]
         },
         {
           "listen_port": 19132,
           "target_port": 19132,
-          "protocol": "udp"
+          "protocol": "udp",
+          "frp": [
+            "node1:9889"
+          ]
         }
       ]
     },
@@ -40,6 +46,9 @@
       "target_address": "127.0.0.1",
       "listen_port": 8080,
       "target_port": 80,
+      "frp": [
+        "node1"
+      ],
       "protocol": "tcp",
       "family": "any",
       "enable_app_forward": true,
@@ -85,5 +94,17 @@
         "lan"
       ]
     }
-  ]
+  ],
+  "frp": {
+    "node1": {
+      "server": "1.2.3.4",
+      "port": 7000,
+      "token": "xxx"
+    },
+    "node2": {
+      "server": "4.2.3.4",
+      "port": 7000,
+      "token": "xxx"
+    }
+  }
 }

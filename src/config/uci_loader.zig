@@ -1,74 +1,11 @@
 const std = @import("std");
 const uci = @import("../uci/mod.zig");
 const types = @import("types.zig");
-
+const helper = @import("helper.zig");
 fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return;
     try list.append(try allocator.dupe(u8, trimmed));
-}
-
-/// Parse a port mapping string in the format: "listen_port[:target_port][/protocol]"
-/// Examples:
-///   "8080-8090:80-90/udp"  - port range with protocol
-///   "443:8443/tcp"         - single port with protocol
-///   "80"                   - single port (tcp default, target_port = listen_port)
-///   "8080:80"              - single port with different target (tcp default)
-fn parsePortMapping(allocator: std.mem.Allocator, s: []const u8) !types.PortMapping {
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
-    if (trimmed.len == 0) return types.ConfigError.InvalidValue;
-
-    var mapping = types.PortMapping{
-        .listen_port = undefined,
-        .target_port = undefined,
-        .protocol = .tcp,
-    };
-
-    // Split by '/' to extract protocol
-    var protocol_split = std.mem.splitScalar(u8, trimmed, '/');
-    const port_part = protocol_split.next() orelse return types.ConfigError.InvalidValue;
-
-    if (protocol_split.next()) |proto_str| {
-        mapping.protocol = try types.parseProtocol(proto_str);
-    }
-
-    // Split by ':' to extract listen_port and target_port
-    var port_split = std.mem.splitScalar(u8, port_part, ':');
-    const listen_str = port_split.next() orelse return types.ConfigError.InvalidValue;
-
-    mapping.listen_port = try allocator.dupe(u8, std.mem.trim(u8, listen_str, " \t\r\n"));
-
-    if (port_split.next()) |target_str| {
-        mapping.target_port = try allocator.dupe(u8, std.mem.trim(u8, target_str, " \t\r\n"));
-    } else {
-        // If no target_port specified, use listen_port (shorthand like "8080-8090/udp")
-        mapping.target_port = try allocator.dupe(u8, mapping.listen_port);
-    }
-
-    // Validate port string formats (single port or range)
-    try types.validatePortString(mapping.listen_port);
-    try types.validatePortString(mapping.target_port);
-
-    // If listen is a range, ensure target is also a range and sizes match.
-    const listen_dash = std.mem.indexOf(u8, mapping.listen_port, "-");
-    const target_dash = std.mem.indexOf(u8, mapping.target_port, "-");
-
-    if (listen_dash) |ld| {
-        if (target_dash == null) return types.ConfigError.InvalidValue;
-
-        const l_start = try types.parsePort(mapping.listen_port[0..ld]);
-        const l_end = try types.parsePort(mapping.listen_port[ld + 1 ..]);
-        const td = target_dash.?; // already checked availability
-        const t_start = try types.parsePort(mapping.target_port[0..td]);
-        const t_end = try types.parsePort(mapping.target_port[td + 1 ..]);
-
-        if (l_end - l_start != t_end - t_start) return types.ConfigError.InvalidValue;
-    } else if (target_dash != null) {
-        // target is a range but listen is single -> invalid
-        return types.ConfigError.InvalidValue;
-    }
-
-    return mapping;
 }
 
 fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !types.Project {
@@ -176,12 +113,12 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
                 var val_it = opt.values();
                 while (val_it.next()) |val| {
                     const s = uci.cStr(val);
-                    const mapping = parsePortMapping(allocator, s) catch continue;
+                    const mapping = helper.parsePortMapping(allocator, s) catch continue;
                     try port_mappings_list.append(mapping);
                 }
             } else if (opt.isString()) {
                 const opt_val = uci.cStr(opt.getString());
-                const mapping = parsePortMapping(allocator, opt_val) catch continue;
+                const mapping = helper.parsePortMapping(allocator, opt_val) catch continue;
                 try port_mappings_list.append(mapping);
             }
         }
@@ -245,5 +182,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try list.append(project);
     }
 
-    return .{ .projects = try list.toOwnedSlice() };
+    const frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes };
 }

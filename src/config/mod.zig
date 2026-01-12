@@ -7,6 +7,9 @@ const types = @import("types.zig");
 pub const ConfigError = types.ConfigError;
 pub const AddressFamily = types.AddressFamily;
 pub const Protocol = types.Protocol;
+pub const FrpNode = types.FrpNode;
+pub const FrpForward = types.FrpForward;
+pub const PortMapping = types.PortMapping;
 pub const Project = types.Project;
 pub const Config = types.Config;
 
