@@ -145,15 +145,13 @@ fn applyFirewallRules(allocator: std.mem.Allocator, projects: []const config.Pro
         std.log.info("Applying project {d}: {s}", .{ i + 1, project.remark });
         logProjectConfig(project);
 
-        // 应用防火墙规则（统计模式下跳过）
-        if (project.enable_stats) {
-            std.log.info("  Statistics enabled - skipping firewall forward rules (mutually exclusive)", .{});
-        } else {
-            std.log.debug("  Applying firewall rules...", .{});
-            firewall.applyFirewallRulesForProject(uci_ctx, allocator, project) catch |err| {
-                std.log.warn("Failed to apply firewall rules for project {d}: {any}", .{ i + 1, err });
-            };
-        }
+        // 应用防火墙规则
+        // 注意：即使启用统计模式，应用层转发仍需要 ACCEPT 规则来放通端口
+        // applyFirewallRulesForProject 会根据配置标志智能决定需要哪些规则
+        std.log.debug("  Applying firewall rules...", .{});
+        firewall.applyFirewallRulesForProject(uci_ctx, allocator, project) catch |err| {
+            std.log.warn("Failed to apply firewall rules for project {d}: {any}", .{ i + 1, err });
+        };
     }
 
     // 重新加载防火墙配置

@@ -288,11 +288,20 @@ pub fn clearFirewallRules(ctx: uci.UciContext, allocator: std.mem.Allocator) !vo
 }
 
 /// 根据配置项应用防火墙规则
+///
+/// 逻辑说明：
+/// 1. open_firewall_port=true: 添加 ACCEPT 规则（放通端口）
+/// 2. add_firewall_forward=true: 添加 DNAT/redirect 规则（防火墙层转发）
+/// 3. enable_app_forward=true + add_firewall_forward=false: 只需要 ACCEPT 规则
+/// 4. enable_app_forward=false + add_firewall_forward=true: 需要 ACCEPT + DNAT 规则
+/// 5. enable_stats=true: 跳过 DNAT/redirect 规则（与防火墙转发互斥），但仍需 ACCEPT 规则
 pub fn applyFirewallRulesForProject(
     ctx: uci.UciContext,
     allocator: std.mem.Allocator,
     project: types.Project,
 ) !void {
+    // 统计模式与防火墙转发互斥，但仍需要 ACCEPT 规则来放通端口
+    const should_add_forward = project.add_firewall_forward and !project.enable_stats;
     const family: ?types.AddressFamily = if (project.family == .any) null else project.family;
 
     // 检查是单端口模式还是多端口模式
@@ -325,8 +334,10 @@ pub fn applyFirewallRulesForProject(
                 }
             }
 
-            // 如果需要添加防火墙转发
-            if (project.add_firewall_forward) {
+            // 只有在明确启用防火墙转发时才添加 DNAT/redirect 规则
+            // 应用层转发不需要这些规则
+            // 统计模式下也跳过（与防火墙转发互斥）
+            if (should_add_forward) {
                 const default_src_zones = [_][]const u8{"wan"};
                 const default_dest_zones = [_][]const u8{"lan"};
 
@@ -390,8 +401,10 @@ pub fn applyFirewallRulesForProject(
             }
         }
 
-        // 如果需要添加防火墙转发
-        if (project.add_firewall_forward) {
+        // 只有在明确启用防火墙转发时才添加 DNAT/redirect 规则
+        // 应用层转发不需要这些规则
+        // 统计模式下也跳过（与防火墙转发互斥）
+        if (should_add_forward) {
             const default_src_zones = [_][]const u8{"wan"};
             const default_dest_zones = [_][]const u8{"lan"};
 
