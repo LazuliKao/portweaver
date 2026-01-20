@@ -1,19 +1,7 @@
 package main
 
-/*
-#include <stdlib.h>
-#include <string.h>
-
-typedef struct {
-    char* name;
-    char* type;
-    char* local_ip;
-    int local_port;
-    int remote_port;
-} ProxyConfig;
-
-typedef void* FrpClient;
-*/
+// #include <stdlib.h>
+// #include <string.h>
 import "C"
 import (
 	"context"
@@ -203,7 +191,7 @@ func FrpFlushClient(clientID C.int) C.int {
 func FrpStartClient(clientID C.int) C.int {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
-	clientsMutex.RUnlock()
+	defer clientsMutex.RUnlock()
 	if !ok {
 		return -1
 	}
