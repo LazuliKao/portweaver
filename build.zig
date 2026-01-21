@@ -449,6 +449,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Development remote mode: auto-build and upload to remote device
+    const dev_remote_step = b.step("dev-remote", "Watch, build, and auto-upload to remote OpenWrt device");
+    const dev_remote_cmd = b.addSystemCommand(&.{
+        "dotnet",
+        "fsi",
+        "scripts/dev-remote.fsx",
+    });
+    dev_remote_step.dependOn(&dev_remote_cmd.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
