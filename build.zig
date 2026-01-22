@@ -204,7 +204,7 @@ fn addGoLibrary(
     go_cmd.setEnvironmentVariable("GOARCH", goarch);
 
     const zig_exe = b.graph.zig_exe;
-    const target_triple = target.result.zigTriple(b.allocator) catch @panic("Failed to get target triple");
+    const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
     const cc_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" cc -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
     const cxx_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" c++ -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
