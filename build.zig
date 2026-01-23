@@ -218,9 +218,9 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     // 设置使用 zig cc/c++ 作为 C/C++ 编译器（交叉编译的关键）
     // 需要用引号包裹路径以处理空格
-    const cc_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" cc -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
-    const cxx_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" c++ -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
-    const ar_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" ar", .{zig_exe}) catch @panic("OOM");
+    const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
+    const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
+    const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
     go_cmd.setEnvironmentVariable("CC", cc_cmd);
     go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
