@@ -207,9 +207,9 @@ fn addGoLibrary(
     const zig_exe = b.graph.zig_exe;
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
-    const cc_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" cc -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
-    const cxx_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" c++ -target {s}", .{ zig_exe, target_triple }) catch @panic("OOM");
-    const ar_cmd = std.fmt.allocPrint(b.allocator, "\"{s}\" ar", .{zig_exe}) catch @panic("OOM");
+    const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
+    const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
+    const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
     go_cmd.setEnvironmentVariable("CC", cc_cmd);
     go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
