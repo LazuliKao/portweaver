@@ -196,6 +196,7 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
                 "go",
                 "build",
                 "-buildmode=c-archive",
+                "-ldflags=-linkmode external -extldflags -static",
                 "-o",
                 output_name,
                 "libfrp.go",
@@ -228,6 +229,9 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     if (optimize == .ReleaseSmall) {
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
         go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
+    } else {
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", "-static");
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "-static");
     }
     return &go_cmd.step;
 }
@@ -388,7 +392,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // For dynamic linking at runtime
-    exe.linkage = .dynamic;
+    exe.linkage = .static;
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
