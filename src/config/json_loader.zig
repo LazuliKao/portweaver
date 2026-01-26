@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const helper = @import("helper.zig");
 
 fn jsonGetAliased(obj: std.json.ObjectMap, keys: []const []const u8) ?std.json.Value {
     for (keys) |k| {
@@ -89,13 +90,13 @@ fn parseJsonFrpForwards(
 
     switch (v) {
         .string => |s| {
-            const fwd = try parseFrpForwardString(allocator, s);
+            const fwd = try helper.parseFrpForwardString(allocator, s);
             try list.append(fwd);
         },
         .array => |a| {
             for (a.items) |item| {
                 const s = try parseJsonString(item);
-                const fwd = try parseFrpForwardString(allocator, s);
+                const fwd = try helper.parseFrpForwardString(allocator, s);
                 try list.append(fwd);
             }
         },
@@ -103,32 +104,6 @@ fn parseJsonFrpForwards(
     }
 
     return try list.toOwnedSlice();
-}
-
-fn parseFrpForwardString(allocator: std.mem.Allocator, s: []const u8) !types.FrpForward {
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
-    if (trimmed.len == 0) return types.ConfigError.InvalidValue;
-
-    // 格式: "node_name:port" 或 "node_name"
-    if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
-        const node_name = std.mem.trim(u8, trimmed[0..colon_pos], " \t\r\n");
-        const port_str = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " \t\r\n");
-
-        if (node_name.len == 0) return types.ConfigError.InvalidValue;
-        const port = try types.parsePort(port_str);
-
-        return .{
-            .node_name = try allocator.dupe(u8, node_name),
-            .remote_port = port,
-        };
-    } else {
-        // 没有指定端口，默认为 0（可能由服务端分配）
-        if (trimmed.len == 0) return types.ConfigError.InvalidValue;
-        return .{
-            .node_name = try allocator.dupe(u8, trimmed),
-            .remote_port = 0,
-        };
-    }
 }
 
 pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.Config {

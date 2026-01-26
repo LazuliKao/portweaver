@@ -182,7 +182,145 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try list.append(project);
     }
 
-    const frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+    // Parse FRP nodes from UCI config
+    var frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+    errdefer {
+        var it = frp_nodes.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        frp_nodes.deinit();
+    }
+
+    var frp_sec_it = uci.sections(pkg);
+    while (frp_sec_it.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+        if (!std.mem.eql(u8, sec_type, "frp_node")) continue;
+
+        var frp_node = types.FrpNode{
+            .server = undefined,
+            .port = 0,
+            .token = &.{},
+        };
+        var node_name: []const u8 = "";
+        var have_server = false;
+        var have_port = false;
+
+        // Get node name from section name or 'name' option
+        const sec_name = uci.cStr(sec.name());
+        if (sec_name.len > 0) {
+            node_name = sec_name;
+        }
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (!opt.isString()) continue;
+            const opt_val = uci.cStr(opt.getString());
+
+            if (std.mem.eql(u8, opt_name, "name")) {
+                // Override node name if explicitly specified
+                node_name = opt_val;
+            } else if (std.mem.eql(u8, opt_name, "server") or std.mem.eql(u8, opt_name, "address") or std.mem.eql(u8, opt_name, "host")) {
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                frp_node.server = try allocator.dupe(u8, trimmed);
+                have_server = true;
+            } else if (std.mem.eql(u8, opt_name, "port")) {
+                frp_node.port = try types.parsePort(opt_val);
+                have_port = true;
+            } else if (std.mem.eql(u8, opt_name, "token") or std.mem.eql(u8, opt_name, "auth_token")) {
+                frp_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
+            }
+        }
+
+        // Validate FRP node
+        if (node_name.len == 0 or !have_server or !have_port) {
+            if (have_server) allocator.free(frp_node.server);
+            if (frp_node.token.len != 0) allocator.free(frp_node.token);
+            continue; // Skip invalid nodes
+        }
+
+        const node_name_owned = try allocator.dupe(u8, node_name);
+        errdefer allocator.free(node_name_owned);
+
+        try frp_nodes.put(node_name_owned, frp_node);
+    }
+
+    // Parse frp_nodes list from project sections
+    var sec_it3 = uci.sections(pkg);
+    while (sec_it3.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+        if (!(std.mem.eql(u8, sec_type, "project") or std.mem.eql(u8, sec_type, "rule"))) continue;
+
+        // Find the corresponding project
+        var project_idx: ?usize = null;
+        const sec_name = uci.cStr(sec.name());
+        for (list.items, 0..) |*proj, idx| {
+            // Match by section name or order (this is simplified)
+            _ = proj;
+            _ = sec_name;
+            project_idx = idx;
+            break;
+        }
+
+        if (project_idx == null) continue;
+
+        var frp_list = std.array_list.Managed(types.FrpForward).init(allocator);
+        defer frp_list.deinit();
+        errdefer {
+            for (frp_list.items) |*f| f.deinit(allocator);
+        }
+
+        var opt_it4 = sec.options();
+        while (opt_it4.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (!std.mem.eql(u8, opt_name, "frp_nodes") and !std.mem.eql(u8, opt_name, "frp")) continue;
+
+            if (opt.isList()) {
+                var val_it = opt.values();
+                while (val_it.next()) |val| {
+                    const s = uci.cStr(val);
+                    const fwd = helper.parseFrpForwardString(allocator, s) catch continue;
+                    try frp_list.append(fwd);
+                }
+            } else if (opt.isString()) {
+                const opt_val = uci.cStr(opt.getString());
+                const fwd = helper.parseFrpForwardString(allocator, opt_val) catch continue;
+                try frp_list.append(fwd);
+            }
+        }
+
+        // Assign FRP forwards to the project's first port mapping or create a default one
+        if (frp_list.items.len > 0) {
+            if (list.items[project_idx.?].port_mappings.len > 0) {
+                list.items[project_idx.?].port_mappings[0].frp = try frp_list.toOwnedSlice();
+            } else {
+                // Create a default port mapping if none exists (mirror single-port mode)
+                const listen_str = try std.fmt.allocPrint(allocator, "{d}", .{list.items[project_idx.?].listen_port});
+                errdefer allocator.free(listen_str);
+                const target_str = try std.fmt.allocPrint(allocator, "{d}", .{list.items[project_idx.?].target_port});
+                errdefer allocator.free(target_str);
+
+                const owned_frp = try frp_list.toOwnedSlice();
+                errdefer {
+                    for (owned_frp) |*f| f.deinit(allocator);
+                    allocator.free(owned_frp);
+                }
+
+                const default_mapping = types.PortMapping{
+                    .listen_port = listen_str,
+                    .target_port = target_str,
+                    .protocol = list.items[project_idx.?].protocol,
+                    .frp = owned_frp,
+                };
+
+                const owned_slice = try allocator.alloc(types.PortMapping, 1);
+                owned_slice[0] = default_mapping;
+                list.items[project_idx.?].port_mappings = owned_slice;
+            }
+        }
+    }
 
     return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes };
 }

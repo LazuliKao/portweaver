@@ -208,7 +208,7 @@ fn ubusThread(state: *RuntimeState) void {
         return;
     };
 
-    std.log.info("ubus: server started successfully.\n", .{});
+    std.log.info("ubus: server started successfully.", .{});
 
     ubox.uloopRun(-1) catch {};
     ubus.ubus_free(ctx) catch {};

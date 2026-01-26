@@ -9,6 +9,7 @@ const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else
 // 仅在 UCI 模式下导入 UCI 相关模块
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
+
 pub fn main() !void {
     // 设置分配器：Debug 模式使用 GPA 检测内存泄漏，Release 模式使用 c_allocator
     const GPAType = std.heap.GeneralPurposeAllocator(.{});
@@ -30,6 +31,9 @@ pub fn main() !void {
 
     @import("impl/app_forward/uv.zig").printVersion();
     std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
+    if (build_options.frpc_mode) {
+        std.log.info("FRP client mode enabled (build flag)", .{});
+    }
 
     var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
     defer {
@@ -41,7 +45,7 @@ pub fn main() !void {
     }
 
     // 应用配置并启动服务
-    const has_app_forward = try applyConfig(allocator, &handles, cfg);
+    const has_app_forward = try applyConfig(allocator, &handles, &cfg);
 
     if (build_options.ubus_mode) {
         ubus_server.start(allocator, handles) catch |err| {
@@ -55,8 +59,9 @@ pub fn main() !void {
     if (has_app_forward or build_options.ubus_mode) {
         const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
+        // Keep program running with periodic sleep
         while (true) {
-            std.Thread.sleep(std.time.ns_per_s);
+            std.Thread.sleep(100 * std.time.ns_per_ms); // Sleep for 100ms instead of 1 second to be more responsive
         }
     }
 }
@@ -108,7 +113,7 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_lis
     }
 }
 /// 应用配置：设置防火墙规则并启动应用层转发
-fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandle), cfg: config.Config) !bool {
+fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandle), cfg: *const config.Config) !bool {
     // 设置所有项目
     for (cfg.projects, 0..) |project, i| {
         setupProject(allocator, i, handles, project) catch |err| {

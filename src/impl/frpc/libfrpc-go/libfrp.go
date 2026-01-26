@@ -33,8 +33,10 @@ func main() {}
 
 //export FrpInit
 func FrpInit() {
-	// log.InitLogger("output.txt", "debug", 7, true)
-
+	// 初始化日志系统（可选，根据需要配置日志文件路径和级别）
+	// log.InitLogger("/tmp/frpc.log", "debug", 7, true)
+	// test log 
+	fmt.Println("FRP library initialized.")
 }
 
 //export FrpCreateClient

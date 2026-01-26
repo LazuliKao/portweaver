@@ -55,7 +55,7 @@ pub fn main() !void {
     try client.start();
     std.debug.print("✓ FRP Client started successfully!\n\n", .{});
 
-    std.debug.print("Press Ctrl+C to stop...\n", .{});
+    std.debug.print("Press Ctrl+C to stop...", .{});
 
     // 保持运行状态
     // 在实际应用中，这里应该等待某个信号或事件
