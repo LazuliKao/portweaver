@@ -5,6 +5,7 @@ const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
 const c = ubox.c;
 const project_status = @import("../impl/project_status.zig");
+const frp_status = @import("../impl/frp_status.zig");
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
 const STATUS_DEGRADED: [:0]const u8 = "degraded";
@@ -109,6 +110,7 @@ const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
     pub const set_enabled: [:0]const u8 = "set_enabled";
+    pub const get_frp_status: [:0]const u8 = "get_frp_status";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -128,6 +130,8 @@ const field_names = struct {
     pub const last_changed: [:0]const u8 = "last_changed";
     pub const startup_status: [:0]const u8 = "startup_status";
     pub const error_code: [:0]const u8 = "error_code";
+    pub const frp_enabled: [:0]const u8 = "frp_enabled";
+    pub const frp_version: [:0]const u8 = "frp_version";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -180,6 +184,14 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = &set_enabled_policy,
             .n_policy = @intCast(set_enabled_policy.len),
+        },
+        .{
+            .name = method_names.get_frp_status,
+            .handler = handleGetFrpStatus,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
         },
     };
 
@@ -331,6 +343,41 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     addBool(&buf, field_names.enabled, enabled_flag) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addString(&buf, field_names.status, if (enabled_flag) STATUS_RUNNING else STATUS_STOPPED) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     addU64(&buf, field_names.last_changed, currentTs()) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    const status = frp_status.getFrpStatus(state.allocator) catch |err| {
+        std.log.warn("Failed to get frp status: {any}", .{err});
+        addBool(&buf, field_names.frp_enabled, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {};
+        return c.UBUS_STATUS_OK;
+    };
+    defer {
+        if (status.version) |v| state.allocator.free(v);
+    }
+
+    addBool(&buf, field_names.frp_enabled, status.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (status.version) |v| {
+        const ztv = state.allocator.dupeZ(u8, v) catch {
+            return c.UBUS_STATUS_UNKNOWN_ERROR;
+        };
+        defer state.allocator.free(ztv);
+        addString(&buf, field_names.frp_version, ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;

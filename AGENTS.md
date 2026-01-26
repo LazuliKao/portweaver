@@ -30,3 +30,16 @@ The `src/` directory is organized by functionality:
 - **Global Allocators**: Do not use `std.heap.page_allocator` directly; always use the passed-in allocator.
 - **Blocking I/O**: Avoid blocking operations in the main loop.
 - **Ignoring Errors**: Do not use `catch |err| {}`; always handle or log errors.
+
+## Important Context
+
+### FRP Integration
+
+**FRP is NOT an external program** - it is a statically linked library (`libfrp.a`) compiled from Go and linked into the portweaver binary at build time.
+
+- **Enable FRP**: Use build flag `-Dfrpc=true` in `build.zig`
+- **Check if enabled**: Use `build_options.frpc_mode` (compile-time constant)
+- **Get version**: Import `src/impl/frpc/libfrp.zig` and call `libfrp.getVersion(allocator)`
+- **DO NOT**: Try to detect FRP by running external commands like `pidof frpc` or `frpc --version`
+- **DO**: Check `build_options.frpc_mode` and use libfrp C API through Zig bindings
+
