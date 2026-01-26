@@ -106,11 +106,17 @@ const set_enabled_policy = [_]c.blobmsg_policy{
     .{ .name = "enabled", .type = c.BLOBMSG_TYPE_BOOL },
 };
 
+const frp_info_policy = [_]c.blobmsg_policy{
+    .{ .name = "id", .type = c.BLOBMSG_TYPE_STRING },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
     pub const set_enabled: [:0]const u8 = "set_enabled";
     pub const get_frp_status: [:0]const u8 = "get_frp_status";
+    pub const get_frp_info: [:0]const u8 = "get_frp_info";
+    pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -132,6 +138,9 @@ const field_names = struct {
     pub const error_code: [:0]const u8 = "error_code";
     pub const frp_enabled: [:0]const u8 = "frp_enabled";
     pub const frp_version: [:0]const u8 = "frp_version";
+    pub const frp_status: [:0]const u8 = "frp_status";
+    pub const last_error: [:0]const u8 = "last_error";
+    pub const logs: [:0]const u8 = "logs";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -192,6 +201,22 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = null,
             .n_policy = 0,
+        },
+        .{
+            .name = method_names.get_frp_info,
+            .handler = handleGetFrpInfo,
+            .mask = 0,
+            .tags = 0,
+            .policy = &frp_info_policy,
+            .n_policy = @intCast(frp_info_policy.len),
+        },
+        .{
+            .name = method_names.clear_frp_logs,
+            .handler = handleClearFrpLogs,
+            .mask = 0,
+            .tags = 0,
+            .policy = &frp_info_policy,
+            .n_policy = @intCast(frp_info_policy.len),
         },
     };
 
@@ -372,12 +397,52 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
 
     addBool(&buf, field_names.frp_enabled, status.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (status.version) |v| {
-        const ztv = state.allocator.dupeZ(u8, v) catch {
-            return c.UBUS_STATUS_UNKNOWN_ERROR;
-        };
+        const ztv = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         defer state.allocator.free(ztv);
         addString(&buf, field_names.frp_version, ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetFrpInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+    _ = state;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // For now, return empty response - this will be enhanced when FRP client info is available
+    addString(&buf, field_names.frp_status, "unavailable") catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addString(&buf, field_names.last_error, "") catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleClearFrpLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // For now, this is a placeholder - will be enhanced when FRP client info is available
+    _ = state;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    addBool(&buf, field_names.enabled, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;

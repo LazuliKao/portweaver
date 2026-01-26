@@ -14,6 +14,11 @@ pub const FrpError = error{
     InvalidClientID,
 };
 
+// C declarations for new FRP functions
+extern "c" fn FrpGetStatus(clientID: c_int) [*c]u8;
+extern "c" fn FrpGetLogs(clientID: c_int) [*c]u8;
+extern "c" fn FrpClearLogs(clientID: c_int) void;
+
 pub const ProxyType = enum {
     tcp,
     udp,
@@ -113,6 +118,26 @@ pub const FrpClient = struct {
 
     pub fn deinit(self: *FrpClient) void {
         _ = c.FrpDestroyClient(self.id);
+    }
+
+    pub fn getStatus(self: *FrpClient, allocator: std.mem.Allocator) ![]const u8 {
+        const c_status = c.FrpGetStatus(self.id);
+        defer c.FrpFreeString(c_status);
+
+        const len = std.mem.len(c_status);
+        return try allocator.dupe(u8, c_status[0..len]);
+    }
+
+    pub fn getLogs(self: *FrpClient, allocator: std.mem.Allocator) ![]const u8 {
+        const c_logs = c.FrpGetLogs(self.id);
+        defer c.FrpFreeString(c_logs);
+
+        const len = std.mem.len(c_logs);
+        return try allocator.dupe(u8, c_logs[0..len]);
+    }
+
+    pub fn clearLogs(self: *FrpClient) void {
+        c.FrpClearLogs(self.id);
     }
 };
 

@@ -22,11 +22,34 @@ var (
 )
 
 type clientWrapper struct {
-	service *client.Service
-	ctx     context.Context
-	cancel  context.CancelFunc
-	config  *v1.ClientCommonConfig
-	proxies []v1.TypedProxyConfig
+	service   *client.Service
+	ctx       context.Context
+	cancel    context.CancelFunc
+	config    *v1.ClientCommonConfig
+	proxies   []v1.TypedProxyConfig
+	status    string
+	lastError string
+	logs      []string
+	logMutex  sync.Mutex
+}
+
+type ringBufferLogger struct {
+	wrapper *clientWrapper
+}
+
+func (l *ringBufferLogger) Write(p []byte) (n int, err error) {
+	l.wrapper.logMutex.Lock()
+	defer l.wrapper.logMutex.Unlock()
+
+	line := string(p)
+	l.wrapper.logs = append(l.wrapper.logs, line)
+
+	// Keep only last 500 lines
+	if len(l.wrapper.logs) > 500 {
+		l.wrapper.logs = l.wrapper.logs[len(l.wrapper.logs)-500:]
+	}
+
+	return len(p), nil
 }
 
 func main() {}
@@ -35,7 +58,7 @@ func main() {}
 func FrpInit() {
 	// 初始化日志系统（可选，根据需要配置日志文件路径和级别）
 	// log.InitLogger("/tmp/frpc.log", "debug", 7, true)
-	// test log 
+	// test log
 	fmt.Println("FRP library initialized.")
 }
 
@@ -71,10 +94,14 @@ func FrpCreateClient(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	wrapper := &clientWrapper{
-		ctx:     ctx,
-		cancel:  cancel,
-		config:  &cfg,
-		proxies: make([]v1.TypedProxyConfig, 0),
+		ctx:       ctx,
+		cancel:    cancel,
+		config:    &cfg,
+		proxies:   make([]v1.TypedProxyConfig, 0),
+		status:    "stopped",
+		lastError: "",
+		logs:      make([]string, 0),
+		logMutex:  sync.Mutex{},
 	}
 
 	clientID := nextClientID
@@ -214,12 +241,25 @@ func FrpStartClient(clientID C.int) C.int {
 
 	wrapper.service = svr
 
+	// Update status to connecting
+	wrapper.logMutex.Lock()
+	wrapper.status = "connecting"
+	wrapper.logMutex.Unlock()
+
 	// 在后台启动客户端
 	go func() {
 		err := svr.Run(wrapper.ctx)
+		wrapper.logMutex.Lock()
 		if err != nil && err != context.Canceled {
+			wrapper.status = "error"
+			wrapper.lastError = err.Error()
 			fmt.Printf("FRP client error: %v\n", err)
+		} else if err == context.Canceled {
+			wrapper.status = "stopped"
+		} else {
+			wrapper.status = "connected"
 		}
+		wrapper.logMutex.Unlock()
 	}()
 	return 0
 }
@@ -270,6 +310,67 @@ func FrpGetVersion() *C.char {
 //export FrpFreeString
 func FrpFreeString(str *C.char) {
 	C.free(unsafe.Pointer(str))
+}
+
+//export FrpGetStatus
+func FrpGetStatus(clientID C.int) *C.char {
+	clientsMutex.RLock()
+	wrapper, ok := clients[int(clientID)]
+	clientsMutex.RUnlock()
+
+	if !ok {
+		return C.CString(`{"status":"unknown","last_error":"client not found"}`)
+	}
+
+	wrapper.logMutex.Lock()
+	defer wrapper.logMutex.Unlock()
+
+	statusJSON := fmt.Sprintf(`{"status":"%s","last_error":"%s"}`, wrapper.status, wrapper.lastError)
+	return C.CString(statusJSON)
+}
+
+//export FrpGetLogs
+func FrpGetLogs(clientID C.int) *C.char {
+	clientsMutex.RLock()
+	wrapper, ok := clients[int(clientID)]
+	clientsMutex.RUnlock()
+
+	if !ok {
+		return C.CString(`[]`)
+	}
+
+	wrapper.logMutex.Lock()
+	defer wrapper.logMutex.Unlock()
+
+	// Convert logs to JSON array
+	logsJSON := "["
+	for i, log := range wrapper.logs {
+		if i > 0 {
+			logsJSON += ","
+		}
+		// Escape quotes in log lines
+		escaped := fmt.Sprintf("%q", log)
+		logsJSON += escaped
+	}
+	logsJSON += "]"
+
+	return C.CString(logsJSON)
+}
+
+//export FrpClearLogs
+func FrpClearLogs(clientID C.int) {
+	clientsMutex.RLock()
+	wrapper, ok := clients[int(clientID)]
+	clientsMutex.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	wrapper.logMutex.Lock()
+	defer wrapper.logMutex.Unlock()
+
+	wrapper.logs = make([]string, 0)
 }
 
 //export FrpCleanup
