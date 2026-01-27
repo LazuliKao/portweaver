@@ -341,6 +341,78 @@ pub fn getAggregatedStatus(allocator: std.mem.Allocator) !struct {
     };
 }
 
+/// Get the status of a specific FRP client by node name
+/// Caller owns all returned strings and must free them
+pub fn getClientStatus(allocator: std.mem.Allocator, node_name: []const u8) !struct {
+    status: []const u8,
+    last_error: []const u8,
+    logs: []const u8,
+} {
+    clients_lock.lock();
+    defer clients_lock.unlock();
+
+    // No clients initialized
+    if (clients == null) {
+        return .{
+            .status = try allocator.dupe(u8, "stopped"),
+            .last_error = try allocator.dupe(u8, ""),
+            .logs = try allocator.dupe(u8, ""),
+        };
+    }
+    const map = clients.?;
+
+    const holder = map.get(node_name) orelse {
+        // Node not found
+        return .{
+            .status = try allocator.dupe(u8, "stopped"),
+            .last_error = try allocator.dupe(u8, ""),
+            .logs = try allocator.dupe(u8, ""),
+        };
+    };
+
+    // Client exists but not started
+    if (!holder.started) {
+        return .{
+            .status = try allocator.dupe(u8, "stopped"),
+            .last_error = try allocator.dupe(u8, ""),
+            .logs = try allocator.dupe(u8, ""),
+        };
+    }
+
+    // Client is started - get actual status and logs
+    const status_json = try holder.client.getStatus(allocator);
+    defer allocator.free(status_json);
+    std.log.info("status {s}", .{status_json});
+
+    const logs = try holder.client.getLogs(allocator);
+    errdefer allocator.free(logs);
+
+    const parsed = try parseStatusJson(allocator, status_json);
+    // Note: logs is already owned by caller, parsed.status and parsed.last_error also owned
+
+    return .{
+        .status = parsed.status,
+        .last_error = parsed.last_error,
+        .logs = logs,
+    };
+}
+
+/// Clear the logs of a specific FRP client by node name
+/// This is idempotent - returns success if node not found or not started
+pub fn clearClientLogs(node_name: []const u8) void {
+    clients_lock.lock();
+    defer clients_lock.unlock();
+
+    if (clients == null) return;
+
+    const map = clients.?;
+    const holder = map.get(node_name) orelse return;
+
+    if (!holder.started) return;
+
+    holder.client.clearLogs();
+}
+
 /// Parse the status JSON from FrpGetStatus
 fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
     status: []const u8,

@@ -11,7 +11,9 @@ import (
 
 	"github.com/fatedier/frp/client"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/pkg/util/version"
+	golib_log "github.com/fatedier/golib/log"
 )
 
 // 全局客户端管理
@@ -241,25 +243,25 @@ func FrpStartClient(clientID C.int) C.int {
 
 	wrapper.service = svr
 
-	// Update status to connecting
+	logger := &ringBufferLogger{wrapper: wrapper}
+	log.Logger = log.Logger.WithOptions(golib_log.WithOutput(logger))
+
 	wrapper.logMutex.Lock()
-	wrapper.status = "connecting"
+	wrapper.status = "connected"
 	wrapper.logMutex.Unlock()
 
-	// 在后台启动客户端
 	go func() {
 		err := svr.Run(wrapper.ctx)
 		wrapper.logMutex.Lock()
+		defer wrapper.logMutex.Unlock()
 		if err != nil && err != context.Canceled {
 			wrapper.status = "error"
 			wrapper.lastError = err.Error()
-			fmt.Printf("FRP client error: %v\n", err)
+			fmt.Printf("FRP client error: %v\\n", err)
 		} else if err == context.Canceled {
 			wrapper.status = "stopped"
-		} else {
-			wrapper.status = "connected"
 		}
-		wrapper.logMutex.Unlock()
+		// No 'else' branch for "connected" here, as it's set above
 	}()
 	return 0
 }
