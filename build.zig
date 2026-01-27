@@ -1,5 +1,30 @@
 const std = @import("std");
+fn applyLinkOptimization(_: *std.Build, exe: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
+    // fix x_cgo_setenv crash
+    exe.link_function_sections = true;
+    exe.link_data_sections = true;
+    exe.link_gc_sections = true;
 
+    if (optimize == .ReleaseSmall) {
+        exe.root_module.unwind_tables = .none;
+        exe.lto = .full;
+        exe.root_module.strip = true;
+    }
+}
+fn applyCOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
+    if (optimize == .ReleaseSmall) {
+        return "-O1 -ffunction-sections -fdata-sections -s -flto";
+    } else {
+        return "-O1 -ffunction-sections -fdata-sections";
+    }
+}
+fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
+    if (optimize == .ReleaseSmall) {
+        return "-Wl -O1 --gc-sections --strip-all -flto";
+    } else {
+        return "-Wl -O1 --gc-sections";
+    }
+}
 fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const uv = b.addLibrary(.{
         .name = "uv",
@@ -10,9 +35,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             .optimize = optimize,
         }),
     });
-    if (optimize == .ReleaseSmall) {
-        uv.root_module.unwind_tables = .none;
-    }
+    applyLinkOptimization(b, uv, optimize);
 
     uv.addIncludePath(b.path("deps/libuv/include"));
     // libuv has internal headers included from its own C sources.
@@ -186,7 +209,7 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
                 "build",
                 "-buildmode=c-archive",
                 "-trimpath",
-                "-ldflags=-s -extldflags=-static -w -buildid=",
+                "-ldflags=-linkmode external -s -extldflags=-static -w -buildid=",
                 "-o",
                 output_name,
                 "libfrp.go",
@@ -196,7 +219,7 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
                 "go",
                 "build",
                 "-buildmode=c-archive",
-                "-ldflags=-linkmode external -extldflags -static",
+                "-ldflags=-linkmode external -extldflags=-static",
                 "-o",
                 output_name,
                 "libfrp.go",
@@ -215,7 +238,7 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const zig_exe = b.graph.zig_exe;
 
     // 构建目标三元组
-    const target_triple = target.result.zigTriple(b.allocator) catch @panic("Failed to get target triple");
+    const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
     // 设置使用 zig cc/c++ 作为 C/C++ 编译器（交叉编译的关键）
     // 需要用引号包裹路径以处理空格
@@ -227,11 +250,11 @@ fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
     go_cmd.setEnvironmentVariable("AR", ar_cmd);
     if (optimize == .ReleaseSmall) {
-        go_cmd.setEnvironmentVariable("CGO_CFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
-        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "-Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections");
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static -O1 {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static -O1 {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     } else {
-        go_cmd.setEnvironmentVariable("CGO_CFLAGS", "-static");
-        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "-static");
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     }
     return &go_cmd.step;
 }
@@ -320,9 +343,6 @@ pub fn build(b: *std.Build) void {
         .name = "portweaver",
         .root_module = b.createModule(.{
             .link_libc = true,
-            // .strip = true,
-            // .single_threaded = true,
-            // .no_builtin = true,
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
@@ -333,7 +353,6 @@ pub fn build(b: *std.Build) void {
             // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
-            // .strip = true,
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
@@ -347,15 +366,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
-    if (optimize == .ReleaseSmall) {
-        exe.root_module.unwind_tables = .none;
-    }
-    // Build and link libuv from deps/libuv.
-    const uv = addLibuv(b, target, optimize);
-    exe.linkLibrary(uv);
-    exe.addIncludePath(b.path("deps/libuv/include"));
-    exe.addIncludePath(b.path("deps/libuv/src"));
 
     // Build and link libfrp (Go shared library) only when frpc support is enabled
     if (frpc) {
@@ -372,8 +382,13 @@ pub fn build(b: *std.Build) void {
         exe.step.dependOn(libfrp_build_step);
     }
 
-    // Add C forwarder implementation
+    // Build and link libuv from deps/libuv.
+    const uv = addLibuv(b, target, optimize);
+    exe.linkLibrary(uv);
+    exe.addIncludePath(b.path("deps/libuv/include"));
+    exe.addIncludePath(b.path("deps/libuv/src"));
 
+    // Add C forwarder implementation
     exe.addIncludePath(b.path("src/impl/app_forward/forwarder"));
     exe.addCSourceFile(.{
         .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
@@ -391,11 +406,9 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
     }
 
-    if (target.result.abi.isMusl()) {
-        exe.linkage = .static;
-    } else {
-        exe.linkage = .dynamic;
-    }
+    exe.linkage = .dynamic;
+    applyLinkOptimization(b, exe, optimize);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden

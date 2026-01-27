@@ -66,7 +66,8 @@ pub const DynamicLibLoader = struct {
     /// Linux musl 静态编译时打开动态库
     fn openLibLinuxMusl(path: []const u8) !*anyopaque {
         // 需要以 null 结尾的字符串
-        var path_buf: [std.fs.MAX_PATH_BYTES:0]u8 = undefined;
+        const MAX_PATH = 4096;
+        var path_buf: [MAX_PATH:0]u8 = undefined;
         if (path.len >= path_buf.len) return error.NameTooLong;
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
