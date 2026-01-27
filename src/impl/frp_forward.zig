@@ -68,12 +68,13 @@ fn getOrCreateClient(
     std.log.debug("[FRP] getOrCreateClient: lock released; creating new holder for node {s}, server={s}, port={d}", .{ node_name, node.server, node.port });
 
     const token_opt: ?[]const u8 = if (node.token.len == 0) null else node.token;
+    const log_level_opt: ?[]const u8 = if (node.log_level.len == 0) null else node.log_level;
     const holder = try allocator.create(ClientHolder);
     errdefer allocator.destroy(holder);
 
     std.log.debug("[FRP] getOrCreateClient: initializing FrpClient for node {s}", .{node_name});
     holder.* = .{
-        .client = try libfrp.FrpClient.init(allocator, node.server, node.port, token_opt),
+        .client = try libfrp.FrpClient.init(allocator, node.server, node.port, token_opt, log_level_opt),
         .started = false,
         .lock = .{},
     };
@@ -382,8 +383,6 @@ pub fn getClientStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
     // Client is started - get actual status and logs
     const status_json = try holder.client.getStatus(allocator);
     defer allocator.free(status_json);
-    std.log.info("status {s}", .{status_json});
-
     const logs = try holder.client.getLogs(allocator);
     errdefer allocator.free(logs);
 

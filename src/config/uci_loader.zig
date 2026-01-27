@@ -201,6 +201,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             .server = undefined,
             .port = 0,
             .token = &.{},
+            .log_level = &.{},
         };
         var node_name: []const u8 = "";
         var have_server = false;
@@ -219,7 +220,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             const opt_val = uci.cStr(opt.getString());
 
             if (std.mem.eql(u8, opt_name, "name")) {
-                // Override node name if explicitly specified
                 node_name = opt_val;
             } else if (std.mem.eql(u8, opt_name, "server") or std.mem.eql(u8, opt_name, "address") or std.mem.eql(u8, opt_name, "host")) {
                 const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
@@ -231,6 +231,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 have_port = true;
             } else if (std.mem.eql(u8, opt_name, "token") or std.mem.eql(u8, opt_name, "auth_token")) {
                 frp_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "log_level") or std.mem.eql(u8, opt_name, "loglevel")) {
+                frp_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
             }
         }
 
@@ -238,7 +240,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         if (node_name.len == 0 or !have_server or !have_port) {
             if (have_server) allocator.free(frp_node.server);
             if (frp_node.token.len != 0) allocator.free(frp_node.token);
-            continue; // Skip invalid nodes
+            if (frp_node.log_level.len != 0) allocator.free(frp_node.log_level);
+            continue;
         }
 
         const node_name_owned = try allocator.dupe(u8, node_name);

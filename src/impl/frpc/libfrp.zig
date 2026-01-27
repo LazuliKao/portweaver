@@ -43,14 +43,12 @@ pub const FrpClient = struct {
     id: c_int,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8) !FrpClient {
+    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8) !FrpClient {
         std.debug.print("==== Initializing FRP client with server_addr={s}, server_port={d}\n", .{ server_addr, server_port });
         const frp_Version = c.FrpGetVersion();
         std.debug.print("==== FRP library version: {s}\n", .{frp_Version});
 
-        // 延迟初始化 FRP 库，避免在应用启动早期导致 Go 运行时初始化失败
         try ensureFrpInit();
-        // 将 Zig 字符串转换为 C 字符串
         const c_addr = try allocator.dupeZ(u8, server_addr);
         defer allocator.free(c_addr);
 
@@ -60,7 +58,18 @@ pub const FrpClient = struct {
         }
         defer if (token_buf) |tb| allocator.free(tb);
 
-        const client_id = c.FrpCreateClient(c_addr.ptr, @intCast(server_port), if (token_buf) |tb| tb.ptr else null);
+        var log_level_buf: ?[:0]u8 = null;
+        if (log_level) |ll| {
+            log_level_buf = try allocator.dupeZ(u8, ll);
+        }
+        defer if (log_level_buf) |llb| allocator.free(llb);
+
+        const client_id = c.FrpCreateClient(
+            c_addr.ptr,
+            @intCast(server_port),
+            if (token_buf) |tb| tb.ptr else null,
+            if (log_level_buf) |llb| llb.ptr else null,
+        );
         if (client_id < 0) {
             return FrpError.CreateClientFailed;
         }

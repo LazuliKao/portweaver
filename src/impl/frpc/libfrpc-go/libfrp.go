@@ -6,7 +6,9 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/fatedier/frp/client"
@@ -69,6 +71,7 @@ func FrpCreateClient(
 	serverAddr *C.char,
 	serverPort C.int,
 	token *C.char,
+	logLevel *C.char,
 ) C.int {
 	if serverAddr == nil {
 		return -1
@@ -77,7 +80,6 @@ func FrpCreateClient(
 	clientsMutex.Lock()
 	defer clientsMutex.Unlock()
 
-	// 创建客户端配置
 	cfg := v1.ClientCommonConfig{}
 	cfg.ServerAddr = C.GoString(serverAddr)
 	cfg.ServerPort = int(serverPort)
@@ -86,12 +88,16 @@ func FrpCreateClient(
 		cfg.Auth.Token = C.GoString(token)
 	}
 
-	// 设置默认值
 	loginFailExit := false
 	cfg.LoginFailExit = &loginFailExit
 	cfg.Transport.PoolCount = 1
 	cfg.Transport.Protocol = "tcp"
-	cfg.Log.Level = "info"
+
+	if logLevel != nil {
+		cfg.Log.Level = C.GoString(logLevel)
+	} else {
+		cfg.Log.Level = "info"
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -230,6 +236,45 @@ func FrpStartClient(clientID C.int) C.int {
 		return -3
 	}
 
+	logger := &ringBufferLogger{wrapper: wrapper}
+
+	// Initialize FRP internal logger with the configured level so the FRP library
+	// respects the requested verbosity. We call InitLogger before creating the
+	// service so any logs during NewService() are captured by our ring buffer.
+	lvl := strings.ToLower(strings.TrimSpace(wrapper.config.Log.Level))
+	log.InitLogger("", wrapper.config.Log.Level, 7, true)
+
+	// Attach our ring-buffer output to capture logs
+	log.Logger = log.Logger.WithOptions(golib_log.WithOutput(logger))
+
+	// If log level is more verbose than info (trace/debug), insert a startup header
+	// and preserve the header + the latest 499 log lines.
+	if lvl == "trace" || lvl == "debug" {
+		ts := time.Now().Format("2006-01-02 15:04:05.000")
+		short := "D"
+		if lvl == "trace" {
+			short = "T"
+		}
+		msg := fmt.Sprintf("%s [%s] [frpc/init] Log level set to %s\n", ts, short, strings.ToUpper(lvl))
+
+		wrapper.logMutex.Lock()
+		if len(wrapper.logs) == 0 {
+			wrapper.logs = []string{msg}
+		} else {
+			// Keep header + newest up to 499 lines
+			tailStart := 0
+			if len(wrapper.logs) > 499 {
+				tailStart = len(wrapper.logs) - 499
+			}
+			tail := append([]string(nil), wrapper.logs[tailStart:]...)
+			newLogs := make([]string, 0, 1+len(tail))
+			newLogs = append(newLogs, msg)
+			newLogs = append(newLogs, tail...)
+			wrapper.logs = newLogs
+		}
+		wrapper.logMutex.Unlock()
+	}
+
 	// 使用新的 API 创建 FRP 客户端服务
 	svr, err := client.NewService(client.ServiceOptions{
 		Common:      wrapper.config,
@@ -242,9 +287,6 @@ func FrpStartClient(clientID C.int) C.int {
 	}
 
 	wrapper.service = svr
-
-	logger := &ringBufferLogger{wrapper: wrapper}
-	log.Logger = log.Logger.WithOptions(golib_log.WithOutput(logger))
 
 	wrapper.logMutex.Lock()
 	wrapper.status = "connected"
@@ -338,25 +380,22 @@ func FrpGetLogs(clientID C.int) *C.char {
 	clientsMutex.RUnlock()
 
 	if !ok {
-		return C.CString(`[]`)
+		return C.CString("")
 	}
 
 	wrapper.logMutex.Lock()
 	defer wrapper.logMutex.Unlock()
 
-	// Convert logs to JSON array
-	logsJSON := "["
-	for i, log := range wrapper.logs {
-		if i > 0 {
-			logsJSON += ","
-		}
-		// Escape quotes in log lines
-		escaped := fmt.Sprintf("%q", log)
-		logsJSON += escaped
+	var sb strings.Builder
+	// Pre-calc approximate capacity to reduce allocations
+	for _, l := range wrapper.logs {
+		sb.Grow(len(l))
 	}
-	logsJSON += "]"
+	for _, l := range wrapper.logs {
+		sb.WriteString(l)
+	}
 
-	return C.CString(logsJSON)
+	return C.CString(sb.String())
 }
 
 //export FrpClearLogs
