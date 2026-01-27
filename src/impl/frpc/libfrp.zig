@@ -43,7 +43,7 @@ pub const FrpClient = struct {
     id: c_int,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8) !FrpClient {
+    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8) !FrpClient {
         std.debug.print("==== Initializing FRP client with server_addr={s}, server_port={d}\n", .{ server_addr, server_port });
         const frp_Version = c.FrpGetVersion();
         std.debug.print("==== FRP library version: {s}\n", .{frp_Version});
@@ -64,11 +64,18 @@ pub const FrpClient = struct {
         }
         defer if (log_level_buf) |llb| allocator.free(llb);
 
+        var client_name_buf: ?[:0]u8 = null;
+        if (client_name) |cn| {
+            client_name_buf = try allocator.dupeZ(u8, cn);
+        }
+        defer if (client_name_buf) |cnb| allocator.free(cnb);
+
         const client_id = c.FrpCreateClient(
             c_addr.ptr,
             @intCast(server_port),
             if (token_buf) |tb| tb.ptr else null,
             if (log_level_buf) |llb| llb.ptr else null,
+            if (client_name_buf) |cnb| cnb.ptr else null,
         );
         if (client_id < 0) {
             return FrpError.CreateClientFailed;

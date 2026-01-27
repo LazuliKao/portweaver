@@ -20,6 +20,8 @@ pub fn main() !void {
         "frp.example.com", // FRP 服务器地址
         7000, // FRP 服务器端口
         "your_token_here", // 认证 token（可选）
+        "info", // 日志级别（可选）
+        "my-frp-client", // 客户端名称（可选）
     );
     defer client.deinit();
 

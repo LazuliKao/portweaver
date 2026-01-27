@@ -15,6 +15,7 @@ import (
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/pkg/util/version"
+	"github.com/fatedier/frp/pkg/util/xlog"
 	golib_log "github.com/fatedier/golib/log"
 )
 
@@ -23,6 +24,9 @@ var (
 	clients      = make(map[int]*clientWrapper)
 	clientsMutex sync.RWMutex
 	nextClientID = 1
+	multiLogger  *multiWriterLogger
+	loggerMutex  sync.Mutex
+	loggerInited bool
 )
 
 type clientWrapper struct {
@@ -31,6 +35,7 @@ type clientWrapper struct {
 	cancel    context.CancelFunc
 	config    *v1.ClientCommonConfig
 	proxies   []v1.TypedProxyConfig
+	name      string
 	status    string
 	lastError string
 	logs      []string
@@ -56,6 +61,37 @@ func (l *ringBufferLogger) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// multiWriterLogger writes log entries to multiple ringBufferLogger instances
+type multiWriterLogger struct {
+	writers map[int]*ringBufferLogger
+	mutex   sync.RWMutex
+}
+
+func (m *multiWriterLogger) Write(p []byte) (n int, err error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	for _, writer := range m.writers {
+		writer.Write(p)
+	}
+	return len(p), nil
+}
+
+func (m *multiWriterLogger) addWriter(id int, writer *ringBufferLogger) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if m.writers == nil {
+		m.writers = make(map[int]*ringBufferLogger)
+	}
+	m.writers[id] = writer
+}
+
+func (m *multiWriterLogger) removeWriter(id int) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.writers, id)
+}
+
 func main() {}
 
 //export FrpInit
@@ -72,6 +108,7 @@ func FrpCreateClient(
 	serverPort C.int,
 	token *C.char,
 	logLevel *C.char,
+	clientName *C.char, // optional name for the client
 ) C.int {
 	if serverAddr == nil {
 		return -1
@@ -101,11 +138,21 @@ func FrpCreateClient(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	name := ""
+	if clientName != nil {
+		name = C.GoString(clientName)
+	}
+	if name == "" {
+		// fallback to server address:port if user didn't provide a name
+		name = fmt.Sprintf("%s:%d", cfg.ServerAddr, cfg.ServerPort)
+	}
+
 	wrapper := &clientWrapper{
 		ctx:       ctx,
 		cancel:    cancel,
 		config:    &cfg,
 		proxies:   make([]v1.TypedProxyConfig, 0),
+		name:      name,
 		status:    "stopped",
 		lastError: "",
 		logs:      make([]string, 0),
@@ -228,7 +275,7 @@ func FrpFlushClient(clientID C.int) C.int {
 func FrpStartClient(clientID C.int) C.int {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
-	defer clientsMutex.RUnlock()
+	clientsMutex.RUnlock()
 	if !ok {
 		return -1
 	}
@@ -236,16 +283,39 @@ func FrpStartClient(clientID C.int) C.int {
 		return -3
 	}
 
+	// Create a ring buffer logger for this client
 	logger := &ringBufferLogger{wrapper: wrapper}
 
-	// Initialize FRP internal logger with the configured level so the FRP library
-	// respects the requested verbosity. We call InitLogger before creating the
-	// service so any logs during NewService() are captured by our ring buffer.
-	lvl := strings.ToLower(strings.TrimSpace(wrapper.config.Log.Level))
-	log.InitLogger("", wrapper.config.Log.Level, 7, true)
+	// Initialize global multi-writer logger if not already initialized
+	loggerMutex.Lock()
+	if !loggerInited {
+		multiLogger = &multiWriterLogger{}
+		loggerInited = true
+		// Initialize FRP logger with default level
+		log.InitLogger("", wrapper.config.Log.Level, 7, true)
+		// Set multi-writer as output
+		log.Logger = log.Logger.WithOptions(golib_log.WithOutput(multiLogger))
+	}
+	loggerMutex.Unlock()
 
-	// Attach our ring-buffer output to capture logs
-	log.Logger = log.Logger.WithOptions(golib_log.WithOutput(logger))
+	// Add this client's logger to the multi-writer
+	multiLogger.addWriter(int(clientID), logger)
+
+	// Get log level
+	lvl := strings.ToLower(strings.TrimSpace(wrapper.config.Log.Level))
+
+	// Create an xlog.Logger with client-specific prefix (use provided client name)
+	name := wrapper.name
+	if name == "" {
+		name = fmt.Sprintf("client-%d", clientID)
+	}
+	clientXLog := xlog.New().AppendPrefix(name)
+
+	// Bind the xlog.Logger to the context
+	ctxWithLogger := xlog.NewContext(wrapper.ctx, clientXLog)
+
+	// Update wrapper's context to include the logger
+	wrapper.ctx = ctxWithLogger
 
 	// If log level is more verbose than info (trace/debug), insert a startup header
 	// and preserve the header + the latest 499 log lines.
@@ -322,6 +392,13 @@ func FrpStopClient(clientID C.int) C.int {
 	wrapper.cancel()
 	wrapper.service = nil
 
+	// Remove this client's logger from multi-writer
+	loggerMutex.Lock()
+	if multiLogger != nil {
+		multiLogger.removeWriter(int(clientID))
+	}
+	loggerMutex.Unlock()
+
 	return 0
 }
 
@@ -338,6 +415,13 @@ func FrpDestroyClient(clientID C.int) C.int {
 	// 确保服务已停止
 	wrapper.cancel()
 	wrapper.service = nil
+
+	// Remove this client's logger from multi-writer
+	loggerMutex.Lock()
+	if multiLogger != nil {
+		multiLogger.removeWriter(int(clientID))
+	}
+	loggerMutex.Unlock()
 
 	// 从全局map中删除
 	delete(clients, int(clientID))
@@ -426,4 +510,11 @@ func FrpCleanup() {
 
 	// 清空map
 	clients = make(map[int]*clientWrapper)
+
+	// Reset logger state
+	loggerMutex.Lock()
+	multiLogger = nil
+	loggerInited = false
+	log.InitLogger("", "info", 7, true)
+	loggerMutex.Unlock()
 }
