@@ -391,9 +391,11 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
     }
 
-    // For dynamic linking at runtime
-    exe.linkage = .static;
-
+    if (target.result.abi.isMusl()) {
+        exe.linkage = .static;
+    } else {
+        exe.linkage = .dynamic;
+    }
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
