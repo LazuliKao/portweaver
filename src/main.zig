@@ -9,6 +9,7 @@ const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else
 // 仅在 UCI 模式下导入 UCI 相关模块
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
+pub const event_log = @import("event_log.zig");
 
 pub fn main() !void {
     // 设置分配器：Debug 模式使用 GPA 检测内存泄漏，Release 模式使用 c_allocator
@@ -21,6 +22,11 @@ pub fn main() !void {
         }
     };
     const allocator = if (gpa) |*g| g.allocator() else std.heap.c_allocator;
+
+    // Initialize event logger
+    event_log.initGlobal(allocator);
+    defer event_log.deinitGlobal();
+
     // 解析命令行参数
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

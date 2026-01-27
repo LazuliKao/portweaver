@@ -6,6 +6,8 @@ const ubox = @import("ubox.zig");
 const c = ubox.c;
 const project_status = @import("../impl/project_status.zig");
 const frp_status = @import("../impl/frp_status.zig");
+const main = @import("../main.zig");
+const event_log = main.event_log;
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
 const STATUS_DEGRADED: [:0]const u8 = "degraded";
@@ -117,6 +119,7 @@ const method_names = struct {
     pub const get_frp_status: [:0]const u8 = "get_frp_status";
     pub const get_frp_info: [:0]const u8 = "get_frp_info";
     pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
+    pub const get_events: [:0]const u8 = "get_events";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -141,6 +144,15 @@ const field_names = struct {
     pub const frp_status: [:0]const u8 = "frp_status";
     pub const last_error: [:0]const u8 = "last_error";
     pub const logs: [:0]const u8 = "logs";
+    pub const events: [:0]const u8 = "events";
+    pub const timestamp: [:0]const u8 = "timestamp";
+    pub const event_type: [:0]const u8 = "type";
+    pub const message: [:0]const u8 = "message";
+    pub const project_id: [:0]const u8 = "project_id";
+    pub const client_count: [:0]const u8 = "client_count";
+    pub const forwarders: [:0]const u8 = "forwarders";
+    pub const protocol: [:0]const u8 = "protocol";
+    pub const local_port: [:0]const u8 = "local_port";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -217,6 +229,14 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = &frp_info_policy,
             .n_policy = @intCast(frp_info_policy.len),
+        },
+        .{
+            .name = method_names.get_events,
+            .handler = handleGetEvents,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
         },
     };
 
@@ -318,6 +338,34 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
             addI32(&buf, field_names.error_code, info.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         }
 
+        // Add forwarders array with per-port statistics
+        const fwd_arr = ubox.blobmsgOpenNested(&buf, field_names.forwarders, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (fwd_arr != null) {
+            const forwarder_stats = project.getForwarderStats(state.allocator) catch &[_]project_status.ForwarderStats{};
+            defer if (forwarder_stats.len > 0) state.allocator.free(forwarder_stats);
+
+            for (forwarder_stats) |fwd_stat| {
+                const fwd_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                if (fwd_item == null) continue;
+
+                // Add protocol
+                const proto_z = state.allocator.dupeZ(u8, fwd_stat.protocol) catch continue;
+                defer state.allocator.free(proto_z);
+                addString(&buf, field_names.protocol, proto_z) catch {};
+
+                // Add local port
+                addU32(&buf, field_names.local_port, @intCast(fwd_stat.local_port)) catch {};
+
+                // Add traffic stats
+                addU64(&buf, field_names.bytes_in, fwd_stat.bytes_in) catch {};
+                addU64(&buf, field_names.bytes_out, fwd_stat.bytes_out) catch {};
+
+                ubox.blobNestEnd(&buf, fwd_item) catch {};
+            }
+
+            ubox.blobNestEnd(&buf, fwd_arr) catch {};
+        }
+
         ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
 
@@ -393,6 +441,8 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
     };
     defer {
         if (status.version) |v| state.allocator.free(v);
+        if (status.status) |s| state.allocator.free(s);
+        if (status.last_error) |e| state.allocator.free(e);
     }
 
     addBool(&buf, field_names.frp_enabled, status.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -401,6 +451,23 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         defer state.allocator.free(ztv);
         addString(&buf, field_names.frp_version, ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
+
+    // Add FRP client status
+    if (status.status) |s| {
+        const zts = state.allocator.dupeZ(u8, s) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(zts);
+        addString(&buf, field_names.frp_status, zts) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
+    // Add last error if present
+    if (status.last_error) |e| {
+        const zte = state.allocator.dupeZ(u8, e) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(zte);
+        addString(&buf, field_names.last_error, zte) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
+    // Add client count
+    addU32(&buf, field_names.client_count, @intCast(status.client_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -450,6 +517,60 @@ fn handleClearFrpLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
     return c.UBUS_STATUS_OK;
 }
 
+fn handleGetEvents(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Open the events array
+    const arr = ubox.blobmsgOpenNested(&buf, field_names.events, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Get events from the global logger
+    if (event_log.getGlobal()) |logger| {
+        const events = logger.getEvents(state.allocator) catch {
+            ubox.blobNestEnd(&buf, arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {};
+            return c.UBUS_STATUS_OK;
+        };
+        defer event_log.EventLogger.freeEvents(state.allocator, events);
+
+        for (events) |event| {
+            const item = ubox.blobmsgOpenNested(&buf, null, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            if (item == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add timestamp as i64
+            addI64(&buf, field_names.timestamp, event.timestamp) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add event type as string
+            const type_str = event.event_type.toString();
+            addString(&buf, field_names.event_type, type_str) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add message (need to convert to null-terminated)
+            const msg_z = state.allocator.dupeZ(u8, event.message) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(msg_z);
+            addString(&buf, field_names.message, msg_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add project_id
+            addI32(&buf, field_names.project_id, event.project_id) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        }
+    }
+
+    ubox.blobNestEnd(&buf, arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
 fn addString(buf: *c.blob_buf, name: [:0]const u8, val: [:0]const u8) !void {
     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, name, val.ptr, val.len + 1);
 }
@@ -473,6 +594,12 @@ fn addI32(buf: *c.blob_buf, name: [:0]const u8, val: i32) !void {
 fn addU64(buf: *c.blob_buf, name: [:0]const u8, val: u64) !void {
     var be = std.mem.nativeToBig(u64, val);
     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_INT64, name, &be, @sizeOf(u64));
+}
+
+fn addI64(buf: *c.blob_buf, name: [:0]const u8, val: i64) !void {
+    const unsigned: u64 = @bitCast(val);
+    var be = std.mem.nativeToBig(u64, unsigned);
+    try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_INT64, name, &be, @sizeOf(i64));
 }
 
 fn currentTs() u64 {

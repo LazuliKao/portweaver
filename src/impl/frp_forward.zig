@@ -3,6 +3,8 @@ const types = @import("../config/types.zig");
 const project_status = @import("project_status.zig");
 const libfrp = @import("frpc/libfrp.zig");
 const common = @import("app_forward/common.zig");
+const main = @import("../main.zig");
+const event_log = main.event_log;
 
 const ClientHolder = struct {
     client: libfrp.FrpClient,
@@ -248,4 +250,126 @@ pub fn stopAll() void {
     map.deinit();
     clients = null;
     clients_allocator = null;
+}
+
+/// Aggregated FRP client status
+pub const FrpClientStatus = struct {
+    status: []const u8,
+    last_error: []const u8,
+    node_name: []const u8,
+};
+
+/// Get the aggregated status of all FRP clients
+/// Returns the "worst" status and the latest error if any
+pub fn getAggregatedStatus(allocator: std.mem.Allocator) !struct {
+    status: []const u8,
+    last_error: []const u8,
+    client_count: usize,
+} {
+    clients_lock.lock();
+    defer clients_lock.unlock();
+
+    if (clients == null) {
+        return .{
+            .status = try allocator.dupe(u8, "stopped"),
+            .last_error = try allocator.dupe(u8, ""),
+            .client_count = 0,
+        };
+    }
+
+    var map = clients.?;
+    var has_error = false;
+    var has_connecting = false;
+    var has_connected = false;
+    var last_error_msg: []const u8 = "";
+    var client_count: usize = 0;
+
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        client_count += 1;
+        const holder = entry.value_ptr.*;
+
+        if (!holder.started) continue;
+
+        // Get status from the FRP client
+        const status_json = holder.client.getStatus(allocator) catch |err| {
+            std.log.warn("[FRP] Failed to get status for client: {any}", .{err});
+            continue;
+        };
+        defer allocator.free(status_json);
+
+        // Parse the status JSON to extract status and last_error
+        // Format: {"status":"...","last_error":"..."}
+        const parsed = parseStatusJson(allocator, status_json) catch |err| {
+            std.log.warn("[FRP] Failed to parse status JSON: {any}", .{err});
+            continue;
+        };
+        defer allocator.free(parsed.status);
+        defer allocator.free(parsed.last_error);
+
+        // Track the worst status
+        if (std.mem.eql(u8, parsed.status, "error")) {
+            has_error = true;
+            if (parsed.last_error.len > 0) {
+                // Log the error to the event log
+                event_log.logEvent(.frp_error, parsed.last_error, -1);
+                // Keep the latest non-empty error
+                if (last_error_msg.len > 0) allocator.free(last_error_msg);
+                last_error_msg = allocator.dupe(u8, parsed.last_error) catch "";
+            }
+        } else if (std.mem.eql(u8, parsed.status, "connecting")) {
+            has_connecting = true;
+        } else if (std.mem.eql(u8, parsed.status, "connected")) {
+            has_connected = true;
+        }
+    }
+
+    // Determine overall status
+    const overall_status = if (has_error)
+        "error"
+    else if (has_connecting)
+        "connecting"
+    else if (has_connected)
+        "connected"
+    else
+        "stopped";
+
+    return .{
+        .status = try allocator.dupe(u8, overall_status),
+        .last_error = if (last_error_msg.len > 0) last_error_msg else try allocator.dupe(u8, ""),
+        .client_count = client_count,
+    };
+}
+
+/// Parse the status JSON from FrpGetStatus
+fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
+    status: []const u8,
+    last_error: []const u8,
+} {
+    // Simple JSON parsing for {"status":"...","last_error":"..."}
+    // We use a basic approach since std.json might not be available in all builds
+
+    var status: []const u8 = "unknown";
+    var last_error: []const u8 = "";
+
+    // Find "status":"..."
+    if (std.mem.indexOf(u8, json, "\"status\":\"")) |start| {
+        const value_start = start + 10; // length of "status":"
+        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
+            status = json[value_start..end];
+        }
+    }
+
+    // Find "last_error":"..."
+    if (std.mem.indexOf(u8, json, "\"last_error\":\"")) |start| {
+        const value_start = start + 14; // length of "last_error":"
+        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
+            last_error = json[value_start..end];
+        }
+    }
+
+    return .{
+        .status = try allocator.dupe(u8, status),
+        .last_error = try allocator.dupe(u8, last_error),
+    };
 }
