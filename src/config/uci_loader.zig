@@ -325,5 +325,103 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         }
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes };
+    // Parse DDNS configs from UCI
+    var ddns_list = std.array_list.Managed(types.DdnsConfig).init(allocator);
+    errdefer {
+        for (ddns_list.items) |*d| d.deinit(allocator);
+        ddns_list.deinit();
+    }
+
+    var ddns_sec_it = uci.sections(pkg);
+    while (ddns_sec_it.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+        if (!std.mem.eql(u8, sec_type, "ddns")) continue;
+
+        var ddns_cfg = types.DdnsConfig{
+            .name = undefined,
+            .dns_provider = undefined,
+        };
+        var have_name = false;
+        var have_provider = false;
+
+        // Get name from section name or 'name' option
+        const sec_name = uci.cStr(sec.name());
+        if (sec_name.len > 0) {
+            ddns_cfg.name = try allocator.dupe(u8, sec_name);
+            have_name = true;
+        }
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (!opt.isString()) continue;
+            const opt_val = uci.cStr(opt.getString());
+
+            if (std.mem.eql(u8, opt_name, "name")) {
+                if (have_name) allocator.free(ddns_cfg.name);
+                ddns_cfg.name = try allocator.dupe(u8, opt_val);
+                have_name = true;
+            } else if (std.mem.eql(u8, opt_name, "dns_provider")) {
+                ddns_cfg.dns_provider = try allocator.dupe(u8, opt_val);
+                have_provider = true;
+            } else if (std.mem.eql(u8, opt_name, "dns_id")) {
+                ddns_cfg.dns_id = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "dns_secret")) {
+                ddns_cfg.dns_secret = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "dns_ext_param")) {
+                ddns_cfg.dns_ext_param = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ttl")) {
+                ddns_cfg.ttl = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 3600;
+            } else if (std.mem.eql(u8, opt_name, "ipv4_enable")) {
+                ddns_cfg.ipv4.enable = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv4_get_type")) {
+                ddns_cfg.ipv4.get_type = try types.DdnsIpGetType.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv4_url")) {
+                ddns_cfg.ipv4.url = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv4_net_interface")) {
+                ddns_cfg.ipv4.net_interface = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv4_cmd")) {
+                ddns_cfg.ipv4.cmd = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv4_domains")) {
+                ddns_cfg.ipv4.domains = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_enable")) {
+                ddns_cfg.ipv6.enable = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_get_type")) {
+                ddns_cfg.ipv6.get_type = try types.DdnsIpGetType.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_url")) {
+                ddns_cfg.ipv6.url = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_net_interface")) {
+                ddns_cfg.ipv6.net_interface = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_cmd")) {
+                ddns_cfg.ipv6.cmd = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_reg")) {
+                ddns_cfg.ipv6.reg = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "ipv6_domains")) {
+                ddns_cfg.ipv6.domains = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "not_allow_wan_access")) {
+                ddns_cfg.not_allow_wan_access = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "username")) {
+                ddns_cfg.username = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "password")) {
+                ddns_cfg.password = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "webhook_url")) {
+                ddns_cfg.webhook_url = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "webhook_body")) {
+                ddns_cfg.webhook_body = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "webhook_headers")) {
+                ddns_cfg.webhook_headers = try types.dupeIfNonEmpty(allocator, opt_val);
+            }
+        }
+
+        // Validate required fields
+        if (!have_name or !have_provider) {
+            if (have_name) allocator.free(ddns_cfg.name);
+            if (have_provider) allocator.free(ddns_cfg.dns_provider);
+            continue;
+        }
+
+        try ddns_list.append(ddns_cfg);
+    }
+
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }

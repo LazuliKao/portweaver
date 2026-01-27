@@ -132,10 +132,121 @@ pub const Project = struct {
     }
 };
 
+/// DDNS IP 获取方式
+pub const DdnsIpGetType = enum {
+    url,
+    net_interface,
+    cmd,
+
+    pub fn fromString(s: []const u8) !DdnsIpGetType {
+        const trimmed = std.mem.trim(u8, s, " \t\r\n");
+        if (eqlIgnoreCase(trimmed, "url")) return .url;
+        if (eqlIgnoreCase(trimmed, "net_interface") or eqlIgnoreCase(trimmed, "netInterface")) return .net_interface;
+        if (eqlIgnoreCase(trimmed, "cmd") or eqlIgnoreCase(trimmed, "command")) return .cmd;
+        return ConfigError.InvalidValue;
+    }
+
+    pub fn toString(self: DdnsIpGetType) []const u8 {
+        return switch (self) {
+            .url => "url",
+            .net_interface => "net_interface",
+            .cmd => "cmd",
+        };
+    }
+};
+
+/// DDNS IPv4 配置
+pub const DdnsIpv4Config = struct {
+    enable: bool = true,
+    get_type: DdnsIpGetType = .url,
+    url: []const u8 = "",
+    net_interface: []const u8 = "",
+    cmd: []const u8 = "",
+    domains: []const u8 = "",
+
+    pub fn deinit(self: *DdnsIpv4Config, allocator: std.mem.Allocator) void {
+        if (self.url.len != 0) allocator.free(self.url);
+        if (self.net_interface.len != 0) allocator.free(self.net_interface);
+        if (self.cmd.len != 0) allocator.free(self.cmd);
+        if (self.domains.len != 0) allocator.free(self.domains);
+        self.* = undefined;
+    }
+};
+
+/// DDNS IPv6 配置
+pub const DdnsIpv6Config = struct {
+    enable: bool = false,
+    get_type: DdnsIpGetType = .url,
+    url: []const u8 = "",
+    net_interface: []const u8 = "",
+    cmd: []const u8 = "",
+    reg: []const u8 = "",
+    domains: []const u8 = "",
+
+    pub fn deinit(self: *DdnsIpv6Config, allocator: std.mem.Allocator) void {
+        if (self.url.len != 0) allocator.free(self.url);
+        if (self.net_interface.len != 0) allocator.free(self.net_interface);
+        if (self.cmd.len != 0) allocator.free(self.cmd);
+        if (self.reg.len != 0) allocator.free(self.reg);
+        if (self.domains.len != 0) allocator.free(self.domains);
+        self.* = undefined;
+    }
+};
+
+/// DDNS 配置
+pub const DdnsConfig = struct {
+    /// 配置名称（用于显示和标识）
+    name: []const u8,
+    /// DNS 提供商
+    dns_provider: []const u8,
+    /// DNS ID（某些提供商需要）
+    dns_id: []const u8 = "",
+    /// DNS Secret/Token
+    dns_secret: []const u8 = "",
+    /// DNS 扩展参数（如 Vercel 的 Team ID）
+    dns_ext_param: []const u8 = "",
+    /// TTL（秒）
+    ttl: u32 = 3600,
+    /// IPv4 配置
+    ipv4: DdnsIpv4Config = .{},
+    /// IPv6 配置
+    ipv6: DdnsIpv6Config = .{},
+    /// 禁止从 WAN 访问
+    not_allow_wan_access: bool = true,
+    /// 用户名（某些提供商需要）
+    username: []const u8 = "",
+    /// 密码（某些提供商需要）
+    password: []const u8 = "",
+    /// Webhook URL
+    webhook_url: []const u8 = "",
+    /// Webhook 请求体
+    webhook_body: []const u8 = "",
+    /// Webhook 请求头
+    webhook_headers: []const u8 = "",
+
+    pub fn deinit(self: *DdnsConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.dns_provider);
+        if (self.dns_id.len != 0) allocator.free(self.dns_id);
+        if (self.dns_secret.len != 0) allocator.free(self.dns_secret);
+        if (self.dns_ext_param.len != 0) allocator.free(self.dns_ext_param);
+        self.ipv4.deinit(allocator);
+        self.ipv6.deinit(allocator);
+        if (self.username.len != 0) allocator.free(self.username);
+        if (self.password.len != 0) allocator.free(self.password);
+        if (self.webhook_url.len != 0) allocator.free(self.webhook_url);
+        if (self.webhook_body.len != 0) allocator.free(self.webhook_body);
+        if (self.webhook_headers.len != 0) allocator.free(self.webhook_headers);
+        self.* = undefined;
+    }
+};
+
 pub const Config = struct {
     projects: []Project,
     /// FRP 节点配置（key 为节点名称）
     frp_nodes: std.StringHashMap(FrpNode),
+    /// DDNS 配置列表
+    ddns_configs: []DdnsConfig,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.projects) |*p| p.deinit(allocator);
@@ -147,6 +258,9 @@ pub const Config = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.frp_nodes.deinit();
+
+        for (self.ddns_configs) |*d| d.deinit(allocator);
+        allocator.free(self.ddns_configs);
 
         self.* = undefined;
     }

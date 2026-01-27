@@ -358,5 +358,5 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         }
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes };
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = &[_]types.DdnsConfig{} };
 }
