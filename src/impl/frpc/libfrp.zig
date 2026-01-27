@@ -14,19 +14,42 @@ pub const FrpError = error{
     InvalidClientID,
 };
 
+// C declarations for new FRP functions
+extern "c" fn FrpGetStatus(clientID: c_int) [*c]u8;
+extern "c" fn FrpGetLogs(clientID: c_int) [*c]u8;
+extern "c" fn FrpClearLogs(clientID: c_int) void;
+
 pub const ProxyType = enum {
     tcp,
     udp,
 };
+
+var frp_initialized: bool = false;
+var frp_init_lock: std.Thread.Mutex = .{};
+
+fn ensureFrpInit() !void {
+    frp_init_lock.lock();
+    defer frp_init_lock.unlock();
+
+    if (frp_initialized) return;
+
+    std.debug.print("==== [FRP] Calling FrpInit()...\n", .{});
+    _ = c.FrpInit();
+    std.debug.print("==== [FRP] FrpInit() completed.\n", .{});
+    frp_initialized = true;
+}
 
 pub const FrpClient = struct {
     id: c_int,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8) !FrpClient {
-        // 初始化 FRP 库（只需要调用一次）
-        _ = c.FrpInit();
+        std.debug.print("==== Initializing FRP client with server_addr={s}, server_port={d}\n", .{ server_addr, server_port });
+        const frp_Version = c.FrpGetVersion();
+        std.debug.print("==== FRP library version: {s}\n", .{frp_Version});
 
+        // 延迟初始化 FRP 库，避免在应用启动早期导致 Go 运行时初始化失败
+        try ensureFrpInit();
         // 将 Zig 字符串转换为 C 字符串
         const c_addr = try allocator.dupeZ(u8, server_addr);
         defer allocator.free(c_addr);
@@ -95,6 +118,26 @@ pub const FrpClient = struct {
 
     pub fn deinit(self: *FrpClient) void {
         _ = c.FrpDestroyClient(self.id);
+    }
+
+    pub fn getStatus(self: *FrpClient, allocator: std.mem.Allocator) ![]const u8 {
+        const c_status = c.FrpGetStatus(self.id);
+        defer c.FrpFreeString(c_status);
+
+        const len = std.mem.len(c_status);
+        return try allocator.dupe(u8, c_status[0..len]);
+    }
+
+    pub fn getLogs(self: *FrpClient, allocator: std.mem.Allocator) ![]const u8 {
+        const c_logs = c.FrpGetLogs(self.id);
+        defer c.FrpFreeString(c_logs);
+
+        const len = std.mem.len(c_logs);
+        return try allocator.dupe(u8, c_logs[0..len]);
+    }
+
+    pub fn clearLogs(self: *FrpClient) void {
+        c.FrpClearLogs(self.id);
     }
 };
 

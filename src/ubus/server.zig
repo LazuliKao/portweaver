@@ -5,6 +5,10 @@ const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
 const c = ubox.c;
 const project_status = @import("../impl/project_status.zig");
+const frp_status = @import("../impl/frp_status.zig");
+const frp_forward = @import("../impl/frp_forward.zig");
+const main = @import("../main.zig");
+const event_log = main.event_log;
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
 const STATUS_DEGRADED: [:0]const u8 = "degraded";
@@ -105,10 +109,18 @@ const set_enabled_policy = [_]c.blobmsg_policy{
     .{ .name = "enabled", .type = c.BLOBMSG_TYPE_BOOL },
 };
 
+const frp_info_policy = [_]c.blobmsg_policy{
+    .{ .name = "id", .type = c.BLOBMSG_TYPE_STRING },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
     pub const set_enabled: [:0]const u8 = "set_enabled";
+    pub const get_frp_status: [:0]const u8 = "get_frp_status";
+    pub const get_frp_info: [:0]const u8 = "get_frp_info";
+    pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
+    pub const get_events: [:0]const u8 = "get_events";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -128,6 +140,20 @@ const field_names = struct {
     pub const last_changed: [:0]const u8 = "last_changed";
     pub const startup_status: [:0]const u8 = "startup_status";
     pub const error_code: [:0]const u8 = "error_code";
+    pub const frp_enabled: [:0]const u8 = "frp_enabled";
+    pub const frp_version: [:0]const u8 = "frp_version";
+    pub const frp_status: [:0]const u8 = "frp_status";
+    pub const last_error: [:0]const u8 = "last_error";
+    pub const logs: [:0]const u8 = "logs";
+    pub const events: [:0]const u8 = "events";
+    pub const timestamp: [:0]const u8 = "timestamp";
+    pub const event_type: [:0]const u8 = "type";
+    pub const message: [:0]const u8 = "message";
+    pub const project_id: [:0]const u8 = "project_id";
+    pub const client_count: [:0]const u8 = "client_count";
+    pub const forwarders: [:0]const u8 = "forwarders";
+    pub const protocol: [:0]const u8 = "protocol";
+    pub const local_port: [:0]const u8 = "local_port";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -181,6 +207,38 @@ fn ubusThread(state: *RuntimeState) void {
             .policy = &set_enabled_policy,
             .n_policy = @intCast(set_enabled_policy.len),
         },
+        .{
+            .name = method_names.get_frp_status,
+            .handler = handleGetFrpStatus,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
+        .{
+            .name = method_names.get_frp_info,
+            .handler = handleGetFrpInfo,
+            .mask = 0,
+            .tags = 0,
+            .policy = &frp_info_policy,
+            .n_policy = @intCast(frp_info_policy.len),
+        },
+        .{
+            .name = method_names.clear_frp_logs,
+            .handler = handleClearFrpLogs,
+            .mask = 0,
+            .tags = 0,
+            .policy = &frp_info_policy,
+            .n_policy = @intCast(frp_info_policy.len),
+        },
+        .{
+            .name = method_names.get_events,
+            .handler = handleGetEvents,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
     };
 
     var obj_type = c.ubus_object_type{
@@ -208,7 +266,7 @@ fn ubusThread(state: *RuntimeState) void {
         return;
     };
 
-    std.log.info("ubus: server started successfully.\n", .{});
+    std.log.info("ubus: server started successfully.", .{});
 
     ubox.uloopRun(-1) catch {};
     ubus.ubus_free(ctx) catch {};
@@ -281,6 +339,34 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
             addI32(&buf, field_names.error_code, info.error_code) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         }
 
+        // Add forwarders array with per-port statistics
+        const fwd_arr = ubox.blobmsgOpenNested(&buf, field_names.forwarders, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (fwd_arr != null) {
+            const forwarder_stats = project.getForwarderStats(state.allocator) catch &[_]project_status.ForwarderStats{};
+            defer if (forwarder_stats.len > 0) state.allocator.free(forwarder_stats);
+
+            for (forwarder_stats) |fwd_stat| {
+                const fwd_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                if (fwd_item == null) continue;
+
+                // Add protocol
+                const proto_z = state.allocator.dupeZ(u8, fwd_stat.protocol) catch continue;
+                defer state.allocator.free(proto_z);
+                addString(&buf, field_names.protocol, proto_z) catch {};
+
+                // Add local port
+                addU32(&buf, field_names.local_port, @intCast(fwd_stat.local_port)) catch {};
+
+                // Add traffic stats
+                addU64(&buf, field_names.bytes_in, fwd_stat.bytes_in) catch {};
+                addU64(&buf, field_names.bytes_out, fwd_stat.bytes_out) catch {};
+
+                ubox.blobNestEnd(&buf, fwd_item) catch {};
+            }
+
+            ubox.blobNestEnd(&buf, fwd_arr) catch {};
+        }
+
         ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
 
@@ -338,6 +424,200 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     return c.UBUS_STATUS_OK;
 }
 
+fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    const status = frp_status.getFrpStatus(state.allocator) catch |err| {
+        std.log.warn("Failed to get frp status: {any}", .{err});
+        addBool(&buf, field_names.frp_enabled, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {};
+        return c.UBUS_STATUS_OK;
+    };
+    defer {
+        if (status.version) |v| state.allocator.free(v);
+        if (status.status) |s| state.allocator.free(s);
+        if (status.last_error) |e| state.allocator.free(e);
+    }
+
+    addBool(&buf, field_names.frp_enabled, status.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (status.version) |v| {
+        const ztv = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(ztv);
+        addString(&buf, field_names.frp_version, ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
+    // Add FRP client status
+    if (status.status) |s| {
+        const zts = state.allocator.dupeZ(u8, s) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(zts);
+        addString(&buf, field_names.frp_status, zts) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
+    // Add last error if present
+    if (status.last_error) |e| {
+        const zte = state.allocator.dupeZ(u8, e) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(zte);
+        addString(&buf, field_names.last_error, zte) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
+    // Add client count
+    addU32(&buf, field_names.client_count, @intCast(status.client_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetFrpInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Parse the "id" (node_name) parameter
+    var tb: [frp_info_policy.len]?*c.blob_attr = .{null};
+    const data_ptr = c.blob_data(msg);
+    const data_len = c.blob_len(msg);
+    ubox.blobmsgParse(frp_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name = std.mem.span(node_name_cstr);
+
+    // Get client status from frp_forward
+    const result = frp_forward.getClientStatus(state.allocator, node_name) catch |err| {
+        std.log.warn("Failed to get FRP client status for node '{s}': {any}", .{ node_name, err });
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    defer state.allocator.free(result.status);
+    defer state.allocator.free(result.last_error);
+    defer state.allocator.free(result.logs);
+
+    // Build response
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Add frp_status field (null-terminated)
+    const status_z = state.allocator.dupeZ(u8, result.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer state.allocator.free(status_z);
+    addString(&buf, field_names.frp_status, status_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Add last_error field (null-terminated)
+    const error_z = state.allocator.dupeZ(u8, result.last_error) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer state.allocator.free(error_z);
+    addString(&buf, field_names.last_error, error_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Add logs as array of strings (split by newlines)
+    const logs_cookie = ubox.blobmsgOpenNested(&buf, field_names.logs, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    var lines_iter = std.mem.splitScalar(u8, result.logs, '\n');
+    while (lines_iter.next()) |line| {
+        if (line.len > 0) {
+            const line_z = state.allocator.dupeZ(u8, line) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(line_z);
+            // Add string to array: use empty name for array elements
+            ubox.blobmsgAddField(&buf, c.BLOBMSG_TYPE_STRING, "", line_z.ptr, line_z.len + 1) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        }
+    }
+    ubox.blobNestEnd(&buf, logs_cookie) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleClearFrpLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    // Parse the "id" parameter (node name)
+    var tb: [frp_info_policy.len]?*c.blob_attr = .{null};
+    const data_ptr = c.blob_data(msg);
+    const data_len = c.blob_len(msg);
+    ubox.blobmsgParse(frp_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name = std.mem.span(node_name_cstr);
+
+    // Clear logs for the specified node (idempotent operation)
+    frp_forward.clearClientLogs(node_name);
+
+    // Return empty success response
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetEvents(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Open the events array
+    const arr = ubox.blobmsgOpenNested(&buf, field_names.events, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Get events from the global logger
+    if (event_log.getGlobal()) |logger| {
+        const events = logger.getEvents(state.allocator) catch {
+            ubox.blobNestEnd(&buf, arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {};
+            return c.UBUS_STATUS_OK;
+        };
+        defer event_log.EventLogger.freeEvents(state.allocator, events);
+
+        for (events) |event| {
+            const item = ubox.blobmsgOpenNested(&buf, null, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            if (item == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add timestamp as i64
+            addI64(&buf, field_names.timestamp, event.timestamp) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add event type as string
+            const type_str = event.event_type.toString();
+            addString(&buf, field_names.event_type, type_str) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add message (need to convert to null-terminated)
+            const msg_z = state.allocator.dupeZ(u8, event.message) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(msg_z);
+            addString(&buf, field_names.message, msg_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            // Add project_id
+            addI32(&buf, field_names.project_id, event.project_id) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+            ubox.blobNestEnd(&buf, item) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        }
+    }
+
+    ubox.blobNestEnd(&buf, arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
 fn addString(buf: *c.blob_buf, name: [:0]const u8, val: [:0]const u8) !void {
     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, name, val.ptr, val.len + 1);
 }
@@ -361,6 +641,12 @@ fn addI32(buf: *c.blob_buf, name: [:0]const u8, val: i32) !void {
 fn addU64(buf: *c.blob_buf, name: [:0]const u8, val: u64) !void {
     var be = std.mem.nativeToBig(u64, val);
     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_INT64, name, &be, @sizeOf(u64));
+}
+
+fn addI64(buf: *c.blob_buf, name: [:0]const u8, val: i64) !void {
+    const unsigned: u64 = @bitCast(val);
+    var be = std.mem.nativeToBig(u64, unsigned);
+    try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_INT64, name, &be, @sizeOf(i64));
 }
 
 fn currentTs() u64 {

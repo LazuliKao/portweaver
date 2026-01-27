@@ -36,6 +36,14 @@ pub const TrafficStats = struct {
     bytes_out: u64,
 };
 
+/// Statistics for a single forwarder (port)
+pub const ForwarderStats = struct {
+    protocol: []const u8, // "tcp" or "udp"
+    local_port: u16,
+    bytes_in: u64,
+    bytes_out: u64,
+};
+
 pub const ProjectHandle = struct {
     allocator: std.mem.Allocator,
     startup_status: StartupStatus = .disabled,
@@ -173,6 +181,49 @@ pub const ProjectHandle = struct {
             .startup_status = self.startup_status,
             .error_code = self.error_code,
         };
+    }
+
+    /// Get statistics for each individual forwarder (port)
+    /// Note: Since forwarders don't store port info, we use the project config
+    pub fn getForwarderStats(self: *ProjectHandle, allocator: std.mem.Allocator) ![]ForwarderStats {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        const total_count = self.tcp_forwarders.items.len + self.udp_forwarders.items.len;
+        if (total_count == 0) {
+            return &[_]ForwarderStats{};
+        }
+
+        const stats = try allocator.alloc(ForwarderStats, total_count);
+        errdefer allocator.free(stats);
+
+        var idx: usize = 0;
+
+        // Get stats from TCP forwarders
+        for (self.tcp_forwarders.items) |fwd| {
+            const s = fwd.getStats();
+            stats[idx] = ForwarderStats{
+                .protocol = "tcp",
+                .local_port = self.cfg.listen_port,
+                .bytes_in = s.bytes_in,
+                .bytes_out = s.bytes_out,
+            };
+            idx += 1;
+        }
+
+        // Get stats from UDP forwarders
+        for (self.udp_forwarders.items) |fwd| {
+            const s = fwd.getStats();
+            stats[idx] = ForwarderStats{
+                .protocol = "udp",
+                .local_port = self.cfg.listen_port,
+                .bytes_in = s.bytes_in,
+                .bytes_out = s.bytes_out,
+            };
+            idx += 1;
+        }
+
+        return stats;
     }
 
     /// Set runtime enabled state (controls forwarding without restarting threads)

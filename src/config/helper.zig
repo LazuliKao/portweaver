@@ -134,6 +134,25 @@ pub fn parsePortMapping(allocator: std.mem.Allocator, s: []const u8) !types.Port
     return mapping;
 }
 
+/// Parse FRP forward string like "node:port" or just "node" (port defaults to 0).
+pub fn parseFrpForwardString(allocator: std.mem.Allocator, s: []const u8) !types.FrpForward {
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    if (trimmed.len == 0) return types.ConfigError.InvalidValue;
+
+    if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
+        const node_name = std.mem.trim(u8, trimmed[0..colon_pos], " \t\r\n");
+        const port_str = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " \t\r\n");
+
+        if (node_name.len == 0) return types.ConfigError.InvalidValue;
+        const port = try types.parsePort(port_str);
+
+        return .{ .node_name = try allocator.dupe(u8, node_name), .remote_port = port };
+    }
+
+    // No explicit port; default to 0 (server may assign).
+    return .{ .node_name = try allocator.dupe(u8, trimmed), .remote_port = 0 };
+}
+
 test "parsePortMapping tests" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
