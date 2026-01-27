@@ -3,7 +3,7 @@ const std = @import("std");
 fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const uv = b.addLibrary(.{
         .name = "uv",
-        .linkage = .static,
+        .linkage = .dynamic,
         .root_module = b.createModule(.{
             .link_libc = true,
             .target = target,
@@ -403,7 +403,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // For dynamic linking at runtime
-    exe.linkage = .static;
+    exe.linkage = .dynamic;
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

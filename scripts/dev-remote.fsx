@@ -14,6 +14,7 @@ open System
 open System.IO
 open System.Diagnostics
 open System.Threading
+open System.Security.Cryptography
 open DotNetEnv
 open DevUpload
 
@@ -36,10 +37,10 @@ let loadConfig () =
     let envPath = Path.Combine(projectRoot, ".env")
 
     if File.Exists envPath then
-        Env.Load(envPath) |> ignore
+        Env.Load envPath |> ignore
 
     let getEnv key defaultValue =
-        match Environment.GetEnvironmentVariable(key) with
+        match Environment.GetEnvironmentVariable key with
         | null
         | "" -> defaultValue
         | value -> value
@@ -61,8 +62,8 @@ let killProcess (proc: Process option) =
     match proc with
     | Some p when not p.HasExited ->
         try
-            p.Kill(true) // Kill process tree
-            p.WaitForExit(5000) |> ignore
+            p.Kill true // Kill process tree
+            p.WaitForExit 5000 |> ignore
         with _ ->
             ()
     | _ -> ()
@@ -71,27 +72,61 @@ let killProcess (proc: Process option) =
 // Build Artifact Watching & Upload
 // ========================================
 
-let mutable lastUploadTime = DateTime.MinValue
+let mutable isUploading = false
+let mutable debounceTimer: System.Threading.Timer option = None
+let mutable lastUploadedHash: string option = None
 let uploadLock = obj ()
 
-let processUpload (config: Config) (filePath: string) =
-    lock uploadLock (fun () ->
-        let now = DateTime.Now
-        let timeSinceLastUpload = now - lastUploadTime
+let calculateFileHash (filePath: string) : string =
+    try
+        use md5 = MD5.Create()
+        use fileStream = File.OpenRead(filePath)
+        let hash = md5.ComputeHash(fileStream)
+        BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant()
+    with ex ->
+        printfn "⚠️  Failed to calculate file hash: %s" ex.Message
+        ""
 
-        // Debounce: don't upload if we just uploaded recently (within 2 seconds)
-        if timeSinceLastUpload.TotalSeconds < 2.0 then
-            printfn "⏭️  Skipping upload (debounce: %.1fs since last upload)" timeSinceLastUpload.TotalSeconds
-        else
-            printfn ""
-            printfn "📝 Build artifact changed: %s" (Path.GetFileName filePath)
+let rec processUploadDelayed (config: Config) (filePath: string) (retryCount: int) =
+    if retryCount > 3 then
+        printfn "⚠️  File still being written after 6 seconds, proceeding with upload"
 
-            // Wait a moment for file to stabilize
-            Thread.Sleep 2000
+    if isUploading then
+        printfn "⏭️  Skipping upload (upload already in progress)"
+    else
+        lock uploadLock (fun () ->
+            if isUploading then
+                printfn "⏭️  Skipping upload (upload in progress)"
+            else
+                // Calculate hash of current file
+                let currentHash = calculateFileHash filePath
+                
+                // Skip upload if hash matches last uploaded version
+                if lastUploadedHash = Some currentHash then
+                    printfn "⏭️  Skipping upload (file unchanged - hash: %s)" (currentHash.Substring(0, 8) + "...")
+                else
+                    isUploading <- true
+                    printfn ""
+                    printfn "📝 Build artifact changed: %s" (Path.GetFileName filePath)
+                    
+                    if not (String.IsNullOrEmpty currentHash) then
+                        printfn "   Hash: %s" (currentHash.Substring(0, 8) + "...")
 
-            if SshClient.uploadFile config.UploadConfig filePath then
-                lastUploadTime <- now
-                printfn "")
+                    try
+                        if SshClient.uploadFile config.UploadConfig filePath then
+                            lastUploadedHash <- Some currentHash
+                            printfn ""
+                    finally
+                        isUploading <- false)
+
+let startDebounceTimer (config: Config) (filePath: string) =
+    // Cancel existing timer if any
+    debounceTimer |> Option.iter (fun t -> t.Dispose())
+
+    // Create new timer that fires after 2 seconds of inactivity
+    let timerCallback = TimerCallback(fun _ -> processUploadDelayed config filePath 0)
+    let timer = new System.Threading.Timer(timerCallback, null, 2000, System.Threading.Timeout.Infinite)
+    debounceTimer <- Some timer
 
 let startArtifactWatcher (config: Config) =
     let watchPath = Path.GetDirectoryName config.LocalBuildPath
@@ -113,21 +148,21 @@ let startArtifactWatcher (config: Config) =
     watcher.IncludeSubdirectories <- false
 
     let handleFileEvent (args: FileSystemEventArgs) =
-        if args.Name = fileName then
+        if args.Name = fileName && not isUploading then
             printfn "🔔 File event detected: %s (%A)" args.Name args.ChangeType
-            processUpload config args.FullPath
+            startDebounceTimer config args.FullPath
 
     // Handle file changes
-    watcher.Changed.Add(handleFileEvent)
+    watcher.Changed.Add handleFileEvent
 
     // Handle new file creation
-    watcher.Created.Add(handleFileEvent)
+    watcher.Created.Add handleFileEvent
 
     // Handle file renames (Zig may use atomic writes: temp file -> rename)
     watcher.Renamed.Add(fun (args: RenamedEventArgs) ->
-        if args.Name = fileName then
+        if args.Name = fileName && not isUploading then
             printfn "🔔 File renamed to: %s" args.Name
-            processUpload config args.FullPath)
+            startDebounceTimer config args.FullPath)
 
     watcher.Error.Add(fun args -> printfn "❌ Artifact watcher error: %s" (args.GetException().Message))
 
@@ -136,7 +171,7 @@ let startArtifactWatcher (config: Config) =
     // Upload immediately if file already exists
     if File.Exists config.LocalBuildPath then
         printfn "🚀 Initial upload of existing build artifact..."
-        processUpload config config.LocalBuildPath
+        processUploadDelayed config config.LocalBuildPath 0
 
     watcher
 
@@ -205,6 +240,7 @@ try
 
     killProcess buildProcess
     artifactWatcher |> Option.iter (fun w -> w.Dispose())
+    debounceTimer |> Option.iter (fun t -> t.Dispose())
 
     printfn "✅ Shutdown complete"
     0
@@ -214,5 +250,6 @@ with ex ->
 
     killProcess buildProcess
     artifactWatcher |> Option.iter (fun w -> w.Dispose())
+    debounceTimer |> Option.iter (fun t -> t.Dispose())
 
     1

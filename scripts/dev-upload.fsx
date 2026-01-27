@@ -38,9 +38,9 @@ module Config =
         if not (File.Exists envPath) then
             failwithf "❌ .env file not found at: %s" envPath
 
-        Env.Load(envPath) |> ignore
+        Env.Load envPath |> ignore
 
-        let getEnv key = Environment.GetEnvironmentVariable(key)
+        let getEnv key = Environment.GetEnvironmentVariable key
 
         let getEnvOpt key =
             match getEnv key with
@@ -84,7 +84,7 @@ module SshClient =
             let expandedPath =
                 if keyPath.StartsWith("~") then
                     Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        Environment.GetFolderPath Environment.SpecialFolder.UserProfile,
                         keyPath.Substring(1).TrimStart('/', '\\')
                     )
                 else
@@ -110,7 +110,7 @@ module SshClient =
 
     let uploadFile (config: UploadConfig) (localPath: string) : bool =
         try
-            let fileName = Path.GetFileName(localPath)
+            let fileName = Path.GetFileName localPath
             let remotePath = Path.Combine(config.RemotePath, fileName).Replace("\\", "/")
             let tempPath = remotePath + ".tmp"
 
@@ -158,7 +158,7 @@ module SshClient =
 
                 try
                     // Upload to temporary file first
-                    use fileStream = File.OpenRead(localPath)
+                    use fileStream = File.OpenRead localPath
                     let fileSize = fileStream.Length
                     let mutable lastProgress = 0L
 
@@ -189,51 +189,68 @@ module SshClient =
                     printfn ""
                     printfn "✅ Upload complete"
 
-                    sftp.Disconnect()
-
-                    // Step 3: Move temp file to final location and set permissions via SSH
-                    printfn "🔄 Moving file to final location..."
-
-                    use ssh = new SshClient(createConnectionInfo config)
-                    ssh.Connect()
-
-                    // Delete old file and move new one atomically
-                    let deployCmd =
-                        sprintf "rm -f '%s' && mv '%s' '%s' && chmod 755 '%s'" remotePath tempPath remotePath remotePath
-
-                    let deployResult = ssh.RunCommand(deployCmd)
-
-                    if not (deployResult.ExitStatus.HasValue && deployResult.ExitStatus.Value = 0) then
-                        printfn "❌ Deploy failed: %s" deployResult.Error
-                        ssh.Disconnect()
+                    // Verify temp file exists before disconnecting SFTP
+                    if not (sftp.Exists(tempPath)) then
+                        printfn "❌ Temporary file not found at: %s" tempPath
+                        sftp.Disconnect()
                         false
                     else
-                        printfn "✅ File deployed successfully"
+                        sftp.Disconnect()
 
-                        // Step 4: Restart service
-                        if config.AutoRestartService then
-                            printfn "🔄 Restarting service: %s" config.RemoteService
+                        // Step 3: Move temp file to final location and set permissions via SSH
+                        printfn "🔄 Moving file to final location..."
 
-                            let command = sprintf "service %s start" config.RemoteService
-                            let result = ssh.RunCommand(command)
+                        use ssh = new SshClient(createConnectionInfo config)
+                        ssh.Connect()
 
-                            if result.ExitStatus.HasValue then
-                                if result.ExitStatus.Value = 0 then
-                                    printfn "✅ Service restarted successfully"
+                        // First verify temp file exists via SSH
+                        let checkCmd = sprintf "test -f '%s' && echo 'exists' || echo 'missing'" tempPath
+                        let checkResult = ssh.RunCommand checkCmd
+                        let tempFileExists = checkResult.Result.Trim() = "exists"
 
-                                    if not (String.IsNullOrWhiteSpace result.Result) then
-                                        printfn "   Output: %s" (result.Result.Trim())
-                                else
-                                    printfn "⚠️  Service restart failed (exit code: %d)" result.ExitStatus.Value
+                        if not tempFileExists then
+                            printfn "❌ Temporary file not found on remote: %s" tempPath
+                            printfn "   SSH check output: %s" checkResult.Result
+                            ssh.Disconnect()
+                            false
+                        else
+                            // Delete old file and move new one atomically
+                            let deployCmd =
+                                sprintf "rm -f '%s'; mv '%s' '%s' && chmod 755 '%s'" remotePath tempPath remotePath remotePath
 
-                                    if not (String.IsNullOrWhiteSpace result.Error) then
-                                        printfn "   Error: %s" (result.Error.Trim())
+                            let deployResult = ssh.RunCommand deployCmd
+
+                            if not (deployResult.ExitStatus.HasValue && deployResult.ExitStatus.Value = 0) then
+                                printfn "❌ Deploy failed: %s %s" deployResult.Error deployResult.Result
+                                ssh.Disconnect()
+                                false
                             else
-                                printfn "⚠️  Service restart returned no exit status"
+                                printfn "✅ File deployed successfully"
 
-                        ssh.Disconnect()
-                        printfn ""
-                        true
+                                // Step 4: Restart service
+                                if config.AutoRestartService then
+                                    printfn "🔄 Restarting service: %s" config.RemoteService
+
+                                    let command = sprintf "service %s start" config.RemoteService
+                                    let result = ssh.RunCommand command
+
+                                    if result.ExitStatus.HasValue then
+                                        if result.ExitStatus.Value = 0 then
+                                            printfn "✅ Service restarted successfully"
+
+                                            if not (String.IsNullOrWhiteSpace result.Result) then
+                                                printfn "   Output: %s" (result.Result.Trim())
+                                        else
+                                            printfn "⚠️  Service restart failed (exit code: %d)" result.ExitStatus.Value
+
+                                            if not (String.IsNullOrWhiteSpace result.Error) then
+                                                printfn "   Error: %s" (result.Error.Trim())
+                                    else
+                                        printfn "⚠️  Service restart returned no exit status"
+
+                                ssh.Disconnect()
+                                printfn ""
+                                true
 
                 with uploadEx ->
                     printfn "❌ Upload failed: %s" uploadEx.Message

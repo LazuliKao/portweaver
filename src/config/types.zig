@@ -24,10 +24,12 @@ pub const FrpNode = struct {
     server: []const u8,
     port: u16,
     token: []const u8 = "",
+    log_level: []const u8 = "info",
 
     pub fn deinit(self: *FrpNode, allocator: std.mem.Allocator) void {
         allocator.free(self.server);
         if (self.token.len != 0) allocator.free(self.token);
+        if (self.log_level.len != 0) allocator.free(self.log_level);
         self.* = undefined;
     }
 };

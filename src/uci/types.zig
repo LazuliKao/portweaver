@@ -289,7 +289,7 @@ pub const UciContext = struct {
 
         var package: [*c]c.uci_package = null;
         std.log.debug(
-            "Calling uci_load with ctx={*}, name={s}, package_ptr={*}\n",
+            "Calling uci_load with ctx={*}, name={s}, package_ptr={*}",
             .{ self.ctx, std.mem.span(name), &package },
         );
         const result = try libuci.uci_load(self.ctx, name, &package);
