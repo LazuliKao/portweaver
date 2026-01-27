@@ -74,7 +74,7 @@ fn getOrCreateClient(
 
     std.log.debug("[FRP] getOrCreateClient: initializing FrpClient for node {s}", .{node_name});
     holder.* = .{
-        .client = try libfrp.FrpClient.init(allocator, node.server, node.port, token_opt, log_level_opt),
+        .client = try libfrp.FrpClient.init(allocator, node.server, node.port, token_opt, log_level_opt, node_name),
         .started = false,
         .lock = .{},
     };
