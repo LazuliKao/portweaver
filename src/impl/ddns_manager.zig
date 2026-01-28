@@ -55,22 +55,31 @@ var instances_lock: std.Thread.Mutex = .{};
 fn ddnsUpdateThread(holder: *InstanceHolder) void {
     std.log.debug("[DDNS] Update thread started for {s}", .{holder.config.name});
 
-    while (!holder.should_stop.load(.seq_cst)) {
+    // Use TTL as update interval (convert to seconds, default 300 if TTL is too small)
+    const interval_seconds: u32 = if (holder.config.ttl >= 60) holder.config.ttl else 300;
+
+    holder.lock.lock();
+    holder.last_status = "running";
+    holder.lock.unlock();
+
+    holder.instance.startAutoUpdate(interval_seconds) catch |err| {
+        std.log.warn("[DDNS] Auto-update failed for {s}: {any}", .{ holder.config.name, err });
         holder.lock.lock();
-        holder.last_status = "running";
+        holder.last_status = "error";
+        holder.last_message = "Failed to start auto-update";
         holder.lock.unlock();
+        return;
+    };
 
-        holder.instance.startAutoUpdate() catch |err| {
-            std.log.warn("[DDNS] Auto-update failed for {s}: {any}", .{ holder.config.name, err });
-            holder.lock.lock();
-            holder.last_status = "error";
-            holder.last_message = "Update failed";
-            holder.lock.unlock();
-        };
-
-        // Sleep for a while before next update check
-        std.time.sleep(60 * std.time.ns_per_s); // 60 seconds
+    // Wait until stop signal
+    while (!holder.should_stop.load(.seq_cst)) {
+        std.time.sleep(1 * std.time.ns_per_s); // Check every second
     }
+
+    // Stop auto-update when thread is stopping
+    holder.instance.stopAutoUpdate() catch |err| {
+        std.log.warn("[DDNS] Failed to stop auto-update for {s}: {any}", .{ holder.config.name, err });
+    };
 
     std.log.debug("[DDNS] Update thread stopped for {s}", .{holder.config.name});
 }
@@ -83,6 +92,26 @@ fn getInstanceMap(allocator: std.mem.Allocator) !*std.StringHashMap(*InstanceHol
     return &instances.?;
 }
 
+fn parseDomains(allocator: std.mem.Allocator, domains_str: []const u8) ![][]const u8 {
+    if (domains_str.len == 0) return &[_][]const u8{};
+
+    var list = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (list.items) |item| allocator.free(item);
+        list.deinit();
+    }
+
+    var iter = std.mem.splitScalar(u8, domains_str, ',');
+    while (iter.next()) |domain| {
+        const trimmed = std.mem.trim(u8, domain, " \t\r\n");
+        if (trimmed.len > 0) {
+            try list.append(try allocator.dupe(u8, trimmed));
+        }
+    }
+
+    return try list.toOwnedSlice();
+}
+
 fn createInstance(
     allocator: std.mem.Allocator,
     config: types.DdnsConfig,
@@ -92,14 +121,117 @@ fn createInstance(
 
     // Convert DdnsConfig to libddns types
     const provider = try libddns.DnsProvider.fromString(config.dns_provider);
-    const credentials = libddns.DnsCredentials{
-        .id = if (config.dns_id.len > 0) config.dns_id else null,
-        .secret = if (config.dns_secret.len > 0) config.dns_secret else null,
-        .ext_param = if (config.dns_ext_param.len > 0) config.dns_ext_param else null,
-    };
+
+    // Create instance with provider only
+    var instance = try libddns.DdnsInstance.init(allocator, provider);
+    errdefer instance.deinit();
+
+    // Set credentials
+    try instance.setCredentials(
+        if (config.dns_id.len > 0) config.dns_id else null,
+        if (config.dns_secret.len > 0) config.dns_secret else null,
+    );
+
+    // Configure IPv4 if enabled
+    if (config.ipv4.enable) {
+        // Set IPv4 get type
+        const ipv4_get_type = config.ipv4.get_type.toString();
+        try instance.setIPv4GetType(ipv4_get_type);
+
+        // Set IPv4 address/url/interface/cmd based on get_type
+        switch (config.ipv4.get_type) {
+            .url => {
+                if (config.ipv4.url.len > 0) {
+                    try instance.setIPv4Address(config.ipv4.url);
+                }
+            },
+            .net_interface => {
+                if (config.ipv4.net_interface.len > 0) {
+                    try instance.setIPv4Address(config.ipv4.net_interface);
+                }
+            },
+            .cmd => {
+                if (config.ipv4.cmd.len > 0) {
+                    try instance.setIPv4Address(config.ipv4.cmd);
+                }
+            },
+        }
+
+        // Parse and add IPv4 domains
+        if (config.ipv4.domains.len > 0) {
+            const domains = try parseDomains(allocator, config.ipv4.domains);
+            defer {
+                for (domains) |d| allocator.free(d);
+                allocator.free(domains);
+            }
+
+            for (domains) |domain_str| {
+                // Split domain and subdomain by '@' or use whole string as domain
+                var domain_parts = std.mem.splitScalar(u8, domain_str, '@');
+                const subdomain = domain_parts.next() orelse "";
+                const domain = domain_parts.next() orelse domain_str;
+
+                try instance.addDomain(.{
+                    .domain_name = domain,
+                    .sub_domain = if (subdomain.len > 0 and !std.mem.eql(u8, subdomain, domain_str)) subdomain else null,
+                    .ipv4_enabled = true,
+                    .ipv6_enabled = false,
+                });
+            }
+        }
+    }
+
+    // Configure IPv6 if enabled
+    if (config.ipv6.enable) {
+        // Set IPv6 get type
+        const ipv6_get_type = config.ipv6.get_type.toString();
+        try instance.setIPv6GetType(ipv6_get_type);
+
+        // Set IPv6 address/url/interface/cmd based on get_type
+        switch (config.ipv6.get_type) {
+            .url => {
+                if (config.ipv6.url.len > 0) {
+                    try instance.setIPv6Address(config.ipv6.url);
+                }
+            },
+            .net_interface => {
+                if (config.ipv6.net_interface.len > 0) {
+                    try instance.setIPv6Address(config.ipv6.net_interface);
+                }
+            },
+            .cmd => {
+                if (config.ipv6.cmd.len > 0) {
+                    try instance.setIPv6Address(config.ipv6.cmd);
+                }
+            },
+        }
+
+        // Parse and add IPv6 domains
+        if (config.ipv6.domains.len > 0) {
+            const domains = try parseDomains(allocator, config.ipv6.domains);
+            defer {
+                for (domains) |d| allocator.free(d);
+                allocator.free(domains);
+            }
+
+            for (domains) |domain_str| {
+                // Split domain and subdomain by '@' or use whole string as domain
+                var domain_parts = std.mem.splitScalar(u8, domain_str, '@');
+                const subdomain = domain_parts.next() orelse "";
+                const domain = domain_parts.next() orelse domain_str;
+
+                try instance.addDomain(.{
+                    .domain_name = domain,
+                    .sub_domain = if (subdomain.len > 0 and !std.mem.eql(u8, subdomain, domain_str)) subdomain else null,
+                    .ipv4_enabled = false,
+                    .ipv6_enabled = true,
+                });
+            }
+        }
+    }
 
     holder.* = .{
-        .instance = try libddns.DdnsInstance.init(allocator, provider, credentials),
+        .instance = instance,
         .config = config,
     };
 

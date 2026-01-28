@@ -101,6 +101,34 @@ pub const DnsProvider = enum {
             .name_com => "name_com",
         };
     }
+
+    pub fn fromString(str: []const u8) !DnsProvider {
+        if (std.mem.eql(u8, str, "alidns")) return .alidns;
+        if (std.mem.eql(u8, str, "aliesa")) return .aliesa;
+        if (std.mem.eql(u8, str, "tencentcloud")) return .tencentcloud;
+        if (std.mem.eql(u8, str, "trafficroute")) return .trafficroute;
+        if (std.mem.eql(u8, str, "dnspod")) return .dnspod;
+        if (std.mem.eql(u8, str, "dnsla")) return .dnsla;
+        if (std.mem.eql(u8, str, "cloudflare")) return .cloudflare;
+        if (std.mem.eql(u8, str, "huaweicloud")) return .huaweicloud;
+        if (std.mem.eql(u8, str, "callback")) return .callback;
+        if (std.mem.eql(u8, str, "baiducloud")) return .baiducloud;
+        if (std.mem.eql(u8, str, "porkbun")) return .porkbun;
+        if (std.mem.eql(u8, str, "godaddy")) return .godaddy;
+        if (std.mem.eql(u8, str, "namecheap")) return .namecheap;
+        if (std.mem.eql(u8, str, "namesilo")) return .namesilo;
+        if (std.mem.eql(u8, str, "vercel")) return .vercel;
+        if (std.mem.eql(u8, str, "dynadot")) return .dynadot;
+        if (std.mem.eql(u8, str, "dynv6")) return .dynv6;
+        if (std.mem.eql(u8, str, "spaceship")) return .spaceship;
+        if (std.mem.eql(u8, str, "nowcn")) return .nowcn;
+        if (std.mem.eql(u8, str, "eranet")) return .eranet;
+        if (std.mem.eql(u8, str, "gcore")) return .gcore;
+        if (std.mem.eql(u8, str, "edgeone")) return .edgeone;
+        if (std.mem.eql(u8, str, "nsone")) return .nsone;
+        if (std.mem.eql(u8, str, "name_com")) return .name_com;
+        return DdnsError.UnsupportedProvider;
+    }
 };
 
 pub const DomainConfig = struct {

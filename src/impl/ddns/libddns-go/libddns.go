@@ -454,8 +454,8 @@ func DdnsStopAutoUpdate(instanceID C.int) C.int {
 	}
 
 	close(wrapper.stopCh)
-	wrapper.stopCh = make(chan struct{})
 	wrapper.isRunning = false
+	wrapper.stopCh = make(chan struct{})
 
 	return 0
 }
