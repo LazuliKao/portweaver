@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
 const frp_forward = if (build_options.frpc_mode) @import("impl/frp_forward.zig") else struct {};
+const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
 const builtin = @import("builtin");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
@@ -47,6 +48,9 @@ pub fn main() !void {
         handles.deinit();
         if (build_options.frpc_mode) {
             frp_forward.stopAll();
+        }
+        if (build_options.ddns_mode) {
+            ddns_manager.deinit(allocator);
         }
     }
 
@@ -131,6 +135,14 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
     // UCI 模式：配置防火墙规则
     if (build_options.uci_mode) {
         try applyFirewallRules(allocator, cfg.projects);
+    }
+
+    // 启动 DDNS 服务（如果启用）
+    if (build_options.ddns_mode) {
+        std.log.info("Applying DDNS configuration...", .{});
+        ddns_manager.applyConfig(allocator, cfg.ddns_configs) catch |err| {
+            std.log.warn("Failed to apply DDNS configuration: {any}", .{err});
+        };
     }
 
     // 所有handle添加完成后，启动线程

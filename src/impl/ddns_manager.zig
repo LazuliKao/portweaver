@@ -73,7 +73,7 @@ fn ddnsUpdateThread(holder: *InstanceHolder) void {
 
     // Wait until stop signal
     while (!holder.should_stop.load(.seq_cst)) {
-        std.time.sleep(1 * std.time.ns_per_s); // Check every second
+        std.Thread.sleep(1 * std.time.ns_per_s); // Check every second
     }
 
     // Stop auto-update when thread is stopping
@@ -95,7 +95,7 @@ fn getInstanceMap(allocator: std.mem.Allocator) !*std.StringHashMap(*InstanceHol
 fn parseDomains(allocator: std.mem.Allocator, domains_str: []const u8) ![][]const u8 {
     if (domains_str.len == 0) return &[_][]const u8{};
 
-    var list = std.ArrayList([]const u8).init(allocator);
+    var list = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (list.items) |item| allocator.free(item);
         list.deinit();
@@ -329,8 +329,8 @@ pub fn deinit(allocator: std.mem.Allocator) void {
     if (instances) |*map| {
         var it = map.iterator();
         while (it.next()) |entry| {
-            entry.value.deinit(allocator);
-            allocator.destroy(entry.value);
+            entry.value_ptr.*.deinit(allocator);
+            allocator.destroy(entry.value_ptr.*);
             allocator.free(entry.key_ptr.*);
         }
         map.deinit();
