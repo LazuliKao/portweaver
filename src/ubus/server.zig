@@ -1,13 +1,14 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const types = @import("../config/types.zig");
 const app_forward = @import("../impl/app_forward.zig");
 const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
 const c = ubox.c;
 const project_status = @import("../impl/project_status.zig");
-const frp_status = @import("../impl/frp_status.zig");
-const frp_forward = @import("../impl/frp_forward.zig");
-const ddns_manager = @import("../impl/ddns_manager.zig");
+const frp_status = if (build_options.frpc_mode) @import("../impl/frp_status.zig") else struct {};
+const frp_forward = if (build_options.frpc_mode) @import("../impl/frp_forward.zig") else struct {};
+const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const main = @import("../main.zig");
 const event_log = main.event_log;
 const STATUS_RUNNING: [:0]const u8 = "running";
@@ -190,7 +191,7 @@ fn ubusThread(state: *RuntimeState) void {
     }
     const ctx = ctx_opt.?;
 
-    var methods = [_]c.ubus_method{
+    const commonMethods = [_]c.ubus_method{
         .{
             .name = method_names.get_status,
             .handler = handleGetStatus,
@@ -215,6 +216,8 @@ fn ubusThread(state: *RuntimeState) void {
             .policy = &set_enabled_policy,
             .n_policy = @intCast(set_enabled_policy.len),
         },
+    };
+    const frpMethods = if (build_options.frpc_mode) [_]c.ubus_method{
         .{
             .name = method_names.get_frp_status,
             .handler = handleGetFrpStatus,
@@ -247,6 +250,8 @@ fn ubusThread(state: *RuntimeState) void {
             .policy = null,
             .n_policy = 0,
         },
+    } else [_]c.ubus_method{};
+    const ddnsMethods = if (build_options.ddns_mode) [_]c.ubus_method{
         .{
             .name = method_names.get_ddns_statuses,
             .handler = handleGetDdnsStatuses,
@@ -255,8 +260,8 @@ fn ubusThread(state: *RuntimeState) void {
             .policy = null,
             .n_policy = 0,
         },
-    };
-
+    } else [_]c.ubus_method{};
+    const methods = commonMethods ++ frpMethods ++ ddnsMethods;
     var obj_type = c.ubus_object_type{
         .name = method_names.object_name,
         .id = 0,

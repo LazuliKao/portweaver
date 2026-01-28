@@ -34,7 +34,7 @@ pub fn getFrpStatus(allocator: std.mem.Allocator) !FrpStatus {
     const agg_status = try frp_forward.getAggregatedStatus(allocator);
 
     return FrpStatus{
-        .enabled = true,
+        .enabled = frpc_enabled,
         .version = version,
         .status = agg_status.status,
         .last_error = if (agg_status.last_error.len > 0) agg_status.last_error else null,
