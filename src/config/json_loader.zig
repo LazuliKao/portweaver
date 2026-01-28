@@ -358,5 +358,171 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         }
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = &[_]types.DdnsConfig{} };
+    // 解析 DDNS 配置
+    var ddns_list = std.array_list.Managed(types.DdnsConfig).init(allocator);
+    errdefer {
+        for (ddns_list.items) |*d| d.deinit(allocator);
+        ddns_list.deinit();
+    }
+
+    if (root == .object) {
+        if (jsonGetAliased(root.object, &.{"ddns"})) |ddns_value| {
+            if (ddns_value == .array) {
+                for (ddns_value.array.items) |item| {
+                    if (item != .object) continue;
+                    const obj = item.object;
+
+                    var ddns_cfg = types.DdnsConfig{
+                        .name = undefined,
+                        .dns_provider = undefined,
+                    };
+
+                    var have_name = false;
+                    var have_provider = false;
+
+                    // 必填字段
+                    if (jsonGetAliased(obj, &.{"name"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.name = try types.dupeIfNonEmpty(allocator, s);
+                        have_name = ddns_cfg.name.len > 0;
+                    }
+
+                    if (jsonGetAliased(obj, &.{"dns_provider"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.dns_provider = try types.dupeIfNonEmpty(allocator, s);
+                        have_provider = ddns_cfg.dns_provider.len > 0;
+                    }
+
+                    // 可选字段
+                    if (jsonGetAliased(obj, &.{"dns_id"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.dns_id = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"dns_secret"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.dns_secret = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"dns_ext_param"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.dns_ext_param = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ttl"})) |v| {
+                        ddns_cfg.ttl = switch (v) {
+                            .integer => |i| @intCast(i),
+                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 3600,
+                            else => 3600,
+                        };
+                    }
+
+                    // IPv4 配置
+                    if (jsonGetAliased(obj, &.{"ipv4_enable"})) |v| {
+                        ddns_cfg.ipv4.enable = try parseJsonBool(v);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv4_get_type"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv4.get_type = try types.DdnsIpGetType.fromString(s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv4_url"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv4.url = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv4_net_interface"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv4.net_interface = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv4_cmd"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv4.cmd = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv4_domains"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv4.domains = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    // IPv6 配置
+                    if (jsonGetAliased(obj, &.{"ipv6_enable"})) |v| {
+                        ddns_cfg.ipv6.enable = try parseJsonBool(v);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_get_type"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.get_type = try types.DdnsIpGetType.fromString(s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_url"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.url = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_net_interface"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.net_interface = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_cmd"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.cmd = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_reg"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.reg = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"ipv6_domains"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.ipv6.domains = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    // 其他配置
+                    if (jsonGetAliased(obj, &.{"not_allow_wan_access"})) |v| {
+                        ddns_cfg.not_allow_wan_access = try parseJsonBool(v);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"username"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.username = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"password"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.password = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"webhook_url"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.webhook_url = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"webhook_body"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.webhook_body = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (jsonGetAliased(obj, &.{"webhook_headers"})) |v| {
+                        const s = try parseJsonString(v);
+                        ddns_cfg.webhook_headers = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    // 验证必填字段
+                    if (!have_name or !have_provider) {
+                        ddns_cfg.deinit(allocator);
+                        continue;
+                    }
+
+                    try ddns_list.append(ddns_cfg);
+                }
+            }
+        }
+    }
+
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }

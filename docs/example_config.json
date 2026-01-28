@@ -94,7 +94,7 @@
         "lan"
       ]
     }
-  ],
+],
   "frp": {
     "node1": {
       "server": "1.2.3.4",
@@ -106,5 +106,88 @@
       "port": 7000,
       "token": "xxx"
     }
-  }
+  },
+  "ddns": [
+    {
+      "name": "cloudflare-home",
+      "dns_provider": "cloudflare",
+      "dns_id": "",
+      "dns_secret": "your_cloudflare_token_here",
+      "dns_ext_param": "",
+      "ttl": 3600,
+      "ipv4_enable": true,
+      "ipv4_get_type": "url",
+      "ipv4_url": "https://api.ipify.org",
+      "ipv4_net_interface": "",
+      "ipv4_cmd": "",
+      "ipv4_domains": "home.example.com\nwww.home.example.com",
+      "ipv6_enable": false,
+      "ipv6_get_type": "url",
+      "ipv6_url": "",
+      "ipv6_net_interface": "",
+      "ipv6_cmd": "",
+      "ipv6_reg": "",
+      "ipv6_domains": "",
+      "not_allow_wan_access": true,
+      "username": "",
+      "password": "",
+      "webhook_url": "",
+      "webhook_body": "",
+      "webhook_headers": ""
+    },
+    {
+      "name": "alidns-office",
+      "dns_provider": "alidns",
+      "dns_id": "your_aliyun_access_key_id",
+      "dns_secret": "your_aliyun_access_key_secret",
+      "dns_ext_param": "",
+      "ttl": 600,
+      "ipv4_enable": true,
+      "ipv4_get_type": "net_interface",
+      "ipv4_url": "",
+      "ipv4_net_interface": "eth0",
+      "ipv4_cmd": "",
+      "ipv4_domains": "office.example.com",
+      "ipv6_enable": true,
+      "ipv6_get_type": "net_interface",
+      "ipv6_url": "",
+      "ipv6_net_interface": "eth0",
+      "ipv6_cmd": "",
+      "ipv6_reg": "2408:.*",
+      "ipv6_domains": "ipv6.example.com",
+      "not_allow_wan_access": true,
+      "username": "",
+      "password": "",
+      "webhook_url": "https://hooks.example.com/ddns",
+      "webhook_body": "{\"ip\": \"#{ipv4Addr}\", \"ipv6\": \"#{ipv6Addr}\"}",
+      "webhook_headers": "Authorization: Bearer your_webhook_token"
+    },
+    {
+      "name": "tencentcloud-server",
+      "dns_provider": "tencentcloud",
+      "dns_id": "your_tencent_secret_id",
+      "dns_secret": "your_tencent_secret_key",
+      "dns_ext_param": "",
+      "ttl": 600,
+      "ipv4_enable": true,
+      "ipv4_get_type": "cmd",
+      "ipv4_url": "",
+      "ipv4_net_interface": "",
+      "ipv4_cmd": "curl -s https://api.ipify.org",
+      "ipv4_domains": "server.example.com",
+      "ipv6_enable": false,
+      "ipv6_get_type": "url",
+      "ipv6_url": "",
+      "ipv6_net_interface": "",
+      "ipv6_cmd": "",
+      "ipv6_reg": "",
+      "ipv6_domains": "",
+      "not_allow_wan_access": true,
+      "username": "",
+      "password": "",
+      "webhook_url": "",
+      "webhook_body": "",
+      "webhook_headers": ""
+    }
+  ]
 }
