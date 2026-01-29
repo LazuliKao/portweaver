@@ -5,7 +5,6 @@ const main = @import("../main.zig");
 const event_log = main.event_log;
 
 pub const DdnsStatus = struct {
-    section: []const u8,
     name: []const u8,
     provider: []const u8,
     status: []const u8, // "ok", "error", "disabled", "starting"
@@ -14,7 +13,6 @@ pub const DdnsStatus = struct {
     message: []const u8,
 
     pub fn deinit(self: *DdnsStatus, allocator: std.mem.Allocator) void {
-        allocator.free(self.section);
         allocator.free(self.name);
         allocator.free(self.provider);
         allocator.free(self.status);
@@ -330,7 +328,6 @@ pub fn getStatuses(allocator: std.mem.Allocator) ![]DdnsStatus {
         defer holder.lock.unlock();
 
         try list.append(.{
-            .section = try allocator.dupe(u8, entry.key_ptr.*),
             .name = try allocator.dupe(u8, holder.config.name),
             .provider = try allocator.dupe(u8, holder.config.dns_provider),
             .status = try allocator.dupe(u8, holder.last_status),
