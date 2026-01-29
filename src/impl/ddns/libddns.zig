@@ -138,6 +138,12 @@ pub const DomainConfig = struct {
     ipv6_enabled: bool = false,
 };
 
+pub const DdnsStatusResponse = struct {
+    status: []const u8,
+    last_error: []const u8,
+    logs: [][]const u8,
+};
+
 pub const DdnsInstance = struct {
     id: c_int,
     allocator: std.mem.Allocator,
@@ -190,6 +196,22 @@ pub const DdnsInstance = struct {
 
         if (result < 0) {
             return DdnsError.SetConfigFailed;
+        }
+    }
+
+    pub fn setExtParam(self: *DdnsInstance, ext_param: ?[]const u8) !void {
+        if (ext_param) |ep| {
+            const c_ext = try self.allocator.dupeZ(u8, ep);
+            defer self.allocator.free(c_ext);
+            const result = c.DdnsSetExtParam(self.id, c_ext.ptr);
+            if (result < 0) {
+                return DdnsError.SetConfigFailed;
+            }
+        } else {
+            const result = c.DdnsSetExtParam(self.id, null);
+            if (result < 0) {
+                return DdnsError.SetConfigFailed;
+            }
         }
     }
 
@@ -305,6 +327,33 @@ pub const DdnsInstance = struct {
             return DdnsError.StopFailed;
         }
         self.is_running = false;
+    }
+
+    pub fn getStatusAndLogs(self: *DdnsInstance) !DdnsStatusResponse {
+        const json_str = c.DdnsGetStatusAndLogs(self.id);
+        if (json_str == null) {
+            return DdnsError.InvalidInstanceID;
+        }
+        defer c.DdnsFreeString(json_str);
+
+        const json_slice = std.mem.span(json_str);
+        const parsed = try std.json.parseFromSlice(DdnsStatusResponse, self.allocator, json_slice, .{});
+        defer parsed.deinit();
+
+        // Deep copy to avoid dependency on parsed data
+        var response = parsed.value;
+        response.status = try self.allocator.dupe(u8, response.status);
+        response.last_error = try self.allocator.dupe(u8, response.last_error);
+        response.logs = try self.allocator.dupe([]const u8, response.logs);
+        for (response.logs) |*log| {
+            log.* = try self.allocator.dupe(u8, log.*);
+        }
+
+        return response;
+    }
+
+    pub fn clearLogs(self: *DdnsInstance) void {
+        c.DdnsClearLogs(self.id);
     }
 
     pub fn deinit(self: *DdnsInstance) void {

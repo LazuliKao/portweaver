@@ -4,6 +4,7 @@ package main
 // #include <string.h>
 import "C"
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -19,6 +20,9 @@ var (
 	ddnsInstances      = make(map[int]*ddnsWrapper)
 	ddnsInstancesMutex sync.RWMutex
 	nextInstanceID     = 1
+	ddnsMultiLogger    *multiWriterLogger
+	ddnsLoggerMutex    sync.Mutex
+	ddnsLoggerInited   bool
 )
 
 type ddnsWrapper struct {
@@ -29,6 +33,60 @@ type ddnsWrapper struct {
 	stopCh      chan struct{}
 	isRunning   bool
 	lastResult  string
+	status      string
+	lastError   string
+	logs        []string
+	logMutex    sync.Mutex
+}
+
+type ringBufferLogger struct {
+	wrapper *ddnsWrapper
+}
+
+func (l *ringBufferLogger) Write(p []byte) (n int, err error) {
+	l.wrapper.logMutex.Lock()
+	defer l.wrapper.logMutex.Unlock()
+
+	line := string(p)
+	l.wrapper.logs = append(l.wrapper.logs, line)
+
+	// Keep only last 500 lines
+	if len(l.wrapper.logs) > 500 {
+		l.wrapper.logs = l.wrapper.logs[len(l.wrapper.logs)-500:]
+	}
+
+	return len(p), nil
+}
+
+// multiWriterLogger writes log entries to multiple ringBufferLogger instances
+type multiWriterLogger struct {
+	writers map[int]*ringBufferLogger
+	mutex   sync.RWMutex
+}
+
+func (m *multiWriterLogger) Write(p []byte) (n int, err error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	for _, writer := range m.writers {
+		writer.Write(p)
+	}
+	return len(p), nil
+}
+
+func (m *multiWriterLogger) addWriter(id int, writer *ringBufferLogger) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if m.writers == nil {
+		m.writers = make(map[int]*ringBufferLogger)
+	}
+	m.writers[id] = writer
+}
+
+func (m *multiWriterLogger) removeWriter(id int) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.writers, id)
 }
 
 func main() {}
@@ -112,11 +170,28 @@ func DdnsCreateInstance(
 		ipv6cache:   &util.IpCache{},
 		stopCh:      make(chan struct{}),
 		isRunning:   false,
+		status:      "stopped",
+		lastError:   "",
+		logs:        make([]string, 0),
 	}
 
 	instanceID := nextInstanceID
 	nextInstanceID++
 	ddnsInstances[instanceID] = wrapper
+
+	// Create ring buffer logger for this instance
+	logger := &ringBufferLogger{wrapper: wrapper}
+
+	// Initialize global multi-writer logger if not already initialized
+	ddnsLoggerMutex.Lock()
+	if !ddnsLoggerInited {
+		ddnsMultiLogger = &multiWriterLogger{}
+		ddnsLoggerInited = true
+	}
+	ddnsLoggerMutex.Unlock()
+
+	// Add this instance's logger to the multi-writer
+	ddnsMultiLogger.addWriter(instanceID, logger)
 
 	return C.int(instanceID)
 }
@@ -162,6 +237,28 @@ func DdnsSetCredentials(
 	}
 	if secret != nil {
 		wrapper.dnsConf.DNS.Secret = C.GoString(secret)
+	}
+
+	return 0
+}
+
+//export DdnsSetExtParam
+func DdnsSetExtParam(
+	instanceID C.int,
+	extParam *C.char,
+) C.int {
+	ddnsInstancesMutex.RLock()
+	wrapper, ok := ddnsInstances[int(instanceID)]
+	ddnsInstancesMutex.RUnlock()
+
+	if !ok {
+		return -2
+	}
+
+	if extParam != nil && C.GoString(extParam) != "" {
+		wrapper.dnsConf.DNS.ExtParam = C.GoString(extParam)
+	} else {
+		wrapper.dnsConf.DNS.ExtParam = ""
 	}
 
 	return 0
@@ -404,6 +501,10 @@ func DdnsStartAutoUpdate(
 	}
 
 	wrapper.isRunning = true
+	wrapper.status = "running"
+
+	// Redirect log.Printf calls to the multiWriterLogger
+	log.SetOutput(ddnsMultiLogger)
 
 	wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
 
@@ -450,12 +551,15 @@ func DdnsStopAutoUpdate(instanceID C.int) C.int {
 	}
 
 	if !wrapper.isRunning {
-		return 0 // 没有在运行
+		return 0
 	}
 
 	close(wrapper.stopCh)
 	wrapper.isRunning = false
+	wrapper.status = "stopped"
 	wrapper.stopCh = make(chan struct{})
+
+	ddnsMultiLogger.removeWriter(int(instanceID))
 
 	return 0
 }
@@ -470,13 +574,13 @@ func DdnsDestroyInstance(instanceID C.int) C.int {
 		return -1
 	}
 
-	// 确保自动更新已停止
 	if wrapper.isRunning {
 		close(wrapper.stopCh)
 		wrapper.isRunning = false
 	}
 
-	// 从全局 map 中删除
+	ddnsMultiLogger.removeWriter(int(instanceID))
+
 	delete(ddnsInstances, int(instanceID))
 
 	return 0
@@ -485,6 +589,55 @@ func DdnsDestroyInstance(instanceID C.int) C.int {
 //export DdnsFreeString
 func DdnsFreeString(str *C.char) {
 	C.free(unsafe.Pointer(str))
+}
+
+type DdnsStatusResponse struct {
+	Status    string   `json:"status"`
+	LastError string   `json:"last_error"`
+	Logs      []string `json:"logs"`
+}
+
+//export DdnsGetStatusAndLogs
+func DdnsGetStatusAndLogs(instanceID C.int) *C.char {
+	ddnsInstancesMutex.RLock()
+	wrapper, ok := ddnsInstances[int(instanceID)]
+	ddnsInstancesMutex.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	wrapper.logMutex.Lock()
+	defer wrapper.logMutex.Unlock()
+
+	response := DdnsStatusResponse{
+		Status:    wrapper.status,
+		LastError: wrapper.lastError,
+		Logs:      wrapper.logs,
+	}
+
+	jsonBytes, err := json.Marshal(response)
+	if err != nil {
+		return nil
+	}
+
+	return C.CString(string(jsonBytes))
+}
+
+//export DdnsClearLogs
+func DdnsClearLogs(instanceID C.int) {
+	ddnsInstancesMutex.RLock()
+	wrapper, ok := ddnsInstances[int(instanceID)]
+	ddnsInstancesMutex.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	wrapper.logMutex.Lock()
+	defer wrapper.logMutex.Unlock()
+
+	wrapper.logs = make([]string, 0)
 }
 
 //export DdnsCleanup

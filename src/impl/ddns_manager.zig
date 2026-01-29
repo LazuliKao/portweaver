@@ -24,6 +24,22 @@ pub const DdnsStatus = struct {
     }
 };
 
+pub const DdnsInfo = struct {
+    status: []const u8,
+    last_error: []const u8,
+    logs: std.ArrayList([]const u8),
+
+    pub fn deinit(self: *DdnsInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.status);
+        allocator.free(self.last_error);
+        for (self.logs.items) |log| {
+            allocator.free(log);
+        }
+        self.logs.deinit();
+        self.* = undefined;
+    }
+};
+
 const InstanceHolder = struct {
     instance: libddns.DdnsInstance,
     config: types.DdnsConfig,
@@ -59,7 +75,7 @@ fn ddnsUpdateThread(holder: *InstanceHolder) void {
     const interval_seconds: u32 = if (holder.config.ttl >= 60) holder.config.ttl else 300;
 
     holder.lock.lock();
-    holder.last_status = "running";
+    holder.last_status = "success";
     holder.lock.unlock();
 
     holder.instance.startAutoUpdate(interval_seconds) catch |err| {
@@ -130,6 +146,11 @@ fn createInstance(
     try instance.setCredentials(
         if (config.dns_id.len > 0) config.dns_id else null,
         if (config.dns_secret.len > 0) config.dns_secret else null,
+    );
+
+    // Set extended parameters
+    try instance.setExtParam(
+        if (config.dns_ext_param.len > 0) config.dns_ext_param else null,
     );
 
     // Configure IPv4 if enabled
@@ -320,6 +341,52 @@ pub fn getStatuses(allocator: std.mem.Allocator) ![]DdnsStatus {
     }
 
     return try list.toOwnedSlice();
+}
+
+pub fn getInstanceStatus(allocator: std.mem.Allocator, name: []const u8) !DdnsInfo {
+    instances_lock.lock();
+    defer instances_lock.unlock();
+
+    if (instances == null) {
+        return error.NoInstances;
+    }
+
+    const holder = instances.?.get(name) orelse return error.InstanceNotFound;
+
+    const response = try holder.instance.getStatusAndLogs();
+    defer {
+        holder.allocator.free(response.status);
+        holder.allocator.free(response.last_error);
+        for (response.logs) |log| {
+            holder.allocator.free(log);
+        }
+        holder.allocator.free(response.logs);
+    }
+
+    var logs_list = std.ArrayList([]const u8).init(allocator);
+    errdefer logs_list.deinit();
+
+    for (response.logs) |log| {
+        try logs_list.append(try allocator.dupe(u8, log));
+    }
+
+    return .{
+        .status = try allocator.dupe(u8, response.status),
+        .last_error = try allocator.dupe(u8, response.last_error),
+        .logs = logs_list,
+    };
+}
+
+pub fn clearInstanceLogs(name: []const u8) !void {
+    instances_lock.lock();
+    defer instances_lock.unlock();
+
+    if (instances == null) {
+        return error.NoInstances;
+    }
+
+    const holder = instances.?.get(name) orelse return error.InstanceNotFound;
+    holder.instance.clearLogs();
 }
 
 pub fn deinit(allocator: std.mem.Allocator) void {

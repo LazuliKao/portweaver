@@ -115,6 +115,10 @@ const frp_info_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_STRING },
 };
 
+const ddns_info_policy = [_]c.blobmsg_policy{
+    .{ .name = "name", .type = c.BLOBMSG_TYPE_STRING },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
@@ -124,6 +128,8 @@ const method_names = struct {
     pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
     pub const get_events: [:0]const u8 = "get_events";
     pub const get_ddns_statuses: [:0]const u8 = "get_ddns_statuses";
+    pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
+    pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -259,6 +265,22 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = null,
             .n_policy = 0,
+        },
+        .{
+            .name = method_names.get_ddns_info,
+            .handler = handleGetDdnsInfo,
+            .mask = 0,
+            .tags = 0,
+            .policy = &ddns_info_policy,
+            .n_policy = @intCast(ddns_info_policy.len),
+        },
+        .{
+            .name = method_names.clear_ddns_logs,
+            .handler = handleClearDdnsLogs,
+            .mask = 0,
+            .tags = 0,
+            .policy = &ddns_info_policy,
+            .n_policy = @intCast(ddns_info_policy.len),
         },
     } else [_]c.ubus_method{};
     const methods = commonMethods ++ frpMethods ++ ddnsMethods;
@@ -695,6 +717,91 @@ fn handleGetDdnsStatuses(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [
     }
 
     ubox.blobNestEnd(&buf, arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetDdnsInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Parse the "name" parameter
+    var tb: [ddns_info_policy.len]?*c.blob_attr = .{null};
+    const data_ptr = c.blob_data(msg);
+    const data_len = c.blob_len(msg);
+    ubox.blobmsgParse(ddns_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const name_cstr = c.blobmsg_get_string(tb[0].?);
+    const name = std.mem.span(name_cstr);
+
+    // Get DDNS info from manager
+    const info = ddns_manager.getInstanceStatus(state.allocator, name) catch |err| {
+        std.log.warn("Failed to get DDNS info for instance '{s}': {any}", .{ name, err });
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    defer info.deinit(state.allocator);
+
+    // Build response
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Add status field
+    const status_z = state.allocator.dupeZ(u8, info.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer state.allocator.free(status_z);
+    addString(&buf, field_names.status, status_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Add last_error field
+    const error_z = state.allocator.dupeZ(u8, info.last_error) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer state.allocator.free(error_z);
+    addString(&buf, field_names.last_error, error_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Add logs as array of strings
+    const logs_cookie = ubox.blobmsgOpenNested(&buf, field_names.logs, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    for (info.logs.items) |log| {
+        const log_z = state.allocator.dupeZ(u8, log) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(log_z);
+        ubox.blobmsgAddField(&buf, c.BLOBMSG_TYPE_STRING, "", log_z.ptr, log_z.len + 1) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+    ubox.blobNestEnd(&buf, logs_cookie) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleClearDdnsLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    // Parse the "name" parameter
+    var tb: [ddns_info_policy.len]?*c.blob_attr = .{null};
+    const data_ptr = c.blob_data(msg);
+    const data_len = c.blob_len(msg);
+    ubox.blobmsgParse(ddns_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const name_cstr = c.blobmsg_get_string(tb[0].?);
+    const name = std.mem.span(name_cstr);
+
+    // Clear logs
+    ddns_manager.clearInstanceLogs(name) catch |err| {
+        std.log.warn("Failed to clear DDNS logs for instance '{s}': {any}", .{ name, err });
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+
+    // Return empty success response
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;
