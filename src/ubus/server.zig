@@ -168,7 +168,7 @@ const field_names = struct {
     pub const provider: [:0]const u8 = "provider";
     pub const last_update: [:0]const u8 = "last_update";
     pub const last_ip: [:0]const u8 = "last_ip";
-    pub const ddns_statuses: [:0]const u8 = "ddns_statuses";
+    pub const ddns_status: [:0]const u8 = "ddns_status";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -684,7 +684,7 @@ fn handleGetDdnsStatuses(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [
     }
 
     // Open the ddns_statuses array
-    const arr = ubox.blobmsgOpenNested(&buf, field_names.ddns_statuses, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    const arr = ubox.blobmsgOpenNested(&buf, field_names.ddns_status, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     for (statuses) |status| {
@@ -692,8 +692,6 @@ fn handleGetDdnsStatuses(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [
         if (item == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
 
         // Convert to null-terminated strings for UBUS
-        const section_z = state.allocator.dupeZ(u8, status.section) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        defer state.allocator.free(section_z);
         const name_z = state.allocator.dupeZ(u8, status.name) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         defer state.allocator.free(name_z);
         const provider_z = state.allocator.dupeZ(u8, status.provider) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -705,7 +703,6 @@ fn handleGetDdnsStatuses(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [
         const message_z = state.allocator.dupeZ(u8, status.message) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         defer state.allocator.free(message_z);
 
-        addString(&buf, field_names.section, section_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.name, name_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.provider, provider_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addString(&buf, field_names.status, status_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;

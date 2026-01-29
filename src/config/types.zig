@@ -149,7 +149,7 @@ pub const DdnsIpGetType = enum {
     pub fn toString(self: DdnsIpGetType) []const u8 {
         return switch (self) {
             .url => "url",
-            .net_interface => "net_interface",
+            .net_interface => "netInterface",
             .cmd => "cmd",
         };
     }
