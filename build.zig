@@ -163,7 +163,7 @@ fn addGoLibrary(
     optimize: std.builtin.OptimizeMode,
     lib_dir: []const u8,
     output_name: []const u8,
-    source_file: []const u8,
+    tags: ?[]const u8,
 ) *std.Build.Step {
     const os_tag = target.result.os.tag;
     const arch_tag = target.result.cpu.arch;
@@ -198,28 +198,35 @@ fn addGoLibrary(
         else => @panic("Unsupported architecture"),
     };
 
-    const go_cmd =
-        if (optimize == .ReleaseSmall)
-            b.addSystemCommand(&.{
-                "go",
-                "build",
-                "-buildmode=c-archive",
-                "-trimpath",
-                "-ldflags=-linkmode external -s -extldflags=-static -w -buildid=",
-                "-o",
-                output_name,
-                source_file,
-            })
-        else
-            b.addSystemCommand(&.{
-                "go",
-                "build",
-                "-buildmode=c-archive",
-                "-ldflags=-linkmode external -extldflags=-static",
-                "-o",
-                output_name,
-                source_file,
-            });
+    var go_args = std.ArrayListUnmanaged([]const u8){};
+    go_args.appendSlice(b.allocator, &.{
+        "go",
+        "build",
+        "-buildmode=c-archive",
+    }) catch @panic("OOM");
+
+    if (tags) |t| {
+        go_args.append(b.allocator, b.fmt("-tags={s}", .{t})) catch @panic("OOM");
+    }
+
+    if (optimize == .ReleaseSmall) {
+        go_args.appendSlice(b.allocator, &.{
+            "-trimpath",
+            "-ldflags=-linkmode external -s -extldflags=-static -w -buildid=",
+            "-o",
+            output_name,
+            ".",
+        }) catch @panic("OOM");
+    } else {
+        go_args.appendSlice(b.allocator, &.{
+            "-ldflags=-linkmode external -extldflags=-static",
+            "-o",
+            output_name,
+            ".",
+        }) catch @panic("OOM");
+    }
+
+    const go_cmd = b.addSystemCommand(go_args.items);
 
     go_cmd.setCwd(b.path(lib_dir));
 
@@ -250,12 +257,24 @@ fn addGoLibrary(
     return &go_cmd.step;
 }
 
-fn addLibFrp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
-    return addGoLibrary(b, target, optimize, "src/impl/frpc/libfrpc-go", "libfrp.a", "libfrp.go");
-}
+fn addCombinedGoLib(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    frpc: bool,
+    ddns: bool,
+) *std.Build.Step {
+    // Determine build tags based on feature flags
+    const tags = if (frpc and ddns)
+        "frpc,ddns"
+    else if (frpc)
+        "frpc"
+    else if (ddns)
+        "ddns"
+    else
+        @panic("At least one of frpc or ddns must be true when calling addCombinedGoLib");
 
-fn addLibDdns(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
-    return addGoLibrary(b, target, optimize, "src/impl/ddns/libddns-go", "libddns.a", "libddns.go");
+    return addGoLibrary(b, target, optimize, "src/impl/golibs", "libgolibs.a", tags);
 }
 
 // Although this function looks imperative, it does not perform the build
@@ -369,31 +388,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Build and link libfrp (Go shared library) only when frpc support is enabled
-    if (frpc) {
-        const libfrp_build_step = addLibFrp(b, target, optimize);
+    // Build and link combined Go library (FRP and DDNS) when either feature is enabled
+    if (frpc or ddns) {
+        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns);
 
-        // 添加 libfrp 头文件路径
-        exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
+        // Add combined library header file path
+        exe.addIncludePath(b.path("src/impl/golibs"));
 
-        // 静态链接 libfrp.a
-        const libfrp_path = b.path("src/impl/frpc/libfrpc-go/libfrp.a");
-        exe.addObjectFile(libfrp_path);
+        // Static link libgolibs.a
+        const libgolibs_path = b.path("src/impl/golibs/libgolibs.a");
+        exe.addObjectFile(libgolibs_path);
 
-        // 确保 libfrp 在可执行文件之前构建
-        exe.step.dependOn(libfrp_build_step);
-    }
-
-    // Build and link libddns (Go shared library) only when ddns support is enabled
-    if (ddns) {
-        const libddns_build_step = addLibDdns(b, target, optimize);
-
-        exe.addIncludePath(b.path("src/impl/ddns/libddns-go"));
-
-        const libddns_path = b.path("src/impl/ddns/libddns-go/libddns.a");
-        exe.addObjectFile(libddns_path);
-
-        exe.step.dependOn(libddns_build_step);
+        // Ensure libgolibs is built before the executable
+        exe.step.dependOn(libgolibs_build_step);
     }
 
     // Add C forwarder implementation
@@ -416,10 +423,6 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("deps/fix"));
     exe.addIncludePath(b.path("deps/openwrt-tools"));
     exe.addIncludePath(b.path("deps/ubus"));
-    if (frpc) {
-        // Add frpc include paths
-        exe.addIncludePath(b.path("src/impl/frpc/libfrpc-go"));
-    }
 
     exe.linkage = .dynamic;
     applyLinkOptimization(b, exe, optimize);

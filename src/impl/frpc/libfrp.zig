@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @cImport({
-    @cInclude("libfrp.h");
+    @cInclude("libgolibs.h");
 });
 
 pub const FrpError = error{

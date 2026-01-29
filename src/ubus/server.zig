@@ -127,7 +127,7 @@ const method_names = struct {
     pub const get_frp_info: [:0]const u8 = "get_frp_info";
     pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
     pub const get_events: [:0]const u8 = "get_events";
-    pub const get_ddns_statuses: [:0]const u8 = "get_ddns_statuses";
+    pub const get_ddns_status: [:0]const u8 = "get_ddns_status";
     pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
     pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
     pub const object_name: [:0]const u8 = "portweaver";
@@ -259,7 +259,7 @@ fn ubusThread(state: *RuntimeState) void {
     } else [_]c.ubus_method{};
     const ddnsMethods = if (build_options.ddns_mode) [_]c.ubus_method{
         .{
-            .name = method_names.get_ddns_statuses,
+            .name = method_names.get_ddns_status,
             .handler = handleGetDdnsStatuses,
             .mask = 0,
             .tags = 0,
