@@ -187,7 +187,7 @@ let startZigBuildWatch (config: Config) =
 
     let psi = ProcessStartInfo()
     psi.FileName <- "zig"
-    psi.Arguments <- $"build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dtarget=%s{config.BuildTarget}"
+    psi.Arguments <- $"build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dddns=true -Dtarget=%s{config.BuildTarget}"
     psi.WorkingDirectory <- config.ProjectRoot
     psi.UseShellExecute <- false
     psi.CreateNoWindow <- false

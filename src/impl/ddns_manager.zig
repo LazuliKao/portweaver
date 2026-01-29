@@ -27,7 +27,7 @@ pub const DdnsStatus = struct {
 pub const DdnsInfo = struct {
     status: []const u8,
     last_error: []const u8,
-    logs: std.ArrayList([]const u8),
+    logs: std.array_list.Managed([]const u8),
 
     pub fn deinit(self: *DdnsInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.status);
@@ -355,15 +355,15 @@ pub fn getInstanceStatus(allocator: std.mem.Allocator, name: []const u8) !DdnsIn
 
     const response = try holder.instance.getStatusAndLogs();
     defer {
-        holder.allocator.free(response.status);
-        holder.allocator.free(response.last_error);
+        allocator.free(response.status);
+        allocator.free(response.last_error);
         for (response.logs) |log| {
-            holder.allocator.free(log);
+            allocator.free(log);
         }
-        holder.allocator.free(response.logs);
+        allocator.free(response.logs);
     }
 
-    var logs_list = std.ArrayList([]const u8).init(allocator);
+    var logs_list = std.array_list.Managed([]const u8).init(allocator);
     errdefer logs_list.deinit();
 
     for (response.logs) |log| {

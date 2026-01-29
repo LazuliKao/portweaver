@@ -741,7 +741,7 @@ fn handleGetDdnsInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c
     const name = std.mem.span(name_cstr);
 
     // Get DDNS info from manager
-    const info = ddns_manager.getInstanceStatus(state.allocator, name) catch |err| {
+    var info = ddns_manager.getInstanceStatus(state.allocator, name) catch |err| {
         std.log.warn("Failed to get DDNS info for instance '{s}': {any}", .{ name, err });
         return c.UBUS_STATUS_UNKNOWN_ERROR;
     };
