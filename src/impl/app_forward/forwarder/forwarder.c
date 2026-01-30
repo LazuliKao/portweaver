@@ -583,17 +583,17 @@ tcp_forwarder_t *tcp_forwarder_create(
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
     }
     struct sockaddr_storage addr;
-    if (family == ADDR_FAMILY_IPV6)
-    {
-        struct sockaddr_in6 addr6;
-        uv_ip6_addr("::", listen_port, &addr6);
-        memcpy(&addr, &addr6, sizeof(addr6));
-    }
-    else
+    if (family == ADDR_FAMILY_IPV4)
     {
         struct sockaddr_in addr4;
         uv_ip4_addr("0.0.0.0", listen_port, &addr4);
         memcpy(&addr, &addr4, sizeof(addr4));
+    }
+    else // For IPV6 and ANY
+    {
+        struct sockaddr_in6 addr6;
+        uv_ip6_addr("::", listen_port, &addr6);
+        memcpy(&addr, &addr6, sizeof(addr6));
     }
     int bind_result = uv_tcp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
     if (bind_result != 0)
@@ -1041,17 +1041,17 @@ udp_forwarder_t *udp_forwarder_create(
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
     }
     struct sockaddr_storage addr;
-    if (family == ADDR_FAMILY_IPV6)
-    {
-        struct sockaddr_in6 addr6;
-        uv_ip6_addr("::", listen_port, &addr6);
-        memcpy(&addr, &addr6, sizeof(addr6));
-    }
-    else
+    if (family == ADDR_FAMILY_IPV4)
     {
         struct sockaddr_in addr4;
         uv_ip4_addr("0.0.0.0", listen_port, &addr4);
         memcpy(&addr, &addr4, sizeof(addr4));
+    }
+    else // For IPV6 and ANY
+    {
+        struct sockaddr_in6 addr6;
+        uv_ip6_addr("::", listen_port, &addr6);
+        memcpy(&addr, &addr6, sizeof(addr6));
     }
     int bind_result = uv_udp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
     if (bind_result != 0)
