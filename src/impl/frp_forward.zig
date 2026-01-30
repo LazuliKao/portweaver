@@ -412,6 +412,33 @@ pub fn clearClientLogs(node_name: []const u8) void {
     holder.client.clearLogs();
 }
 
+/// Get all proxy statistics for an FRP client
+/// Returns JSON string: [{"name":"...","type":"...","status":"...",...}]
+pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]const u8 {
+    clients_lock.lock();
+    defer clients_lock.unlock();
+
+    // No clients initialized
+    if (clients == null) {
+        // Return empty array
+        return std.fmt.allocPrint(allocator, "{{\"error\":\"no clients\"}}", .{});
+    }
+
+    const map = clients.?;
+    const holder = map.get(node_name) orelse {
+        // Node not found - return empty array
+        return std.fmt.allocPrint(allocator, "{{\"error\":\"node {s} not found\"}}", .{node_name});
+    };
+
+    // Client exists but not started
+    if (!holder.started) {
+        return std.fmt.allocPrint(allocator, "{{\"error\":\"node {s} not started\"}}", .{node_name});
+    }
+
+    // Client is started - get all proxy stats
+    return holder.client.getProxyTrafficStats(allocator);
+}
+
 /// Parse the status JSON from FrpGetStatus
 fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
     status: []const u8,

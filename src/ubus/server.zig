@@ -4,6 +4,7 @@ const types = @import("../config/types.zig");
 const app_forward = @import("../impl/app_forward.zig");
 const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
+const libblobmsg_json = @import("libblobmsg_json.zig");
 const c = ubox.c;
 const project_status = @import("../impl/project_status.zig");
 const frp_status = if (build_options.frpc_mode) @import("../impl/frp_status.zig") else struct {};
@@ -115,6 +116,10 @@ const frp_info_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_STRING },
 };
 
+const frp_proxy_stats_policy = [_]c.blobmsg_policy{
+    .{ .name = "id", .type = c.BLOBMSG_TYPE_STRING },
+};
+
 const ddns_info_policy = [_]c.blobmsg_policy{
     .{ .name = "name", .type = c.BLOBMSG_TYPE_STRING },
 };
@@ -125,6 +130,7 @@ const method_names = struct {
     pub const set_enabled: [:0]const u8 = "set_enabled";
     pub const get_frp_status: [:0]const u8 = "get_frp_status";
     pub const get_frp_info: [:0]const u8 = "get_frp_info";
+    pub const get_frp_proxy_stats: [:0]const u8 = "get_frp_proxy_stats";
     pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
     pub const get_events: [:0]const u8 = "get_events";
     pub const get_ddns_status: [:0]const u8 = "get_ddns_status";
@@ -239,6 +245,14 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = &frp_info_policy,
             .n_policy = @intCast(frp_info_policy.len),
+        },
+        .{
+            .name = method_names.get_frp_proxy_stats,
+            .handler = handleGetFrpProxyStats,
+            .mask = 0,
+            .tags = 0,
+            .policy = &frp_proxy_stats_policy,
+            .n_policy = @intCast(frp_proxy_stats_policy.len),
         },
         .{
             .name = method_names.clear_frp_logs,
@@ -578,6 +592,46 @@ fn handleGetFrpInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     return c.UBUS_STATUS_OK;
 }
 
+fn handleGetFrpProxyStats(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // Parse the "id" and "proxy_name" parameters
+    var tb: [frp_proxy_stats_policy.len]?*c.blob_attr = .{null};
+    const data_ptr = c.blob_data(msg);
+    const data_len = c.blob_len(msg);
+    ubox.blobmsgParse(frp_proxy_stats_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
+
+    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name = std.mem.span(node_name_cstr);
+
+    // Get all proxy stats for the client
+    const result = frp_forward.getProxyStats(state.allocator, node_name) catch |err| {
+        std.log.warn("Failed to get FRP proxy stats for node '{s}': {any}", .{ node_name, err });
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    defer state.allocator.free(result);
+
+    // Build response with proxies JSON string (frontend will parse it)
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Add proxies field as JSON array using blobmsg_add_json_from_string
+    const result_z = state.allocator.dupeZ(u8, result) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer state.allocator.free(result_z);
+    initFromJson(&buf, result_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
 fn handleClearFrpLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
     _ = obj;
     _ = method;
@@ -808,6 +862,10 @@ fn handleClearDdnsLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
 
 fn addString(buf: *c.blob_buf, name: [:0]const u8, val: [:0]const u8) !void {
     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, name, val.ptr, val.len + 1);
+}
+
+fn initFromJson(buf: *c.blob_buf, json: [:0]const u8) !void {
+    try libblobmsg_json.blobmsg_add_json_from_string(buf, json);
 }
 
 fn addBool(buf: *c.blob_buf, name: [:0]const u8, val: bool) !void {

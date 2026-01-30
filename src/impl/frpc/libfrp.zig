@@ -18,6 +18,7 @@ pub const FrpError = error{
 extern "c" fn FrpGetStatus(clientID: c_int) [*c]u8;
 extern "c" fn FrpGetLogs(clientID: c_int) [*c]u8;
 extern "c" fn FrpClearLogs(clientID: c_int) void;
+extern "c" fn FrpGetProxyTrafficStats(clientID: c_int, proxyName: [*c]u8) [*c]u8;
 
 pub const ProxyType = enum {
     tcp,
@@ -154,6 +155,15 @@ pub const FrpClient = struct {
 
     pub fn clearLogs(self: *FrpClient) void {
         c.FrpClearLogs(self.id);
+    }
+
+    pub fn getProxyTrafficStats(self: *FrpClient, allocator: std.mem.Allocator) ![]const u8 {
+        const c_result = c.FrpGetProxyTrafficStats(self.id);
+        if (c_result == null) return error.InvalidResponse;
+        defer c.FrpFreeString(c_result);
+
+        const len = std.mem.len(c_result);
+        return try allocator.dupe(u8, c_result[0..len]);
     }
 };
 

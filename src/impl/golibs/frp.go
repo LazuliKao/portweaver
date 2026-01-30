@@ -7,6 +7,7 @@ package main
 import "C"
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/fatedier/frp/client"
+	"github.com/fatedier/frp/client/proxy"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/pkg/util/version"
@@ -498,6 +500,61 @@ func FrpClearLogs(clientID C.int) {
 	defer wrapper.logMutex.Unlock()
 
 	wrapper.logs = make([]string, 0)
+}
+
+//export FrpGetProxyTrafficStats
+func FrpGetProxyTrafficStats(clientID C.int) *C.char {
+	// Find the client wrapper
+	clientsMutex.RLock()
+	wrapper, ok := clients[int(clientID)]
+	clientsMutex.RUnlock()
+
+	if !ok {
+		return C.CString(`{"error":"client_not_found"}`)
+	}
+
+	if wrapper.service == nil {
+		return C.CString(`{"error":"service_not_running"}`)
+	}
+
+	// Get status exporter
+	exporter := wrapper.service.StatusExporter()
+	if exporter == nil {
+		return C.CString(`{"error":"exporter_not_available"}`)
+	}
+
+	// Get all proxy names from proxy configurations
+	proxyNames := make([]string, 0)
+	seenNames := make(map[string]bool)
+	for _, cfg := range wrapper.proxies {
+		baseCfg := cfg.GetBaseConfig()
+		if baseCfg != nil && !seenNames[baseCfg.Name] {
+			proxyNames = append(proxyNames, baseCfg.Name)
+			seenNames[baseCfg.Name] = true
+		}
+	}
+
+	if len(proxyNames) == 0 {
+		return C.CString(`{"error":"no_proxies"}`)
+	}
+
+	// Collect all proxy statuses
+	allStatus := make([]*proxy.WorkingStatus, 0, len(proxyNames))
+	for _, name := range proxyNames {
+		if status, found := exporter.GetProxyStatus(name); found {
+			allStatus = append(allStatus, status)
+		}
+	}
+	resultData := make(map[string]interface{})
+	// Build result data
+	resultData["proxies"] = allStatus
+	// Serialize the array
+	jsonBytes, err := json.Marshal(resultData)
+	if err != nil {
+		return C.CString(`{"error":"marshal_failed"}`)
+	}
+
+	return C.CString(string(jsonBytes))
 }
 
 //export FrpCleanup
