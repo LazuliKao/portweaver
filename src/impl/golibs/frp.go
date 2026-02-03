@@ -195,6 +195,10 @@ func FrpAddTcpProxy(
 		ProxyBaseConfig: v1.ProxyBaseConfig{
 			Name: C.GoString(proxyName),
 			Type: "tcp",
+			Transport: v1.ProxyTransport{
+				UseEncryption:  true,
+				UseCompression: true,
+			},
 		},
 		RemotePort: int(remotePort),
 	}
@@ -237,6 +241,10 @@ func FrpAddUdpProxy(
 		ProxyBaseConfig: v1.ProxyBaseConfig{
 			Name: C.GoString(proxyName),
 			Type: "udp",
+			Transport: v1.ProxyTransport{
+				UseEncryption:  true,
+				UseCompression: true,
+			},
 		},
 		RemotePort: int(remotePort),
 	}
