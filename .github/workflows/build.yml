@@ -4,12 +4,12 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'backend/**'
+      - '**'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ "main" ]
     paths:
-      - 'backend/**'
+      - '**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -17,9 +17,6 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: backend
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +53,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache-dependency-path: backend/src/impl/golibs/go.sum
+          cache-dependency-path: src/impl/golibs/go.sum
 
       - name: Build
         run: |
@@ -76,4 +73,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: backend/${{ matrix.name }}
+          path: ${{ matrix.name }}
