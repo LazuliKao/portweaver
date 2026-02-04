@@ -202,6 +202,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             .port = 0,
             .token = &.{},
             .log_level = &.{},
+            .use_encryption = true,
+            .use_compression = true,
         };
         var node_name: []const u8 = "";
         var have_server = false;
@@ -233,6 +235,10 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 frp_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
             } else if (std.mem.eql(u8, opt_name, "log_level")) {
                 frp_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "use_encryption")) {
+                frp_node.use_encryption = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "use_compression")) {
+                frp_node.use_compression = try types.parseBool(opt_val);
             }
         }
 

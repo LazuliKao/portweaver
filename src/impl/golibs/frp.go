@@ -36,16 +36,18 @@ var (
 )
 
 type clientWrapper struct {
-	service   *client.Service
-	ctx       context.Context
-	cancel    context.CancelFunc
-	config    *v1.ClientCommonConfig
-	proxies   []v1.TypedProxyConfig
-	name      string
-	status    string
-	lastError string
-	logs      []string
-	logMutex  sync.Mutex
+	service        *client.Service
+	ctx            context.Context
+	cancel         context.CancelFunc
+	config         *v1.ClientCommonConfig
+	proxies        []v1.TypedProxyConfig
+	name           string
+	status         string
+	lastError      string
+	logs           []string
+	logMutex       sync.Mutex
+	useEncryption  bool
+	useCompression bool
 }
 
 type ringBufferLogger struct {
@@ -113,6 +115,8 @@ func FrpCreateClient(
 	token *C.char,
 	logLevel *C.char,
 	clientName *C.char, // optional name for the client
+	useEncryption C.int,
+	useCompression C.int,
 ) C.int {
 	if serverAddr == nil {
 		return -1
@@ -152,15 +156,17 @@ func FrpCreateClient(
 	}
 
 	wrapper := &clientWrapper{
-		ctx:       ctx,
-		cancel:    cancel,
-		config:    &cfg,
-		proxies:   make([]v1.TypedProxyConfig, 0),
-		name:      name,
-		status:    "stopped",
-		lastError: "",
-		logs:      make([]string, 0),
-		logMutex:  sync.Mutex{},
+		ctx:            ctx,
+		cancel:         cancel,
+		config:         &cfg,
+		proxies:        make([]v1.TypedProxyConfig, 0),
+		name:           name,
+		status:         "stopped",
+		lastError:      "",
+		logs:           make([]string, 0),
+		logMutex:       sync.Mutex{},
+		useEncryption:  useEncryption != 0,
+		useCompression: useCompression != 0,
 	}
 
 	clientID := nextClientID
@@ -177,6 +183,8 @@ func FrpAddTcpProxy(
 	localIP *C.char,
 	localPort C.int,
 	remotePort C.int,
+	useEncryption C.int,
+	useCompression C.int,
 ) C.int {
 	if proxyName == nil || localIP == nil {
 		return -1
@@ -196,8 +204,8 @@ func FrpAddTcpProxy(
 			Name: C.GoString(proxyName),
 			Type: "tcp",
 			Transport: v1.ProxyTransport{
-				UseEncryption:  true,
-				UseCompression: true,
+				UseEncryption:  wrapper.useEncryption,
+				UseCompression: wrapper.useCompression,
 			},
 		},
 		RemotePort: int(remotePort),
@@ -223,6 +231,8 @@ func FrpAddUdpProxy(
 	localIP *C.char,
 	localPort C.int,
 	remotePort C.int,
+	useEncryption C.int,
+	useCompression C.int,
 ) C.int {
 	if proxyName == nil || localIP == nil {
 		return -1
@@ -242,8 +252,8 @@ func FrpAddUdpProxy(
 			Name: C.GoString(proxyName),
 			Type: "udp",
 			Transport: v1.ProxyTransport{
-				UseEncryption:  true,
-				UseCompression: true,
+				UseEncryption:  wrapper.useEncryption,
+				UseCompression: wrapper.useCompression,
 			},
 		},
 		RemotePort: int(remotePort),

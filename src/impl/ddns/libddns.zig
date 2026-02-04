@@ -3,6 +3,9 @@ const c = @cImport({
     @cInclude("libgolibs.h");
 });
 
+// C declaration for DDNS version function
+extern "c" fn DdnsGetVersion() ?[*:0]const u8;
+
 pub const DdnsError = error{
     InitFailed,
     CreateInstanceFailed,
@@ -363,6 +366,18 @@ pub const DdnsInstance = struct {
         _ = c.DdnsDestroyInstance(self.id);
     }
 };
+
+/// Get the DDNS library version
+pub fn getVersion(allocator: std.mem.Allocator) !?[]const u8 {
+    const c_version = c.DdnsGetVersion();
+    if (c_version) |cv| {
+        defer c.DdnsFreeString(cv);
+        const len = std.mem.len(cv);
+        return try allocator.dupe(u8, cv[0..len]);
+    } else {
+        return null;
+    }
+}
 
 pub fn cleanup() void {
     c.DdnsCleanup();

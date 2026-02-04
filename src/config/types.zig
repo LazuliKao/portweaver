@@ -25,6 +25,8 @@ pub const FrpNode = struct {
     port: u16,
     token: []const u8 = "",
     log_level: []const u8 = "info",
+    use_encryption: bool = true,
+    use_compression: bool = true,
 
     pub fn deinit(self: *FrpNode, allocator: std.mem.Allocator) void {
         allocator.free(self.server);

@@ -315,6 +315,8 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     var frp_node = types.FrpNode{
                         .server = undefined,
                         .port = 0,
+                        .use_encryption = true,
+                        .use_compression = true,
                     };
 
                     var have_server = false;
@@ -336,6 +338,14 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     if (node_obj.object.get("token")) |v| {
                         const s = try parseJsonString(v);
                         frp_node.token = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("use_encryption")) |v| {
+                        frp_node.use_encryption = try parseJsonBool(v);
+                    }
+
+                    if (node_obj.object.get("use_compression")) |v| {
+                        frp_node.use_compression = try parseJsonBool(v);
                     }
 
                     if (!have_server or !have_port) {

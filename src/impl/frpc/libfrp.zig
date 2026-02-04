@@ -43,8 +43,10 @@ fn ensureFrpInit() !void {
 pub const FrpClient = struct {
     id: c_int,
     allocator: std.mem.Allocator,
+    use_encryption: bool,
+    use_compression: bool,
 
-    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8) !FrpClient {
+    pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8, use_encryption: bool, use_compression: bool) !FrpClient {
         std.debug.print("==== Initializing FRP client with server_addr={s}, server_port={d}\n", .{ server_addr, server_port });
         const frp_Version = c.FrpGetVersion();
         std.debug.print("==== FRP library version: {s}\n", .{frp_Version});
@@ -85,6 +87,8 @@ pub const FrpClient = struct {
         return FrpClient{
             .id = client_id,
             .allocator = allocator,
+            .use_encryption = use_encryption,
+            .use_compression = use_compression,
         };
     }
 
@@ -95,7 +99,7 @@ pub const FrpClient = struct {
         const c_ip = try self.allocator.dupeZ(u8, local_ip);
         defer self.allocator.free(c_ip);
 
-        const result = c.FrpAddTcpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
+        const result = c.FrpAddTcpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port), if (self.use_encryption) @as(c_int, 1) else @as(c_int, 0), if (self.use_compression) @as(c_int, 1) else @as(c_int, 0));
         if (result < 0) {
             return FrpError.AddProxyFailed;
         }
@@ -108,7 +112,7 @@ pub const FrpClient = struct {
         const c_ip = try self.allocator.dupeZ(u8, local_ip);
         defer self.allocator.free(c_ip);
 
-        const result = c.FrpAddUdpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port));
+        const result = c.FrpAddUdpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port), if (self.use_encryption) @as(c_int, 1) else @as(c_int, 0), if (self.use_compression) @as(c_int, 1) else @as(c_int, 0));
         if (result < 0) {
             return FrpError.AddProxyFailed;
         }

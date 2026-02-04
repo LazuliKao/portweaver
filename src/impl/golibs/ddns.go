@@ -60,6 +60,11 @@ func (l *ddns_ringBufferLogger) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+//export DdnsGetVersion
+func DdnsGetVersion() *C.char {
+	return C.CString("v6.15.0")
+}
+
 //export DdnsInit
 func DdnsInit() {
 }

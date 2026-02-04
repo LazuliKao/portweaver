@@ -133,6 +133,7 @@ const method_names = struct {
     pub const get_frp_proxy_stats: [:0]const u8 = "get_frp_proxy_stats";
     pub const clear_frp_logs: [:0]const u8 = "clear_frp_logs";
     pub const get_events: [:0]const u8 = "get_events";
+    pub const get_ddns_global_status: [:0]const u8 = "get_ddns_global_status";
     pub const get_ddns_status: [:0]const u8 = "get_ddns_status";
     pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
     pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
@@ -174,6 +175,8 @@ const field_names = struct {
     pub const provider: [:0]const u8 = "provider";
     pub const last_update: [:0]const u8 = "last_update";
     pub const last_ip: [:0]const u8 = "last_ip";
+    pub const ddns_enabled: [:0]const u8 = "ddns_enabled";
+    pub const ddns_version: [:0]const u8 = "ddns_version";
     pub const ddns_status: [:0]const u8 = "ddns_status";
 };
 
@@ -272,6 +275,14 @@ fn ubusThread(state: *RuntimeState) void {
         },
     } else [_]c.ubus_method{};
     const ddnsMethods = if (build_options.ddns_mode) [_]c.ubus_method{
+        .{
+            .name = method_names.get_ddns_global_status,
+            .handler = handleGetDdnsGlobalStatus,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
         .{
             .name = method_names.get_ddns_status,
             .handler = handleGetDdnsStatuses,
@@ -526,6 +537,44 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
 
     // Add client count
     addU32(&buf, field_names.client_count, @intCast(status.client_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetDdnsGlobalStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // Check if DDNS is enabled at compile time
+    const ddns_enabled = build_options.ddns_mode;
+
+    addBool(&buf, field_names.ddns_enabled, ddns_enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // If DDNS is enabled, get version from libddns
+    if (ddns_enabled) {
+        const libddns = @import("../impl/ddns/libddns.zig");
+        const version = libddns.getVersion(state.allocator) catch |err| {
+            std.log.warn("Failed to get DDNS version: {any}", .{err});
+            _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {};
+            return c.UBUS_STATUS_OK;
+        };
+        defer if (version) |v| state.allocator.free(v);
+
+        if (version) |v| {
+            const version_z = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(version_z);
+            addString(&buf, field_names.ddns_version, version_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        }
+    }
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;
