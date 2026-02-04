@@ -489,12 +489,6 @@ func DdnsStartAutoUpdate(
 		log.SetOutput(&ddns_ringBufferLogger{wrapper: wrapper})
 
 		domains := wrapper.dnsProvider.AddUpdateDomainRecords()
-		for _, domain := range domains.Ipv4Domains {
-			log.Printf("[DDNS %d] IPv4 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-		}
-		for _, domain := range domains.Ipv6Domains {
-			log.Printf("[DDNS %d] IPv6 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-		}
 
 		log.SetOutput(originalOutput)
 		globalLogMutex.Unlock()

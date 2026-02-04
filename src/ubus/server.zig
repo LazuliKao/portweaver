@@ -566,7 +566,7 @@ fn handleGetFrpInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     // Add frp_status field (null-terminated)
     const status_z = state.allocator.dupeZ(u8, result.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     defer state.allocator.free(status_z);
-    addString(&buf, field_names.frp_status, status_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addString(&buf, field_names.status, status_z) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     // Add last_error field (null-terminated)
     const error_z = state.allocator.dupeZ(u8, result.last_error) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
