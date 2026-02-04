@@ -2,13 +2,6 @@ const std = @import("std");
 const types = @import("types.zig");
 const helper = @import("helper.zig");
 
-fn jsonGetAliased(obj: std.json.ObjectMap, keys: []const []const u8) ?std.json.Value {
-    for (keys) |k| {
-        if (obj.get(k)) |v| return v;
-    }
-    return null;
-}
-
 fn parseJsonBool(v: std.json.Value) !bool {
     return switch (v) {
         .bool => |b| b,
@@ -126,7 +119,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
     const root = parsed.value;
     const projects_value: std.json.Value = switch (root) {
         .array => root,
-        .object => |o| jsonGetAliased(o, &.{ "projects", "items", "rules" }) orelse return types.ConfigError.MissingField,
+        .object => |o| o.get("projects") orelse return types.ConfigError.MissingField,
         else => return types.ConfigError.InvalidValue,
     };
 
@@ -164,39 +157,39 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             for (port_mappings_list.items) |*pm| pm.deinit(allocator);
         }
 
-        if (jsonGetAliased(obj, &.{ "remark", "note", "备注" })) |v| {
+        if (obj.get("remark")) |v| {
             const s = try parseJsonString(v);
             project.remark = try types.dupeIfNonEmpty(allocator, s);
         }
 
-        if (jsonGetAliased(obj, &.{ "src_zone", "source_zone", "srcZone", "src-zone", "来源区域", "源区域" })) |v| {
+        if (obj.get("src_zone")) |v| {
             try parseJsonZones(allocator, v, &src_zones_list);
         }
 
-        if (jsonGetAliased(obj, &.{ "dest_zone", "destination_zone", "dst_zone", "destZone", "dest-zone", "目标区域" })) |v| {
+        if (obj.get("dest_zone")) |v| {
             try parseJsonZones(allocator, v, &dest_zones_list);
         }
 
-        if (jsonGetAliased(obj, &.{ "family", "addr_family", "地址族限制" })) |v| {
+        if (obj.get("family")) |v| {
             const s = try parseJsonString(v);
             project.family = try types.parseFamily(s);
         }
 
-        if (jsonGetAliased(obj, &.{ "protocol", "proto", "协议" })) |v| {
+        if (obj.get("protocol")) |v| {
             const s = try parseJsonString(v);
             project.protocol = try types.parseProtocol(s);
         }
 
-        if (jsonGetAliased(obj, &.{ "listen_port", "src_port", "监听端口" })) |v| {
+        if (obj.get("listen_port")) |v| {
             project.listen_port = try parseJsonPort(v);
             have_listen_port = true;
         }
 
-        if (jsonGetAliased(obj, &.{ "reuseaddr", "reuse", "reuse_addr", "绑定到本地端口" })) |v| {
+        if (obj.get("reuseaddr")) |v| {
             project.reuseaddr = try parseJsonBool(v);
         }
 
-        if (jsonGetAliased(obj, &.{ "target_address", "target_addr", "dst_ip", "目标地址" })) |v| {
+        if (obj.get("target_address")) |v| {
             const s = try parseJsonString(v);
             const trimmed = std.mem.trim(u8, s, " \t\r\n");
             if (trimmed.len == 0) return types.ConfigError.InvalidValue;
@@ -204,25 +197,25 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             have_target_address = true;
         }
 
-        if (jsonGetAliased(obj, &.{ "target_port", "dst_port", "目标端口" })) |v| {
+        if (obj.get("target_port")) |v| {
             project.target_port = try parseJsonPort(v);
             have_target_port = true;
         }
 
-        if (jsonGetAliased(obj, &.{ "open_firewall_port", "firewall_open", "打开防火墙端口" })) |v| {
+        if (obj.get("open_firewall_port")) |v| {
             project.open_firewall_port = try parseJsonBool(v);
         }
 
-        if (jsonGetAliased(obj, &.{ "add_firewall_forward", "firewall_forward", "添加防火墙转发" })) |v| {
+        if (obj.get("add_firewall_forward")) |v| {
             project.add_firewall_forward = try parseJsonBool(v);
         }
 
-        if (jsonGetAliased(obj, &.{ "enable_app_forward", "app_forward", "启用应用层转发" })) |v| {
+        if (obj.get("enable_app_forward")) |v| {
             project.enable_app_forward = try parseJsonBool(v);
         }
 
         // 解析 port_mappings 数组
-        if (jsonGetAliased(obj, &.{ "port_mappings", "forwards", "端口映射" })) |v| {
+        if (obj.get("port_mappings")) |v| {
             if (v != .array) return types.ConfigError.InvalidValue;
 
             for (v.array.items) |mapping_item| {
@@ -237,23 +230,23 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                 var have_listen = false;
                 var have_target = false;
 
-                if (jsonGetAliased(mapping_obj, &.{ "listen_port", "src_port", "监听端口" })) |port_v| {
+                if (mapping_obj.get("listen_port")) |port_v| {
                     port_mapping.listen_port = try parseJsonPortString(port_v, allocator);
                     have_listen = true;
                 }
 
-                if (jsonGetAliased(mapping_obj, &.{ "target_port", "dst_port", "目标端口" })) |port_v| {
+                if (mapping_obj.get("target_port")) |port_v| {
                     port_mapping.target_port = try parseJsonPortString(port_v, allocator);
                     have_target = true;
                 }
 
-                if (jsonGetAliased(mapping_obj, &.{ "protocol", "proto", "协议" })) |proto_v| {
+                if (mapping_obj.get("protocol")) |proto_v| {
                     const s = try parseJsonString(proto_v);
                     port_mapping.protocol = try types.parseProtocol(s);
                 }
 
                 // 解析 FRP 转发
-                if (jsonGetAliased(mapping_obj, &.{ "frp", "frp_forwards" })) |frp_v| {
+                if (mapping_obj.get("frp")) |frp_v| {
                     port_mapping.frp = try parseJsonFrpForwards(allocator, frp_v);
                 }
 
@@ -310,7 +303,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
     }
 
     if (root == .object) {
-        if (jsonGetAliased(root.object, &.{ "frp", "frp_nodes" })) |frp_value| {
+        if (root.object.get("frp_nodes")) |frp_value| {
             if (frp_value == .object) {
                 var node_it = frp_value.object.iterator();
                 while (node_it.next()) |entry| {
@@ -327,7 +320,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     var have_server = false;
                     var have_port = false;
 
-                    if (jsonGetAliased(node_obj.object, &.{ "server", "host", "address" })) |v| {
+                    if (node_obj.object.get("server")) |v| {
                         const s = try parseJsonString(v);
                         const trimmed = std.mem.trim(u8, s, " \t\r\n");
                         if (trimmed.len == 0) continue;
@@ -335,12 +328,12 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                         have_server = true;
                     }
 
-                    if (jsonGetAliased(node_obj.object, &.{"port"})) |v| {
+                    if (node_obj.object.get("port")) |v| {
                         frp_node.port = try parseJsonPort(v);
                         have_port = true;
                     }
 
-                    if (jsonGetAliased(node_obj.object, &.{ "token", "auth_token" })) |v| {
+                    if (node_obj.object.get("token")) |v| {
                         const s = try parseJsonString(v);
                         frp_node.token = try types.dupeIfNonEmpty(allocator, s);
                     }
@@ -366,7 +359,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
     }
 
     if (root == .object) {
-        if (jsonGetAliased(root.object, &.{"ddns"})) |ddns_value| {
+        if (root.object.get("ddns")) |ddns_value| {
             if (ddns_value == .array) {
                 for (ddns_value.array.items) |item| {
                     if (item != .object) continue;
@@ -381,35 +374,35 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     var have_provider = false;
 
                     // 必填字段
-                    if (jsonGetAliased(obj, &.{"name"})) |v| {
+                    if (obj.get("name")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.name = try types.dupeIfNonEmpty(allocator, s);
                         have_name = ddns_cfg.name.len > 0;
                     }
 
-                    if (jsonGetAliased(obj, &.{"dns_provider"})) |v| {
+                    if (obj.get("dns_provider")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.dns_provider = try types.dupeIfNonEmpty(allocator, s);
                         have_provider = ddns_cfg.dns_provider.len > 0;
                     }
 
                     // 可选字段
-                    if (jsonGetAliased(obj, &.{"dns_id"})) |v| {
+                    if (obj.get("dns_id")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.dns_id = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"dns_secret"})) |v| {
+                    if (obj.get("dns_secret")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.dns_secret = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"dns_ext_param"})) |v| {
+                    if (obj.get("dns_ext_param")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.dns_ext_param = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ttl"})) |v| {
+                    if (obj.get("ttl")) |v| {
                         ddns_cfg.ttl = switch (v) {
                             .integer => |i| @intCast(i),
                             .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 3600,
@@ -418,96 +411,96 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     }
 
                     // IPv4 配置
-                    if (jsonGetAliased(obj, &.{"ipv4_enable"})) |v| {
+                    if (obj.get("ipv4_enable")) |v| {
                         ddns_cfg.ipv4.enable = try parseJsonBool(v);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv4_get_type"})) |v| {
+                    if (obj.get("ipv4_get_type")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv4.get_type = try types.DdnsIpGetType.fromString(s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv4_url"})) |v| {
+                    if (obj.get("ipv4_url")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv4.url = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv4_net_interface"})) |v| {
+                    if (obj.get("ipv4_net_interface")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv4.net_interface = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv4_cmd"})) |v| {
+                    if (obj.get("ipv4_cmd")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv4.cmd = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv4_domains"})) |v| {
+                    if (obj.get("ipv4_domains")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv4.domains = try types.dupeIfNonEmpty(allocator, s);
                     }
 
                     // IPv6 配置
-                    if (jsonGetAliased(obj, &.{"ipv6_enable"})) |v| {
+                    if (obj.get("ipv6_enable")) |v| {
                         ddns_cfg.ipv6.enable = try parseJsonBool(v);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_get_type"})) |v| {
+                    if (obj.get("ipv6_get_type")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.get_type = try types.DdnsIpGetType.fromString(s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_url"})) |v| {
+                    if (obj.get("ipv6_url")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.url = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_net_interface"})) |v| {
+                    if (obj.get("ipv6_net_interface")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.net_interface = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_cmd"})) |v| {
+                    if (obj.get("ipv6_cmd")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.cmd = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_reg"})) |v| {
+                    if (obj.get("ipv6_reg")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.reg = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"ipv6_domains"})) |v| {
+                    if (obj.get("ipv6_domains")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.ipv6.domains = try types.dupeIfNonEmpty(allocator, s);
                     }
 
                     // 其他配置
-                    if (jsonGetAliased(obj, &.{"not_allow_wan_access"})) |v| {
+                    if (obj.get("not_allow_wan_access")) |v| {
                         ddns_cfg.not_allow_wan_access = try parseJsonBool(v);
                     }
 
-                    if (jsonGetAliased(obj, &.{"username"})) |v| {
+                    if (obj.get("username")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.username = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"password"})) |v| {
+                    if (obj.get("password")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.password = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"webhook_url"})) |v| {
+                    if (obj.get("webhook_url")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.webhook_url = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"webhook_body"})) |v| {
+                    if (obj.get("webhook_body")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.webhook_body = try types.dupeIfNonEmpty(allocator, s);
                     }
 
-                    if (jsonGetAliased(obj, &.{"webhook_headers"})) |v| {
+                    if (obj.get("webhook_headers")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.webhook_headers = try types.dupeIfNonEmpty(allocator, s);
                     }
