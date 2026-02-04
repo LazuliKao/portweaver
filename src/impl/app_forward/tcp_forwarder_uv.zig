@@ -93,8 +93,9 @@ pub const TcpForwarder = struct {
             return .{
                 .bytes_in = c_stats.bytes_in,
                 .bytes_out = c_stats.bytes_out,
+                .listen_port = c_stats.listen_port,
             };
         }
-        return .{ .bytes_in = 0, .bytes_out = 0 };
+        return .{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0 };
     }
 };

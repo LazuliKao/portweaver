@@ -662,11 +662,30 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
 {
-    traffic_stats_t stats = {0, 0};
+    traffic_stats_t stats = {0, 0, 0};
     if (forwarder && forwarder->enable_stats)
     {
         stats.bytes_in = __atomic_load_n(&forwarder->bytes_in, __ATOMIC_RELAXED);
         stats.bytes_out = __atomic_load_n(&forwarder->bytes_out, __ATOMIC_RELAXED);
+    }
+    // Get listen port from cached server socket address
+    if (forwarder)
+    {
+        struct sockaddr_storage addr;
+        int addr_len = sizeof(addr);
+        if (uv_tcp_getsockname(&forwarder->server, (struct sockaddr *)&addr, &addr_len) == 0)
+        {
+            if (addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
+                stats.listen_port = ntohs(addr4->sin_port);
+            }
+            else if (addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
+                stats.listen_port = ntohs(addr6->sin6_port);
+            }
+        }
     }
     return stats;
 }
@@ -1121,12 +1140,31 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)
 {
-    traffic_stats_t stats = {0, 0};
+    traffic_stats_t stats = {0, 0, 0};
     udp_forwarder_t *fwd = (udp_forwarder_t *)forwarder;
     if (fwd && fwd->enable_stats)
     {
         stats.bytes_in = __atomic_load_n(&fwd->bytes_in, __ATOMIC_RELAXED);
         stats.bytes_out = __atomic_load_n(&fwd->bytes_out, __ATOMIC_RELAXED);
+    }
+    // Get listen port from cached server socket address
+    if (fwd)
+    {
+        struct sockaddr_storage addr;
+        int addr_len = sizeof(addr);
+        if (uv_udp_getsockname(&fwd->server, (struct sockaddr *)&addr, &addr_len) == 0)
+        {
+            if (addr.ss_family == AF_INET)
+            {
+                struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
+                stats.listen_port = ntohs(addr4->sin_port);
+            }
+            else if (addr.ss_family == AF_INET6)
+            {
+                struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
+                stats.listen_port = ntohs(addr6->sin6_port);
+            }
+        }
     }
     return stats;
 }

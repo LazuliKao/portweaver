@@ -34,6 +34,7 @@ pub const ProjectRuntimeInfo = struct {
 pub const TrafficStats = struct {
     bytes_in: u64,
     bytes_out: u64,
+    listen_port: u16,
 };
 
 /// Statistics for a single forwarder (port)
@@ -156,7 +157,7 @@ pub const ProjectHandle = struct {
     }
 
     pub fn getProjectStats(self: *ProjectHandle) TrafficStats {
-        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0 };
+        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0 };
         // Sum stats from all TCP forwarders
         for (self.tcp_forwarders.items) |fwd| {
             const s = fwd.getStats();
@@ -204,7 +205,7 @@ pub const ProjectHandle = struct {
             const s = fwd.getStats();
             stats[idx] = ForwarderStats{
                 .protocol = "tcp",
-                .local_port = self.cfg.listen_port,
+                .local_port = s.listen_port,
                 .bytes_in = s.bytes_in,
                 .bytes_out = s.bytes_out,
             };
@@ -216,7 +217,7 @@ pub const ProjectHandle = struct {
             const s = fwd.getStats();
             stats[idx] = ForwarderStats{
                 .protocol = "udp",
-                .local_port = self.cfg.listen_port,
+                .local_port = s.listen_port,
                 .bytes_in = s.bytes_in,
                 .bytes_out = s.bytes_out,
             };

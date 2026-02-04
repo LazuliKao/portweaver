@@ -34,12 +34,13 @@ extern "C"
     typedef struct tcp_forwarder tcp_forwarder_t;
     typedef struct udp_forwarder udp_forwarder_t;
 
-    // Traffic statistics structure
+// Traffic statistics structure
     typedef struct
     {
         uint64_t bytes_in;
         uint64_t bytes_out;
         unsigned int active_sessions; /* active client sessions */
+        uint16_t listen_port;         /* the listening port for this forwarder */
     } traffic_stats_t;
 
     // Internal forward declaration for UDP client session
