@@ -488,7 +488,7 @@ func DdnsStartAutoUpdate(
 		originalOutput := log.Writer()
 		log.SetOutput(&ddns_ringBufferLogger{wrapper: wrapper})
 
-		domains := wrapper.dnsProvider.AddUpdateDomainRecords()
+		wrapper.dnsProvider.AddUpdateDomainRecords()
 
 		log.SetOutput(originalOutput)
 		globalLogMutex.Unlock()
