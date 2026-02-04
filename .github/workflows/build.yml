@@ -1,0 +1,79 @@
+name: Build Backend
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: backend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            os: ubuntu-latest
+            name: portweaver-linux-x86_64-gnu
+          - target: x86_64-linux-musl
+            os: ubuntu-latest
+            name: portweaver-linux-x86_64-musl
+          - target: aarch64-linux-gnu
+            os: ubuntu-latest
+            name: portweaver-linux-aarch64-gnu
+          - target: aarch64-linux-musl
+            os: ubuntu-latest
+            name: portweaver-linux-aarch64-musl
+          - target: x86_64-windows-gnu
+            os: ubuntu-latest
+            name: portweaver-windows-x86_64-gnu.exe
+          - target: x86_64-windows-msvc
+            os: windows-latest
+            name: portweaver-windows-x86_64-msvc.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: backend/src/impl/golibs/go.sum
+
+      - name: Build
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dddns=true
+
+      - name: Prepare Artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mv zig-out/bin/portweaver ${{ matrix.name }}
+
+      - name: Prepare Artifact (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          move zig-out\bin\portweaver.exe ${{ matrix.name }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: backend/${{ matrix.name }}
