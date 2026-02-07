@@ -79,6 +79,8 @@ pub const FrpClient = struct {
             if (token_buf) |tb| tb.ptr else null,
             if (log_level_buf) |llb| llb.ptr else null,
             if (client_name_buf) |cnb| cnb.ptr else null,
+            if (use_encryption) @as(c_int, 1) else @as(c_int, 0),
+            if (use_compression) @as(c_int, 1) else @as(c_int, 0),
         );
         if (client_id < 0) {
             return FrpError.CreateClientFailed;
