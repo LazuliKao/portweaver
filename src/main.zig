@@ -23,7 +23,13 @@ pub fn main() !void {
         }
     };
     const allocator = if (gpa) |*g| g.allocator() else std.heap.c_allocator;
-
+    errdefer {
+        if (builtin.mode == .Debug) {
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            }
+        }
+    }
     // Initialize event logger
     event_log.initGlobal(allocator);
     defer event_log.deinitGlobal();
