@@ -65,6 +65,9 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         uv.root_module.linkSystemLibrary("ole32", .{});
         uv.root_module.linkSystemLibrary("userenv", .{});
         uv.root_module.linkSystemLibrary("iphlpapi", .{});
+        uv.root_module.linkSystemLibrary("advapi32", .{});
+        uv.root_module.linkSystemLibrary("user32", .{});
+        uv.root_module.linkSystemLibrary("shell32", .{});
         // uv.root_module.linkSystemLibrary("advapi32");
         // exe.linkSystemLibrary("user32");
         // exe.linkSystemLibrary("shell32");
@@ -465,6 +468,18 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("deps/fix"));
     exe.addIncludePath(b.path("deps/openwrt-tools"));
     exe.addIncludePath(b.path("deps/ubus"));
+
+    if (target.result.os.tag == .windows) {
+        exe.root_module.linkSystemLibrary("ws2_32", .{});
+        exe.root_module.linkSystemLibrary("advapi32", .{});
+        exe.root_module.linkSystemLibrary("user32", .{});
+        exe.root_module.linkSystemLibrary("shell32", .{});
+        exe.root_module.linkSystemLibrary("iphlpapi", .{});
+        exe.root_module.linkSystemLibrary("dbghelp", .{});
+        exe.root_module.linkSystemLibrary("ole32", .{});
+        exe.root_module.linkSystemLibrary("userenv", .{});
+        exe.root_module.linkSystemLibrary("psapi", .{});
+    }
 
     exe.linkage = .dynamic;
     applyLinkOptimization(b, exe, optimize);
