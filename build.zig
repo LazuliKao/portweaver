@@ -157,6 +157,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         if (os_tag == .macos) {
             uv.root_module.addCMacro("_DARWIN_USE_64_BIT_INODE", "1");
             uv.root_module.addCMacro("_DARWIN_UNLIMITED_SELECT", "1");
+
             uv.addCSourceFiles(.{
                 .files = &.{
                     "deps/libuv/src/unix/proctitle.c",
@@ -498,9 +499,21 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .macos) {
+        // Add framework search path if sysroot is specified
+        // See: https://github.com/ziglang/zig/issues/22704
+        // Framework paths need manual sysroot prefix, unlike library paths
+        if (b.sysroot) |sysroot| {
+            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
+            exe.addFrameworkPath(.{ .cwd_relative = framework_path });
+
+            // Only add /usr/lib, build system appends it to sysroot automatically
+            exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+        }
+
         exe.root_module.linkFramework("CoreFoundation", .{});
         exe.root_module.linkFramework("Security", .{});
         exe.root_module.linkFramework("IOKit", .{});
+        exe.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 
     exe.linkage = .dynamic;
