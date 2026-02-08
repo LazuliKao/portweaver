@@ -154,6 +154,21 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
                 .flags = &.{},
             });
         }
+        if (os_tag == .macos) {
+            uv.root_module.addCMacro("_DARWIN_USE_64_BIT_INODE", "1");
+            uv.root_module.addCMacro("_DARWIN_UNLIMITED_SELECT", "1");
+            uv.addCSourceFiles(.{
+                .files = &.{
+                    "deps/libuv/src/unix/bsd-ifaddrs.c",
+                    "deps/libuv/src/unix/darwin.c",
+                    "deps/libuv/src/unix/darwin-proctitle.c",
+                    "deps/libuv/src/unix/fsevents.c",
+                    "deps/libuv/src/unix/kqueue.c",
+                    "deps/libuv/src/unix/random-getentropy.c",
+                },
+                .flags = &.{},
+            });
+        }
     }
 
     return uv;
@@ -479,6 +494,12 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("ole32", .{});
         exe.root_module.linkSystemLibrary("userenv", .{});
         exe.root_module.linkSystemLibrary("psapi", .{});
+    }
+
+    if (target.result.os.tag == .macos) {
+        exe.root_module.linkFramework("CoreFoundation", .{});
+        exe.root_module.linkFramework("Security", .{});
+        exe.root_module.linkFramework("IOKit", .{});
     }
 
     exe.linkage = .dynamic;
