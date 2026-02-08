@@ -7,20 +7,19 @@ fn applyLinkOptimization(_: *std.Build, exe: *std.Build.Step.Compile, optimize: 
 
     if (optimize == .ReleaseSmall) {
         exe.root_module.unwind_tables = .none;
-        exe.lto = .full;
         exe.root_module.strip = true;
     }
 }
 fn applyCOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
     if (optimize == .ReleaseSmall) {
-        return "-O1 -ffunction-sections -fdata-sections -s -flto";
+        return "-O1 -ffunction-sections -fdata-sections -s";
     } else {
         return "-O1 -ffunction-sections -fdata-sections";
     }
 }
 fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
     if (optimize == .ReleaseSmall) {
-        return "-Wl -O1 --gc-sections --strip-all -flto";
+        return "-Wl -O1 --gc-sections --strip-all";
     } else {
         return "-Wl -O1 --gc-sections";
     }
@@ -165,7 +164,8 @@ fn createWrapperScript(
     target_triple: ?[]const u8,
     is_cxx: bool,
 ) !std.Build.LazyPath {
-    const wrapper_path = try wrapper_dir.join(b.allocator, script_name);
+    const zig_dropin = b.fmt("zig-{s}", .{script_name});
+    const wrapper_path = try wrapper_dir.join(b.allocator, zig_dropin);
 
     const script_content = if (target_triple) |triple|
         // For CC/CXX: include target triple
@@ -260,8 +260,6 @@ fn addGoLibrary(
 
     go_cmd.setCwd(b.path(lib_dir));
 
-    const wrapper_dir = b.path("wrapper");
-    go_cmd.addPathDir(wrapper_dir.getPath(b));
     go_cmd.setEnvironmentVariable("GOOS", goos);
     go_cmd.setEnvironmentVariable("GOARCH", goarch);
 
@@ -269,15 +267,27 @@ fn addGoLibrary(
     // 构建目标三元组
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
-    // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
-    const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
-    const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
-    const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
-
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
-    go_cmd.setEnvironmentVariable("CC", cc_wrapper.getPath(b));
-    go_cmd.setEnvironmentVariable("CXX", cxx_wrapper.getPath(b));
-    go_cmd.setEnvironmentVariable("AR", ar_wrapper.getPath(b));
+    if (target.result.abi != .msvc) {
+        if (b.graph.host.result.os.tag == .windows) {
+            const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
+            const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
+            const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
+            go_cmd.setEnvironmentVariable("CC", cc_cmd);
+            go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
+            go_cmd.setEnvironmentVariable("AR", ar_cmd);
+        } else {
+            const wrapper_dir = b.path("wrapper");
+            go_cmd.addPathDir(wrapper_dir.getPath(b));
+            // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
+            const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
+            const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
+            const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
+            go_cmd.setEnvironmentVariable("CC", std.fs.path.basename(cc_wrapper.getPath(b)));
+            go_cmd.setEnvironmentVariable("CXX", std.fs.path.basename(cxx_wrapper.getPath(b)));
+            go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
+        }
+    }
 
     if (optimize == .ReleaseSmall) {
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static -O1 {s}", .{applyCOptimizationCmd(b, optimize)}));
