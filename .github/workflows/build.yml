@@ -21,24 +21,55 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux x86_64
           - target: x86_64-linux-gnu
             os: ubuntu-latest
             name: portweaver-linux-x86_64-gnu
           - target: x86_64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-x86_64-musl
+
+          # Linux aarch64
           - target: aarch64-linux-gnu
             os: ubuntu-latest
             name: portweaver-linux-aarch64-gnu
           - target: aarch64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-aarch64-musl
+
+          # Linux armv7
+          - target: arm-linux-gnueabihf
+            os: ubuntu-latest
+            name: portweaver-linux-armv7-gnu
+          - target: arm-linux-musleabihf
+            os: ubuntu-latest
+            name: portweaver-linux-armv7-musl
+
+          # Windows x86_64
           - target: x86_64-windows-gnu
             os: ubuntu-latest
             name: portweaver-windows-x86_64-gnu.exe
           - target: x86_64-windows-msvc
             os: windows-latest
             name: portweaver-windows-x86_64-msvc.exe
+
+          # Windows arm64
+          - target: aarch64-windows-msvc
+            os: windows-latest
+            name: portweaver-windows-aarch64-msvc.exe
+
+          # macOS
+          - target: x86_64-macos
+            os: macos-latest
+            name: portweaver-macos-x86_64
+          - target: aarch64-macos
+            os: macos-latest
+            name: portweaver-macos-aarch64
+
+          # 可选：RISC-V
+          - target: riscv64-linux-musl
+            os: ubuntu-latest
+            name: portweaver-linux-riscv64-musl
 
     steps:
       - name: Checkout repository
@@ -74,7 +105,7 @@ jobs:
       - name: Prepare Artifact (Linux)
         if: runner.os == 'Linux'
         run: |
-          mv zig-out/bin/portweaver ${{ matrix.name }}
+          mv zig-out/bin/portweaver* ${{ matrix.name }}
 
       - name: Prepare Artifact (Windows)
         if: runner.os == 'Windows'
