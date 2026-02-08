@@ -142,8 +142,8 @@ jobs:
           fi
           zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dddns=true
 
-      - name: Prepare Artifact (Linux)
-        if: runner.os == 'Linux'
+      - name: Prepare Artifact (Linux and macOS)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
         run: |
           mv zig-out/bin/portweaver* ${{ matrix.name }}
 
