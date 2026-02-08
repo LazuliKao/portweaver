@@ -28,6 +28,7 @@ jobs:
           - target: x86_64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-x86_64-musl
+            custom_golang: true
 
           # Linux aarch64
           - target: aarch64-linux-gnu
@@ -36,6 +37,7 @@ jobs:
           - target: aarch64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-aarch64-musl
+            custom_golang: true
 
           # Linux armv7
           - target: arm-linux-gnueabihf
@@ -44,6 +46,8 @@ jobs:
           - target: arm-linux-musleabihf
             os: ubuntu-latest
             name: portweaver-linux-armv7-musl
+            custom_golang: true
+
 
           # Windows x86_64
           - target: x86_64-windows-gnu
@@ -70,6 +74,7 @@ jobs:
           - target: riscv64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-riscv64-musl
+            custom_golang: true
 
     steps:
       - name: Checkout repository
@@ -82,18 +87,23 @@ jobs:
         with:
           version: 0.15.2
 
+      - uses: actions/setup-go@v6
+        if: ${{ !matrix.custom_golang }}
+        with:
+          go-version: '1.25.7'
+
       - name: Setup Go (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.custom_golang
         run: |
-          wget -q https://github.com/LazuliKao/build-golang/releases/download/go1.25.6/go1.25.6.linux-amd64.tar.gz
-          tar -xzf go1.25.6.linux-amd64.tar.gz
+          wget -q https://github.com/LazuliKao/build-golang/releases/download/go1.25.7/go1.25.7.linux-amd64.tar.gz
+          tar -xzf go1.25.7.linux-amd64.tar.gz
           echo "GOROOT=$PWD/go" >> $GITHUB_ENV
           echo "$PWD/go/bin" >> $GITHUB_PATH
 
       - name: Setup Go (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.custom_golang
         run: |
-          Invoke-WebRequest -Uri https://github.com/LazuliKao/build-golang/releases/download/go1.25.6/go1.25.6.windows-amd64.zip -OutFile go.zip
+          Invoke-WebRequest -Uri https://github.com/LazuliKao/build-golang/releases/download/go1.25.7/go1.25.7.windows-amd64.zip -OutFile go.zip
           Expand-Archive -Path go.zip -DestinationPath .
           echo "GOROOT=$PWD\go" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "$PWD\go\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
