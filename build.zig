@@ -157,6 +157,36 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     return uv;
 }
 
+fn createWrapperScript(
+    b: *std.Build,
+    wrapper_dir: std.Build.LazyPath,
+    script_name: []const u8,
+    zig_exe: []const u8,
+    target_triple: ?[]const u8,
+    is_cxx: bool,
+) !std.Build.LazyPath {
+    const wrapper_path = try wrapper_dir.join(b.allocator, script_name);
+
+    const script_content = if (target_triple) |triple|
+        // For CC/CXX: include target triple
+        b.fmt(
+            "#!/bin/sh\n\"{s}\" {s} -target {s} \"$@\"\n",
+            .{ zig_exe, if (is_cxx) "c++" else "cc", triple },
+        )
+    else
+        // For AR: no target triple needed
+        b.fmt(
+            "#!/bin/sh\n\"{s}\" ar \"$@\"\n",
+            .{zig_exe},
+        );
+
+    const file = try std.fs.cwd().createFile(wrapper_path.getPath(b), .{ .truncate = true, .mode = 0o755 });
+    defer file.close();
+    try file.writeAll(script_content);
+
+    return wrapper_path;
+}
+
 fn addGoLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -230,7 +260,8 @@ fn addGoLibrary(
 
     go_cmd.setCwd(b.path(lib_dir));
 
-    go_cmd.addPathDir(b.path("wrapper").getPath(b));
+    const wrapper_dir = b.path("wrapper");
+    go_cmd.addPathDir(wrapper_dir.getPath(b));
     go_cmd.setEnvironmentVariable("GOOS", goos);
     go_cmd.setEnvironmentVariable("GOARCH", goarch);
 
@@ -238,15 +269,16 @@ fn addGoLibrary(
     // 构建目标三元组
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
-    // 设置使用 zig cc/c++ 作为 C/C++ 编译器（交叉编译的关键）
-    // 需要用引号包裹路径以处理空格
-    const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
-    const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
-    const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
+    // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
+    const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
+    const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
+    const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
+
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
-    go_cmd.setEnvironmentVariable("CC", cc_cmd);
-    go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
-    go_cmd.setEnvironmentVariable("AR", ar_cmd);
+    go_cmd.setEnvironmentVariable("CC", cc_wrapper.getPath(b));
+    go_cmd.setEnvironmentVariable("CXX", cxx_wrapper.getPath(b));
+    go_cmd.setEnvironmentVariable("AR", ar_wrapper.getPath(b));
+
     if (optimize == .ReleaseSmall) {
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static -O1 {s}", .{applyCOptimizationCmd(b, optimize)}));
         go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static -O1 {s}", .{applyLinkOptimizationCmd(b, optimize)}));
