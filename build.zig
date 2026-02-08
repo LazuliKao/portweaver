@@ -159,6 +159,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             uv.root_module.addCMacro("_DARWIN_UNLIMITED_SELECT", "1");
             uv.addCSourceFiles(.{
                 .files = &.{
+                    "deps/libuv/src/unix/proctitle.c",
                     "deps/libuv/src/unix/bsd-ifaddrs.c",
                     "deps/libuv/src/unix/darwin.c",
                     "deps/libuv/src/unix/darwin-proctitle.c",
