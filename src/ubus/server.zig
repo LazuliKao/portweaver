@@ -775,7 +775,7 @@ fn handleGetDdnsStatuses(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [
     defer ubox.blobBufFree(&buf) catch {};
 
     // Get DDNS statuses
-    const statuses = ddns_manager.getStatuses(state.allocator) catch {
+    const statuses = ddns_manager.getStatus(state.allocator) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;
     };
     defer {
