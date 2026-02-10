@@ -215,49 +215,45 @@ fn startForwardingThreads(
     var has_app_forward = false;
 
     for (handles.items) |*handle| {
-        if (!handle.cfg.enabled or !handle.cfg.enable_app_forward) {
+        if (!handle.cfg.enabled) {
             continue;
         }
-
-        std.log.info("  Launching thread for project {d} ({s})...", .{ handle.id + 1, handle.cfg.remark });
-        const thread = std.Thread.spawn(.{}, startForwardingThread, .{
-            allocator,
-            handle,
-            frp_nodes,
-        }) catch |err| {
-            std.log.err("Failed to spawn forwarding thread for project {d}: {any}", .{ handle.id + 1, err });
-            continue;
-        };
-        thread.detach();
-        has_app_forward = true;
+        if (handle.cfg.enable_app_forward) {
+            has_app_forward = true;
+        }
+        startForwarding(allocator, handle, frp_nodes);
     }
 
     return has_app_forward;
 }
 
-/// 在独立线程中启动转发
-fn startForwardingThread(
+/// 启动转发
+fn startForwarding(
     allocator: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
     frp_nodes: *const std.StringHashMap(config.FrpNode),
 ) void {
     std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_stats });
-
     // 启动应用层转发
-    app_forward.startForwarding(allocator, handle) catch |err| {
-        std.log.err("Failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-        if (builtin.mode == .Debug) {
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
+    if (handle.cfg.enable_app_forward) {
+        app_forward.startForwarding(allocator, handle) catch |err| {
+            std.log.err("Failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
+            if (builtin.mode == .Debug) {
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
             }
-        }
-        return;
-    };
-
+        };
+    }
     // 启动 FRP 转发（如果启用）
     if (build_options.frpc_mode) {
         frp_forward.startForwarding(allocator, handle, frp_nodes) catch |err| {
             std.log.err("Failed to start FRP forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
+            if (builtin.mode == .Debug) {
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
+            }
         };
     }
 }
