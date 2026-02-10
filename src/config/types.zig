@@ -99,7 +99,10 @@ pub const Project = struct {
     open_firewall_port: bool = true,
     /// 添加防火墙转发
     add_firewall_forward: bool = true,
-    /// 启用应用层端口转发（使用 Zig 网络库实现，类似 socat）
+    /// 保留源 IP (仅当 add_firewall_forward=true 时有效)
+    /// 当启用时,只添加 redirect 规则而不添加 NAT 规则,保留源 IP 地址
+    preserve_source_ip: bool = false,
+    /// 启用应用层端口转发(使用 Zig 网络库实现,类似 socat)
     enable_app_forward: bool = false,
     /// reuseaddr 绑定到本地端口
     reuseaddr: bool = true,

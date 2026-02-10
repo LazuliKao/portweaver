@@ -107,6 +107,7 @@ pub fn addFirewallAcceptRule(
 }
 
 /// 添加防火墙 NAT 规则
+/// 添加防火墙 NAT 规则（ACCEPT - 禁用地址重写，保留源 IP）
 /// 支持端口范围
 pub fn addFirewallNat(
     ctx: uci.UciContext,
@@ -114,7 +115,6 @@ pub fn addFirewallNat(
     src_zone: []const u8,
     proto: []const u8,
     listen_port_str: []const u8,
-    dest_zone: []const u8,
     dest_ip: []const u8,
     dest_port_str: []const u8,
     remark: []const u8,
@@ -135,7 +135,6 @@ pub fn addFirewallNat(
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", src_zone);
-    try setUciOption(ctx, allocator, "firewall", sec_name, "dest", dest_zone);
 
     var proto_iter = std.mem.splitSequence(u8, proto, ",");
     while (proto_iter.next()) |p| {
@@ -144,7 +143,7 @@ pub fn addFirewallNat(
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_ip", dest_ip);
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_port", dest_port_str);
-
+    try setUciOption(ctx, allocator, "firewall", sec_name, "snat_port", listen_port_str);
     try setUciOption(ctx, allocator, "firewall", sec_name, "target", "ACCEPT");
 
     if (family) |f| {
@@ -175,20 +174,22 @@ pub fn addFirewallRedirectRule(
     dest_port_str: []const u8,
     remark: []const u8,
     family: ?types.AddressFamily,
+    preserve_source_ip: bool,
 ) !void {
-    // 先添加 NAT 规则
-    try addFirewallNat(
-        ctx,
-        allocator,
-        src_zone,
-        proto,
-        listen_port_str,
-        dest_zone,
-        dest_ip,
-        dest_port_str,
-        remark,
-        family,
-    );
+    // 当需要保留源 IP 时添加 NAT 规则
+    if (preserve_source_ip) {
+        try addFirewallNat(
+            ctx,
+            allocator,
+            src_zone,
+            proto,
+            listen_port_str,
+            dest_ip,
+            dest_port_str,
+            remark,
+            family,
+        );
+    }
 
     var fw_pkg = try ctx.load("firewall");
     defer fw_pkg.unload() catch {};
@@ -357,6 +358,7 @@ pub fn applyFirewallRulesForProject(
                             mapping.target_port,
                             project.remark,
                             family,
+                            project.preserve_source_ip,
                         );
                     }
                 }
@@ -424,6 +426,7 @@ pub fn applyFirewallRulesForProject(
                         target_port_str,
                         project.remark,
                         family,
+                        project.preserve_source_ip,
                     );
                 }
             }

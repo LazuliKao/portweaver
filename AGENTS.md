@@ -43,6 +43,7 @@ zig fmt src/path/to/file.zig  # Format specific file
 ```bash
 zig build run               # Build and run locally
 zig build run -- [args]     # Pass arguments to executable
+zig build dev-remote        # Watch, build, and auto-upload to remote (requires dotnet fsi)
 ```
 
 ---
