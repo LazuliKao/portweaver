@@ -16,17 +16,13 @@ const ClientHolder = struct {
 var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Thread.Mutex = .{};
-var pending_starts: std.ArrayList([]const u8) = undefined;
-var pending_starts_lock: std.Thread.Mutex = .{};
 
 fn flushFrpClient(holder: *ClientHolder, node_name: []const u8) void {
     if (holder.started) {
         std.log.debug("[FRP] Client {s} already started, flushing changes", .{node_name});
-        std.log.debug("[FRP] About to call flush for node {s}", .{node_name});
         holder.client.flush() catch |err| {
             std.log.warn("[FRP] Failed to flush client {s}: {any}", .{ node_name, err });
         };
-        std.log.debug("[FRP] Flush completed for node {s}", .{node_name});
     } else {
         holder.started = true;
         holder.*.client.start() catch |err| {
@@ -50,39 +46,29 @@ fn getOrCreateClient(
     node_name: []const u8,
     node: types.FrpNode,
 ) !*ClientHolder {
-    // Fast path: check under lock if client already exists
-    std.log.debug("[FRP] getOrCreateClient: acquiring clients_lock for node {s}", .{node_name});
     clients_lock.lock();
     var map = try getClientMap(allocator);
     if (map.get(node_name)) |holder_ptr| {
         clients_lock.unlock();
-        std.log.debug("[FRP] getOrCreateClient: found existing holder for node {s}", .{node_name});
         return holder_ptr;
     }
-    // No holder yet; release lock before the potentially blocking init
     clients_lock.unlock();
-    std.log.debug("[FRP] getOrCreateClient: lock released; creating new holder for node {s}, server={s}, port={d}", .{ node_name, node.server, node.port });
 
     const token_opt: ?[]const u8 = if (node.token.len == 0) null else node.token;
     const log_level_opt: ?[]const u8 = if (node.log_level.len == 0) null else node.log_level;
     const holder = try allocator.create(ClientHolder);
     errdefer allocator.destroy(holder);
 
-    std.log.debug("[FRP] getOrCreateClient: initializing FrpClient for node {s}", .{node_name});
     holder.* = .{
         .client = try libfrp.FrpClient.init(allocator, node.server, node.port, token_opt, log_level_opt, node_name, node.use_encryption, node.use_compression),
         .started = false,
         .lock = .{},
     };
-    std.log.debug("[FRP] getOrCreateClient: FrpClient initialized successfully", .{});
 
-    // Re-acquire lock to insert, double-checking if another thread won the race
-    std.log.debug("[FRP] getOrCreateClient: re-acquiring clients_lock to insert holder for node {s}", .{node_name});
     clients_lock.lock();
     defer clients_lock.unlock();
     map = try getClientMap(allocator);
     if (map.get(node_name)) |existing| {
-        std.log.debug("[FRP] getOrCreateClient: another thread already registered holder for node {s}, discarding newly created", .{node_name});
         holder.client.deinit();
         allocator.destroy(holder);
         return existing;
@@ -90,7 +76,6 @@ fn getOrCreateClient(
 
     const key = try allocator.dupe(u8, node_name);
     try map.put(key, holder);
-    std.log.debug("[FRP] getOrCreateClient: holder registered in map for node {s}", .{node_name});
     return holder;
 }
 
@@ -129,7 +114,7 @@ fn addProxyForPorts(
 
 fn applyFrpForMapping(
     allocator: std.mem.Allocator,
-    handle: *project_status.ProjectHandle,
+    handle: *const project_status.ProjectHandle,
     frp_nodes: *const std.StringHashMap(types.FrpNode),
     mapping: types.PortMapping,
 ) !void {
@@ -157,21 +142,20 @@ fn applyFrpForMapping(
             std.log.warn("[FRP] Node '{s}' not found in configuration", .{fwd.node_name});
             continue;
         };
-
+        if (!node.enabled) {
+            std.log.info("[FRP] Node '{s}' is disabled, skipping", .{fwd.node_name});
+            continue;
+        }
         const remote_start: u16 = if (fwd.remote_port != 0) fwd.remote_port else target_range.start;
         if (@as(u32, remote_start) + (listen_count - 1) > 65535) {
             std.log.warn("[FRP] Remote port range overflow starting at {d} (count {d})", .{ remote_start, listen_count });
             continue;
         }
 
-        std.log.debug("[FRP] About to call getOrCreateClient for node {s}", .{fwd.node_name});
         const holder = try getOrCreateClient(allocator, fwd.node_name, node);
-        std.log.debug("[FRP] Client holder created/retrieved for node {s}, started={}", .{ fwd.node_name, holder.started });
 
-        std.log.debug("[FRP] About to acquire holder lock for node {s}", .{fwd.node_name});
         holder.lock.lock();
         defer holder.lock.unlock();
-        std.log.debug("[FRP] Holder lock acquired for node {s}", .{fwd.node_name});
 
         var idx: u32 = 0;
         while (idx < listen_count) : (idx += 1) {
@@ -193,7 +177,7 @@ fn applyFrpForMapping(
 
 pub fn startForwarding(
     allocator: std.mem.Allocator,
-    handle: *project_status.ProjectHandle,
+    handle: *const project_status.ProjectHandle,
     frp_nodes: *const std.StringHashMap(types.FrpNode),
 ) !void {
     for (handle.cfg.port_mappings) |mapping| {
