@@ -184,22 +184,22 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try list.append(project);
     }
 
-    // Parse FRP nodes from UCI config
-    var frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+    // Parse FRPC nodes from UCI config
+    var frpc_nodes = std.StringHashMap(types.FrpcNode).init(allocator);
     errdefer {
-        var it = frp_nodes.iterator();
+        var it = frpc_nodes.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit(allocator);
         }
-        frp_nodes.deinit();
+        frpc_nodes.deinit();
     }
 
     var frp_sec_it = uci.sections(pkg);
     while (frp_sec_it.next()) |sec| {
         const sec_type = uci.cStr(sec.sectionType());
-        if (!std.mem.eql(u8, sec_type, "frp_node")) continue;
+        if (!std.mem.eql(u8, sec_type, "frpc_node")) continue;
 
-        var frp_node = types.FrpNode{
+        var frpc_node = types.FrpcNode{
             .enabled = true,
             .server = undefined,
             .port = 0,
@@ -229,36 +229,36 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             } else if (std.mem.eql(u8, opt_name, "server")) {
                 const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
                 if (trimmed.len == 0) continue;
-                frp_node.server = try allocator.dupe(u8, trimmed);
+                frpc_node.server = try allocator.dupe(u8, trimmed);
                 have_server = true;
             } else if (std.mem.eql(u8, opt_name, "port")) {
-                frp_node.port = try types.parsePort(opt_val);
+                frpc_node.port = try types.parsePort(opt_val);
                 have_port = true;
             } else if (std.mem.eql(u8, opt_name, "token")) {
-                frp_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
+                frpc_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
             } else if (std.mem.eql(u8, opt_name, "log_level")) {
-                frp_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
+                frpc_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
             } else if (std.mem.eql(u8, opt_name, "use_encryption")) {
-                frp_node.use_encryption = try types.parseBool(opt_val);
+                frpc_node.use_encryption = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "use_compression")) {
-                frp_node.use_compression = try types.parseBool(opt_val);
+                frpc_node.use_compression = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "enabled")) {
-                frp_node.enabled = try types.parseBool(opt_val);
+                frpc_node.enabled = try types.parseBool(opt_val);
             }
         }
 
-        // Validate FRP node
+        // Validate FRPC node
         if (node_name.len == 0 or !have_server or !have_port) {
-            if (have_server) allocator.free(frp_node.server);
-            if (frp_node.token.len != 0) allocator.free(frp_node.token);
-            if (frp_node.log_level.len != 0) allocator.free(frp_node.log_level);
+            if (have_server) allocator.free(frpc_node.server);
+            if (frpc_node.token.len != 0) allocator.free(frpc_node.token);
+            if (frpc_node.log_level.len != 0) allocator.free(frpc_node.log_level);
             continue;
         }
 
         const node_name_owned = try allocator.dupe(u8, node_name);
         errdefer allocator.free(node_name_owned);
 
-        try frp_nodes.put(node_name_owned, frp_node);
+        try frpc_nodes.put(node_name_owned, frpc_node);
     }
 
     // Parse frp_nodes list from project sections
@@ -280,35 +280,35 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
 
         if (project_idx == null) continue;
 
-        var frp_list = std.array_list.Managed(types.FrpForward).init(allocator);
-        defer frp_list.deinit();
+        var frpc_list = std.array_list.Managed(types.FrpcForward).init(allocator);
+        defer frpc_list.deinit();
         errdefer {
-            for (frp_list.items) |*f| f.deinit(allocator);
+            for (frpc_list.items) |*f| f.deinit(allocator);
         }
 
         var opt_it4 = sec.options();
         while (opt_it4.next()) |opt| {
             const opt_name = uci.cStr(opt.name());
-            if (!std.mem.eql(u8, opt_name, "frp_nodes")) continue;
+            if (!std.mem.eql(u8, opt_name, "frpc_nodes")) continue;
 
             if (opt.isList()) {
                 var val_it = opt.values();
                 while (val_it.next()) |val| {
                     const s = uci.cStr(val);
-                    const fwd = helper.parseFrpForwardString(allocator, s) catch continue;
-                    try frp_list.append(fwd);
+                    const fwd = helper.parseFrpcForwardString(allocator, s) catch continue;
+                    try frpc_list.append(fwd);
                 }
             } else if (opt.isString()) {
                 const opt_val = uci.cStr(opt.getString());
-                const fwd = helper.parseFrpForwardString(allocator, opt_val) catch continue;
-                try frp_list.append(fwd);
+                const fwd = helper.parseFrpcForwardString(allocator, opt_val) catch continue;
+                try frpc_list.append(fwd);
             }
         }
 
-        // Assign FRP forwards to the project's first port mapping or create a default one
-        if (frp_list.items.len > 0) {
+        // Assign FRPC forwards to the project's first port mapping or create a default one
+        if (frpc_list.items.len > 0) {
             if (list.items[project_idx.?].port_mappings.len > 0) {
-                list.items[project_idx.?].port_mappings[0].frp = try frp_list.toOwnedSlice();
+                list.items[project_idx.?].port_mappings[0].frpc = try frpc_list.toOwnedSlice();
             } else {
                 // Create a default port mapping if none exists (mirror single-port mode)
                 const listen_str = try std.fmt.allocPrint(allocator, "{d}", .{list.items[project_idx.?].listen_port});
@@ -316,17 +316,17 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 const target_str = try std.fmt.allocPrint(allocator, "{d}", .{list.items[project_idx.?].target_port});
                 errdefer allocator.free(target_str);
 
-                const owned_frp = try frp_list.toOwnedSlice();
+                const owned_frpc = try frpc_list.toOwnedSlice();
                 errdefer {
-                    for (owned_frp) |*f| f.deinit(allocator);
-                    allocator.free(owned_frp);
+                    for (owned_frpc) |*f| f.deinit(allocator);
+                    allocator.free(owned_frpc);
                 }
 
                 const default_mapping = types.PortMapping{
                     .listen_port = listen_str,
                     .target_port = target_str,
                     .protocol = list.items[project_idx.?].protocol,
-                    .frp = owned_frp,
+                    .frpc = owned_frpc,
                 };
 
                 const owned_slice = try allocator.alloc(types.PortMapping, 1);
@@ -437,5 +437,5 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try ddns_list.append(ddns_cfg);
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
+    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frpc_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }

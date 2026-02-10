@@ -17,7 +17,7 @@ var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Thread.Mutex = .{};
 
-fn flushFrpClient(holder: *ClientHolder, node_name: []const u8) void {
+fn flushFrpcClient(holder: *ClientHolder, node_name: []const u8) void {
     if (holder.started) {
         std.log.debug("[FRPC] Client {s} already started, flushing changes", .{node_name});
         holder.client.flush() catch |err| {
@@ -112,16 +112,16 @@ fn addProxyForPorts(
     }
 }
 
-fn applyFrpForMapping(
+fn applyFrpcForMapping(
     allocator: std.mem.Allocator,
     handle: *const project_status.ProjectHandle,
-    frp_nodes: *const std.StringHashMap(types.FrpcNode),
+    frpc_nodes: *const std.StringHashMap(types.FrpcNode),
     mapping: types.PortMapping,
 ) !void {
-    std.log.debug("[FRPC] applyFrpForMapping started for project {d}, mapping listen_port={s}, target_port={s}", .{ handle.id + 1, mapping.listen_port, mapping.target_port });
+    std.log.debug("[FRPC] applyFrpcForMapping started for project {d}, mapping listen_port={s}, target_port={s}", .{ handle.id + 1, mapping.listen_port, mapping.target_port });
 
     if (mapping.frpc.len == 0) {
-        std.log.debug("[FRPC] applyFrpForMapping: no FRPC entries for this mapping, skipping", .{});
+        std.log.debug("[FRPC] applyFrpcForMapping: no FRPC entries for this mapping, skipping", .{});
         return;
     }
 
@@ -131,14 +131,14 @@ fn applyFrpForMapping(
     const listen_count: u32 = listen_range.end - listen_range.start + 1;
     const target_count: u32 = target_range.end - target_range.start + 1;
     if (listen_count != target_count) {
-        std.log.warn("[FRP] Port range mismatch listen={d}-{d} target={d}-{d}", .{ listen_range.start, listen_range.end, target_range.start, target_range.end });
+        std.log.warn("[FRPC] Port range mismatch listen={d}-{d} target={d}-{d}", .{ listen_range.start, listen_range.end, target_range.start, target_range.end });
         return;
     }
 
-    for (mapping.frp) |fwd| {
+    for (mapping.frpc) |fwd| {
         std.log.debug("[FRPC] Processing FRPC entry: node_name={s}, remote_port={d}", .{ fwd.node_name, fwd.remote_port });
 
-        const node = frp_nodes.get(fwd.node_name) orelse {
+        const node = frpc_nodes.get(fwd.node_name) orelse {
             std.log.warn("[FRPC] Node '{s}' not found in configuration", .{fwd.node_name});
             continue;
         };
@@ -148,7 +148,7 @@ fn applyFrpForMapping(
         }
         const remote_start: u16 = if (fwd.remote_port != 0) fwd.remote_port else target_range.start;
         if (@as(u32, remote_start) + (listen_count - 1) > 65535) {
-            std.log.warn("[FRP] Remote port range overflow starting at {d} (count {d})", .{ remote_start, listen_count });
+            std.log.warn("[FRPC] Remote port range overflow starting at {d} (count {d})", .{ remote_start, listen_count });
             continue;
         }
 
@@ -169,19 +169,19 @@ fn applyFrpForMapping(
                 continue;
             };
         }
-        flushFrpClient(holder, fwd.node_name);
+        flushFrpcClient(holder, fwd.node_name);
     }
 
-    std.log.debug("[FRPC] applyFrpForMapping completed for project {d}", .{handle.id + 1});
+    std.log.debug("[FRPC] applyFrpcForMapping completed for project {d}", .{handle.id + 1});
 }
 
 pub fn startForwarding(
     allocator: std.mem.Allocator,
     handle: *const project_status.ProjectHandle,
-    frp_nodes: *const std.StringHashMap(types.FrpcNode),
+    frpc_nodes: *const std.StringHashMap(types.FrpcNode),
 ) !void {
     for (handle.cfg.port_mappings) |mapping| {
-        applyFrpForMapping(allocator, handle, frp_nodes, mapping) catch |err| {
+        applyFrpcForMapping(allocator, handle, frpc_nodes, mapping) catch |err| {
             std.log.warn("[FRPC] Failed to apply mapping: {any}", .{err});
         };
     }
@@ -269,7 +269,7 @@ pub fn getAggregatedStatus(allocator: std.mem.Allocator) !struct {
             has_error = true;
             if (parsed.last_error.len > 0) {
                 // Log the error to the event log
-                event_log.logEvent(.frp_error, parsed.last_error, -1);
+                event_log.logEvent(.frpc_error, parsed.last_error, -1);
                 // Keep the latest non-empty error
                 if (last_error_msg.len > 0) allocator.free(last_error_msg);
                 last_error_msg = allocator.dupe(u8, parsed.last_error) catch "";
@@ -352,7 +352,7 @@ pub fn getClientStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
     };
 }
 
-/// Clear the logs of a specific FRPC client by node name
+/// Clear the logs of a specific FRP client by node name
 /// This is idempotent - returns success if node not found or not started
 pub fn clearClientLogs(node_name: []const u8) void {
     clients_lock.lock();
@@ -395,7 +395,7 @@ pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]con
     return holder.client.getProxyTrafficStats(allocator);
 }
 
-/// Parse the status JSON from FrpGetStatus
+/// Parse the status JSON from FrpcGetStatus
 fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
     status: []const u8,
     last_error: []const u8,

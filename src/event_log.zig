@@ -20,6 +20,12 @@ pub const EventType = enum(u8) {
     warning = 7,
     /// Generic error event
     err = 8,
+    /// FRPC client connected
+    frpc_connected = 9,
+    /// FRPC client disconnected
+    frpc_disconnected = 10,
+    /// FRPC client error
+    frpc_error = 11,
 
     pub fn toString(self: EventType) [:0]const u8 {
         return switch (self) {
@@ -32,6 +38,9 @@ pub const EventType = enum(u8) {
             .info => "info",
             .warning => "warning",
             .err => "error",
+            .frpc_connected => "frpc_connected",
+            .frpc_disconnected => "frpc_disconnected",
+            .frpc_error => "frpc_error",
         };
     }
 };

@@ -100,16 +100,16 @@ func (m *multiWriterLogger) removeWriter(id int) {
 	delete(m.writers, id)
 }
 
-//export FrpInit
-func FrpInit() {
+//export FrpcInit
+func FrpcInit() {
 	// 初始化日志系统（可选，根据需要配置日志文件路径和级别）
 	// log.InitLogger("/tmp/frpc.log", "debug", 7, true)
 	// test log
 	fmt.Println("FRP library initialized.")
 }
 
-//export FrpCreateClient
-func FrpCreateClient(
+//export FrpcCreateClient
+func FrpcCreateClient(
 	serverAddr *C.char,
 	serverPort C.int,
 	token *C.char,
@@ -176,8 +176,8 @@ func FrpCreateClient(
 	return C.int(clientID)
 }
 
-//export FrpAddTcpProxy
-func FrpAddTcpProxy(
+//export FrpcAddTcpProxy
+func FrpcAddTcpProxy(
 	clientID C.int,
 	proxyName *C.char,
 	localIP *C.char,
@@ -224,8 +224,8 @@ func FrpAddTcpProxy(
 	return 0
 }
 
-//export FrpAddUdpProxy
-func FrpAddUdpProxy(
+//export FrpcAddUdpProxy
+func FrpcAddUdpProxy(
 	clientID C.int,
 	proxyName *C.char,
 	localIP *C.char,
@@ -281,8 +281,8 @@ func makeProxyConfigurers(proxies []v1.TypedProxyConfig) []v1.ProxyConfigurer {
 	return proxyConfigurers
 }
 
-//export FrpFlushClient
-func FrpFlushClient(clientID C.int) C.int {
+//export FrpcFlushClient
+func FrpcFlushClient(clientID C.int) C.int {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
@@ -293,8 +293,8 @@ func FrpFlushClient(clientID C.int) C.int {
 	return 0
 }
 
-//export FrpStartClient
-func FrpStartClient(clientID C.int) C.int {
+//export FrpcStartClient
+func FrpcStartClient(clientID C.int) C.int {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
@@ -400,8 +400,8 @@ func FrpStartClient(clientID C.int) C.int {
 	return 0
 }
 
-//export FrpStopClient
-func FrpStopClient(clientID C.int) C.int {
+//export FrpcStopClient
+func FrpcStopClient(clientID C.int) C.int {
 	clientsMutex.Lock()
 	defer clientsMutex.Unlock()
 
@@ -424,8 +424,8 @@ func FrpStopClient(clientID C.int) C.int {
 	return 0
 }
 
-//export FrpDestroyClient
-func FrpDestroyClient(clientID C.int) C.int {
+//export FrpcDestroyClient
+func FrpcDestroyClient(clientID C.int) C.int {
 	clientsMutex.Lock()
 	defer clientsMutex.Unlock()
 
@@ -451,19 +451,19 @@ func FrpDestroyClient(clientID C.int) C.int {
 	return 0
 }
 
-//export FrpGetVersion
-func FrpGetVersion() *C.char {
+//export FrpcGetVersion
+func FrpcGetVersion() *C.char {
 	version_str := version.Full()
 	return C.CString(version_str)
 }
 
-//export FrpFreeString
-func FrpFreeString(str *C.char) {
+//export FrpcFreeString
+func FrpcFreeString(str *C.char) {
 	C.free(unsafe.Pointer(str))
 }
 
-//export FrpGetStatus
-func FrpGetStatus(clientID C.int) *C.char {
+//export FrpcGetStatus
+func FrpcGetStatus(clientID C.int) *C.char {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
@@ -479,8 +479,8 @@ func FrpGetStatus(clientID C.int) *C.char {
 	return C.CString(statusJSON)
 }
 
-//export FrpGetLogs
-func FrpGetLogs(clientID C.int) *C.char {
+//export FrpcGetLogs
+func FrpcGetLogs(clientID C.int) *C.char {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
@@ -504,8 +504,8 @@ func FrpGetLogs(clientID C.int) *C.char {
 	return C.CString(sb.String())
 }
 
-//export FrpClearLogs
-func FrpClearLogs(clientID C.int) {
+//export FrpcClearLogs
+func FrpcClearLogs(clientID C.int) {
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
 	clientsMutex.RUnlock()
@@ -520,8 +520,8 @@ func FrpClearLogs(clientID C.int) {
 	wrapper.logs = make([]string, 0)
 }
 
-//export FrpGetProxyTrafficStats
-func FrpGetProxyTrafficStats(clientID C.int) *C.char {
+//export FrpcGetProxyTrafficStats
+func FrpcGetProxyTrafficStats(clientID C.int) *C.char {
 	// Find the client wrapper
 	clientsMutex.RLock()
 	wrapper, ok := clients[int(clientID)]
@@ -575,8 +575,8 @@ func FrpGetProxyTrafficStats(clientID C.int) *C.char {
 	return C.CString(string(jsonBytes))
 }
 
-//export FrpCleanup
-func FrpCleanup() {
+//export FrpcCleanup
+func FrpcCleanup() {
 	clientsMutex.Lock()
 	defer clientsMutex.Unlock()
 

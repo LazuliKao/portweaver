@@ -325,16 +325,31 @@ fn addCombinedGoLib(
     optimize: std.builtin.OptimizeMode,
     frpc: bool,
     ddns: bool,
+    frps: bool,
 ) *std.Build.Step {
     // Determine build tags based on feature flags
-    const tags = if (frpc and ddns)
+    // Handle all possible combinations of frpc, ddns, and frps
+
+    if (!frpc and !ddns and !frps) {
+        @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
+    }
+
+    const tags = if (frpc and ddns and frps)
+        "frpc,ddns,frps"
+    else if (frpc and ddns)
         "frpc,ddns"
+    else if (frpc and frps)
+        "frpc,frps"
+    else if (ddns and frps)
+        "ddns,frps"
     else if (frpc)
         "frpc"
     else if (ddns)
         "ddns"
+    else if (frps)
+        "frps"
     else
-        @panic("At least one of frpc or ddns must be true when calling addCombinedGoLib");
+        @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
 
     return addGoLibrary(b, target, optimize, "src/impl/golibs", "libgolibs.a", tags);
 }
@@ -359,6 +374,9 @@ pub fn build(b: *std.Build) void {
 
     const ddns = b.option(bool, "ddns", "DDNS Support") orelse false;
     options.addOption(bool, "ddns_mode", ddns);
+
+    const frps = b.option(bool, "frps", "FRP Server Support") orelse false;
+    options.addOption(bool, "frps_mode", frps);
 
     const options_mod = options.createModule();
 
@@ -450,9 +468,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Build and link combined Go library (FRP and DDNS) when either feature is enabled
-    if (frpc or ddns) {
-        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns);
+    // Build and link combined Go library (FRP, DDNS, and FRPS) when any feature is enabled
+    if (frpc or ddns or frps) {
+        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
 
         // Add combined library header file path
         exe.addIncludePath(b.path("src/impl/golibs"));

@@ -1,7 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 
-pub const FrpStatus = struct {
+pub const FrpcStatus = struct {
     enabled: bool,
     version: ?[]const u8,
     status: ?[]const u8,
@@ -9,13 +9,13 @@ pub const FrpStatus = struct {
     client_count: usize,
 };
 
-/// 获取 FRP 功能状态和版本信息
-pub fn getFrpStatus(allocator: std.mem.Allocator) !FrpStatus {
-    // 检查编译时是否启用了 FRP 支持
+/// 获取 FRPC 功能状态和版本信息
+pub fn getFrpcStatus(allocator: std.mem.Allocator) !FrpcStatus {
+    // 检查编译时是否启用了 FRPC 支持
     const frpc_enabled = build_options.frpc_mode;
 
     if (!frpc_enabled) {
-        return FrpStatus{
+        return FrpcStatus{
             .enabled = false,
             .version = null,
             .status = null,
@@ -24,20 +24,25 @@ pub fn getFrpStatus(allocator: std.mem.Allocator) !FrpStatus {
         };
     }
 
-    // 如果启用了 FRP，获取版本信息
-    const libfrp = @import("frpc/libfrp.zig");
-    const frp_forward = @import("frp_forward.zig");
+    // 如果启用了 FRPC，获取版本信息
+    const libfrp = @import("frpc/libfrpc.zig");
+    const frpc_forward = @import("frpc_forward.zig");
 
     const version = try libfrp.getVersion(allocator);
+    defer allocator.free(version);
 
     // 获取聚合状态
-    const agg_status = try frp_forward.getAggregatedStatus(allocator);
+    const agg_status = try frpc_forward.getAggregatedStatus(allocator);
+    defer {
+        allocator.free(agg_status.status);
+        if (agg_status.last_error.len > 0) allocator.free(agg_status.last_error);
+    }
 
-    return FrpStatus{
-        .enabled = frpc_enabled,
-        .version = version,
-        .status = agg_status.status,
-        .last_error = if (agg_status.last_error.len > 0) agg_status.last_error else null,
-        .client_count = agg_status.client_count,
+    return FrpcStatus{
+        .enabled = false,
+        .version = null,
+        .status = null,
+        .last_error = null,
+        .client_count = 0,
     };
 }

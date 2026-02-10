@@ -2,7 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
-const frp_forward = if (build_options.frpc_mode) @import("impl/frp_forward.zig") else struct {};
+const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
 const builtin = @import("builtin");
@@ -45,7 +45,7 @@ pub fn main() !void {
     @import("impl/app_forward/uv.zig").printVersion();
     std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
     if (build_options.frpc_mode) {
-        std.log.info("FRP client mode enabled (build flag)", .{});
+        std.log.info("FRPC client mode enabled (build flag)", .{});
     }
 
     var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
@@ -53,7 +53,7 @@ pub fn main() !void {
         project_status.stopAll(&handles);
         handles.deinit();
         if (build_options.frpc_mode) {
-            frp_forward.stopAll();
+            frpc_forward.stopAll();
         }
         if (build_options.ddns_mode) {
             ddns_manager.deinit(allocator);
@@ -153,7 +153,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
 
     // 所有handle添加完成后，启动线程
     // 这样可以确保handles数组不会在线程运行时重新分配
-    return try startForwardingThreads(allocator, handles, &cfg.frp_nodes);
+    return try startForwardingThreads(allocator, handles, &cfg.frpc_nodes);
 }
 
 /// 配置防火墙规则（仅 UCI 模式）
@@ -209,7 +209,7 @@ fn logProjectConfig(project: config.Project) void {
 fn startForwardingThreads(
     allocator: std.mem.Allocator,
     handles: *std.array_list.Managed(project_status.ProjectHandle),
-    frp_nodes: *const std.StringHashMap(config.FrpNode),
+    frpc_nodes: *const std.StringHashMap(config.FrpcNode),
 ) !bool {
     std.log.info("Starting forwarding threads...", .{});
     var has_app_forward = false;
@@ -221,7 +221,7 @@ fn startForwardingThreads(
         if (handle.cfg.enable_app_forward) {
             has_app_forward = true;
         }
-        startForwarding(allocator, handle, frp_nodes);
+        startForwarding(allocator, handle, frpc_nodes);
     }
 
     return has_app_forward;
@@ -231,7 +231,7 @@ fn startForwardingThreads(
 fn startForwarding(
     allocator: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
-    frp_nodes: *const std.StringHashMap(config.FrpNode),
+    frpc_nodes: *const std.StringHashMap(config.FrpcNode),
 ) void {
     std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_stats });
     // 启动应用层转发
@@ -245,10 +245,10 @@ fn startForwarding(
             }
         };
     }
-    // 启动 FRP 转发（如果启用）
+    // 启动 FRPC 转发（如果启用）
     if (build_options.frpc_mode) {
-        frp_forward.startForwarding(allocator, handle, frp_nodes) catch |err| {
-            std.log.err("Failed to start FRP forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
+        frpc_forward.startForwarding(allocator, handle, frpc_nodes) catch |err| {
+            std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
             if (builtin.mode == .Debug) {
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);

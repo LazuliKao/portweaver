@@ -71,11 +71,11 @@ fn parseJsonZones(
     }
 }
 
-fn parseJsonFrpForwards(
+fn parseJsonFrpcForwards(
     allocator: std.mem.Allocator,
     v: std.json.Value,
-) ![]types.FrpForward {
-    var list = std.array_list.Managed(types.FrpForward).init(allocator);
+) ![]types.FrpcForward {
+    var list = std.array_list.Managed(types.FrpcForward).init(allocator);
     errdefer {
         for (list.items) |*f| f.deinit(allocator);
         list.deinit();
@@ -83,13 +83,13 @@ fn parseJsonFrpForwards(
 
     switch (v) {
         .string => |s| {
-            const fwd = try helper.parseFrpForwardString(allocator, s);
+            const fwd = try helper.parseFrpcForwardString(allocator, s);
             try list.append(fwd);
         },
         .array => |a| {
             for (a.items) |item| {
                 const s = try parseJsonString(item);
-                const fwd = try helper.parseFrpForwardString(allocator, s);
+                const fwd = try helper.parseFrpcForwardString(allocator, s);
                 try list.append(fwd);
             }
         },
@@ -245,9 +245,9 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     port_mapping.protocol = try types.parseProtocol(s);
                 }
 
-                // 解析 FRP 转发
-                if (mapping_obj.get("frp")) |frp_v| {
-                    port_mapping.frp = try parseJsonFrpForwards(allocator, frp_v);
+                // 解析 FRPC 转发
+                if (mapping_obj.get("frpc")) |frpc_v| {
+                    port_mapping.frpc = try parseJsonFrpcForwards(allocator, frpc_v);
                 }
 
                 if (!have_listen or !have_target) {
@@ -292,7 +292,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
     }
 
     // 解析 FRP 节点配置
-    var frp_nodes = std.StringHashMap(types.FrpNode).init(allocator);
+    var frp_nodes = std.StringHashMap(types.FrpcNode).init(allocator);
     errdefer {
         var it = frp_nodes.iterator();
         while (it.next()) |entry| {
@@ -312,7 +312,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
 
                     if (node_obj != .object) continue;
 
-                    var frp_node = types.FrpNode{
+                    var frp_node = types.FrpcNode{
                         .enabled = true,
                         .server = undefined,
                         .port = 0,
@@ -537,5 +537,5 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         }
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
+    return .{ .projects = try list.toOwnedSlice(), .frpc_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }

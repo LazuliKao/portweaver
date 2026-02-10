@@ -1,9 +1,9 @@
 const std = @import("std");
 const types = @import("types.zig");
 
-/// Parse a port mapping string in the format: "[listen_port][frp_node:port]...:target_port/protocol"
+/// Parse a port mapping string in the format: "[listen_port][frpc_node:port]...:target_port/protocol"
 /// Examples:
-///   "[8080][node1:9888][node2:9999]:80/tcp"  - with FRP nodes
+///   "[8080][node1:9888][node2:9999]:80/tcp"  - with FRPC nodes
 ///   "8080-8090:80-90/udp"  - port range with protocol
 ///   "443:8443/tcp"         - single port with protocol
 ///   "80"                   - single port (tcp default, target_port = listen_port)
@@ -19,13 +19,13 @@ pub fn parsePortMapping(allocator: std.mem.Allocator, s: []const u8) !types.Port
     };
     errdefer mapping.deinit(allocator);
 
-    var frp_list = std.array_list.Managed(types.FrpForward).init(allocator);
+    var frpc_list = std.array_list.Managed(types.FrpcForward).init(allocator);
     errdefer {
-        for (frp_list.items) |*f| f.deinit(allocator);
-        frp_list.deinit();
+        for (frpc_list.items) |*f| f.deinit(allocator);
+        frpc_list.deinit();
     }
 
-    // 解析格式：[port][frp1][frp2]:target/protocol
+    // 解析格式：[port][frpc1][frpc2]:target/protocol
     var work_str = trimmed;
     var listen_port_str: ?[]const u8 = null;
 
@@ -35,16 +35,16 @@ pub fn parsePortMapping(allocator: std.mem.Allocator, s: []const u8) !types.Port
         const content = work_str[1..close_idx];
         work_str = std.mem.trim(u8, work_str[close_idx + 1 ..], " \t\r\n");
 
-        // 判断是端口还是 FRP 节点
+        // 判断是端口还是 FRPC 节点
         if (std.mem.indexOf(u8, content, ":")) |colon_pos| {
-            // 包含 ':'  -> FRP 节点
+            // 包含 ':'  -> FRPC 节点
             const node_name = std.mem.trim(u8, content[0..colon_pos], " \t\r\n");
             const port_str = std.mem.trim(u8, content[colon_pos + 1 ..], " \t\r\n");
 
             if (node_name.len == 0) return types.ConfigError.InvalidValue;
             const port = try types.parsePort(port_str);
 
-            try frp_list.append(.{
+            try frpc_list.append(.{
                 .node_name = try allocator.dupe(u8, node_name),
                 .remote_port = port,
             });
@@ -127,15 +127,15 @@ pub fn parsePortMapping(allocator: std.mem.Allocator, s: []const u8) !types.Port
         return types.ConfigError.InvalidValue;
     }
 
-    if (frp_list.items.len > 0) {
-        mapping.frp = try frp_list.toOwnedSlice();
+    if (frpc_list.items.len > 0) {
+        mapping.frpc = try frpc_list.toOwnedSlice();
     }
 
     return mapping;
 }
 
-/// Parse FRP forward string like "node:port" or just "node" (port defaults to 0).
-pub fn parseFrpForwardString(allocator: std.mem.Allocator, s: []const u8) !types.FrpForward {
+/// Parse FRPC forward string like "node:port" or just "node" (port defaults to 0).
+pub fn parseFrpcForwardString(allocator: std.mem.Allocator, s: []const u8) !types.FrpcForward {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return types.ConfigError.InvalidValue;
 
@@ -166,7 +166,7 @@ test "parsePortMapping tests" {
         "[2]:80/tcp",
     };
 
-    std.debug.print("测试 FRP 格式解析:\n", .{});
+    std.debug.print("测试 FRPC 格式解析:\n", .{});
     for (test_cases) |test_str| {
         var result = parsePortMapping(allocator, test_str) catch |err| {
             std.debug.print("输入: {s}\n  -> 解析失败：{any}\n", .{ test_str, err });

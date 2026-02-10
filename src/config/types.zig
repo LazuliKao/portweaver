@@ -20,7 +20,7 @@ pub const Protocol = enum {
 };
 
 /// FRP 节点配置
-pub const FrpNode = struct {
+pub const FrpcNode = struct {
     /// 是否启用此规则
     enabled: bool = true,
     server: []const u8,
@@ -30,7 +30,7 @@ pub const FrpNode = struct {
     use_encryption: bool = true,
     use_compression: bool = true,
 
-    pub fn deinit(self: *FrpNode, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *FrpcNode, allocator: std.mem.Allocator) void {
         allocator.free(self.server);
         if (self.token.len != 0) allocator.free(self.token);
         if (self.log_level.len != 0) allocator.free(self.log_level);
@@ -39,13 +39,13 @@ pub const FrpNode = struct {
 };
 
 /// FRP 转发配置（节点名称:远程端口）
-pub const FrpForward = struct {
+pub const FrpcForward = struct {
     /// 节点名称
     node_name: []const u8,
     /// 远程端口
     remote_port: u16,
 
-    pub fn deinit(self: *FrpForward, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *FrpcForward, allocator: std.mem.Allocator) void {
         allocator.free(self.node_name);
         self.* = undefined;
     }
@@ -60,14 +60,14 @@ pub const PortMapping = struct {
     /// 协议: TCP+UDP / TCP / UDP
     protocol: Protocol = .tcp,
     /// FRP 转发列表
-    frp: []FrpForward = &[_]FrpForward{},
+    frpc: []FrpcForward = &[_]FrpcForward{},
 
     pub fn deinit(self: *PortMapping, allocator: std.mem.Allocator) void {
         allocator.free(self.listen_port);
         allocator.free(self.target_port);
-        if (self.frp.len != 0) {
-            for (self.frp) |*f| f.deinit(allocator);
-            allocator.free(self.frp);
+        if (self.frpc.len != 0) {
+            for (self.frpc) |*f| f.deinit(allocator);
+            allocator.free(self.frpc);
         }
         self.* = undefined;
     }
@@ -252,8 +252,8 @@ pub const DdnsConfig = struct {
 
 pub const Config = struct {
     projects: []Project,
-    /// FRP 节点配置（key 为节点名称）
-    frp_nodes: std.StringHashMap(FrpNode),
+    /// FRPC 节点配置（key 为节点名称）
+    frpc_nodes: std.StringHashMap(FrpcNode),
     /// DDNS 配置列表
     ddns_configs: []DdnsConfig,
 
@@ -261,12 +261,12 @@ pub const Config = struct {
         for (self.projects) |*p| p.deinit(allocator);
         allocator.free(self.projects);
 
-        var it = self.frp_nodes.iterator();
+        var it = self.frpc_nodes.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
-        self.frp_nodes.deinit();
+        self.frpc_nodes.deinit();
 
         for (self.ddns_configs) |*d| d.deinit(allocator);
         allocator.free(self.ddns_configs);
