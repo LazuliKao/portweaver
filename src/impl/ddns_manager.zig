@@ -263,38 +263,56 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !v
 
     var map = try getInstanceMap(allocator);
 
-    // Build a set of new config names
+    // Build a set of ALL new config names (regardless of enabled status)
     var new_names = std.StringHashMap(void).init(allocator);
     defer new_names.deinit();
     for (configs) |cfg| {
         try new_names.put(cfg.name, {});
     }
 
-    // Remove instances not in new config
-    var it = map.iterator();
+    // Remove instances not in new config or disabled in new config
     var to_remove = std.array_list.Managed([]const u8).init(allocator);
     defer to_remove.deinit();
 
+    var it = map.iterator();
     while (it.next()) |entry| {
-        if (!new_names.contains(entry.key_ptr.*)) {
-            try to_remove.append(entry.key_ptr.*);
+        const instance_name = entry.key_ptr.*;
+
+        // Check if the config is not in new config set OR if it's now disabled
+        var should_remove = true;
+        for (configs) |cfg| {
+            if (std.mem.eql(u8, cfg.name, instance_name)) {
+                // Found matching config - remove only if it's disabled
+                should_remove = !cfg.enabled;
+                break;
+            }
+        }
+
+        if (should_remove) {
+            try to_remove.append(instance_name);
         }
     }
 
     for (to_remove.items) |name| {
         if (map.fetchRemove(name)) |kv| {
-            std.log.info("[DDNS] Removing instance: {s}", .{name});
+            std.log.info("[DDNS] Removing instance: {s} (config disabled or removed)", .{name});
             kv.value.deinit(allocator);
             allocator.destroy(kv.value);
             allocator.free(kv.key);
         }
     }
 
-    // Add or update instances
+    // Add or update instances (only for enabled configs)
     for (configs) |cfg| {
+        if (!cfg.enabled) {
+            std.log.debug("[DDNS] Skipping disabled config: {s}", .{cfg.name});
+            continue;
+        }
+
         if (map.get(cfg.name)) |_| {
-            // TODO: Check if config changed and restart if needed
+            // Check if config changed and restart if needed
             std.log.debug("[DDNS] Instance {s} already exists", .{cfg.name});
+            // TODO: Check if config changed and restart if needed
         } else {
             std.log.info("[DDNS] Creating new instance: {s}", .{cfg.name});
             const holder = try createInstance(allocator, cfg);
@@ -400,4 +418,67 @@ pub fn deinit(allocator: std.mem.Allocator) void {
         map.deinit();
         instances = null;
     }
+}
+
+const build_options = @import("build_options");
+
+test "ddns_manager: skip disabled configs" {
+    if (!build_options.ddns_mode) return;
+
+    const allocator = std.testing.allocator;
+
+    // Create a disabled DDNS config
+    var disabled_config = types.DdnsConfig{
+        .name = try allocator.dupe(u8, "test-disabled"),
+        .enabled = false,
+        .dns_provider = try allocator.dupe(u8, "cloudflare"),
+        .dns_id = try allocator.dupe(u8, "test-id"),
+        .dns_secret = try allocator.dupe(u8, "test-secret"),
+        .ipv4 = .{
+            .enable = true,
+            .get_type = .url,
+            .domains = try allocator.dupe(u8, "test.example.com"),
+        },
+        .ipv6 = .{
+            .enable = false,
+            .get_type = .url,
+            .domains = "",
+        },
+    };
+    defer disabled_config.deinit(allocator);
+
+    // Create an enabled DDNS config
+    var enabled_config = types.DdnsConfig{
+        .name = try allocator.dupe(u8, "test-enabled"),
+        .enabled = true,
+        .dns_provider = try allocator.dupe(u8, "cloudflare"),
+        .dns_id = try allocator.dupe(u8, "test-id"),
+        .dns_secret = try allocator.dupe(u8, "test-secret"),
+        .ipv4 = .{
+            .enable = true,
+            .get_type = .url,
+            .domains = try allocator.dupe(u8, "test2.example.com"),
+        },
+        .ipv6 = .{
+            .enable = false,
+            .get_type = .url,
+            .domains = "",
+        },
+    };
+    defer enabled_config.deinit(allocator);
+
+    var configs = std.ArrayList(types.DdnsConfig).init(allocator);
+    defer configs.deinit();
+    try configs.append(disabled_config);
+    try configs.append(enabled_config);
+
+    // Apply configs - disabled config should be skipped
+    try applyConfig(allocator, configs.items);
+    defer deinit(allocator);
+
+    // Check that only the enabled config has an instance
+    const instances_map = try getInstanceMap(allocator);
+    try std.testing.expectEqual(@as(usize, 1), instances_map.count());
+    try std.testing.expect(instances_map.get("test-enabled") != null);
+    try std.testing.expect(instances_map.get("test-disabled") == null);
 }

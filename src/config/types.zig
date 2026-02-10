@@ -21,6 +21,8 @@ pub const Protocol = enum {
 
 /// FRP 节点配置
 pub const FrpNode = struct {
+    /// 是否启用此规则
+    enabled: bool = true,
     server: []const u8,
     port: u16,
     token: []const u8 = "",
@@ -200,6 +202,8 @@ pub const DdnsIpv6Config = struct {
 
 /// DDNS 配置
 pub const DdnsConfig = struct {
+    /// 是否启用此规则
+    enabled: bool = true,
     /// 配置名称（用于显示和标识）
     name: []const u8,
     /// DNS 提供商

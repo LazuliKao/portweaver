@@ -313,6 +313,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     if (node_obj != .object) continue;
 
                     var frp_node = types.FrpNode{
+                        .enabled = true,
                         .server = undefined,
                         .port = 0,
                         .use_encryption = true,
@@ -348,6 +349,10 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                         frp_node.use_compression = try parseJsonBool(v);
                     }
 
+                    if (node_obj.object.get("enabled")) |v| {
+                        frp_node.enabled = try parseJsonBool(v);
+                    }
+
                     if (!have_server or !have_port) {
                         if (have_server) allocator.free(frp_node.server);
                         if (frp_node.token.len != 0) allocator.free(frp_node.token);
@@ -376,6 +381,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     const obj = item.object;
 
                     var ddns_cfg = types.DdnsConfig{
+                        .enabled = true,
                         .name = undefined,
                         .dns_provider = undefined,
                     };
@@ -513,6 +519,10 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                     if (obj.get("webhook_headers")) |v| {
                         const s = try parseJsonString(v);
                         ddns_cfg.webhook_headers = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (obj.get("enabled")) |v| {
+                        ddns_cfg.enabled = try parseJsonBool(v);
                     }
 
                     // 验证必填字段

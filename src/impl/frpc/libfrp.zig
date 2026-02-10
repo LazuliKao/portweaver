@@ -34,9 +34,7 @@ fn ensureFrpInit() !void {
 
     if (frp_initialized) return;
 
-    std.debug.print("==== [FRP] Calling FrpInit()...\n", .{});
     _ = c.FrpInit();
-    std.debug.print("==== [FRP] FrpInit() completed.\n", .{});
     frp_initialized = true;
 }
 
@@ -47,10 +45,6 @@ pub const FrpClient = struct {
     use_compression: bool,
 
     pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8, use_encryption: bool, use_compression: bool) !FrpClient {
-        std.debug.print("==== Initializing FRP client with server_addr={s}, server_port={d}\n", .{ server_addr, server_port });
-        const frp_Version = c.FrpGetVersion();
-        std.debug.print("==== FRP library version: {s}\n", .{frp_Version});
-
         try ensureFrpInit();
         const c_addr = try allocator.dupeZ(u8, server_addr);
         defer allocator.free(c_addr);

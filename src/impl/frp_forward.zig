@@ -5,6 +5,7 @@ const libfrp = @import("frpc/libfrp.zig");
 const common = @import("app_forward/common.zig");
 const main = @import("../main.zig");
 const event_log = main.event_log;
+const build_options = @import("build_options");
 
 const ClientHolder = struct {
     client: libfrp.FrpClient,
@@ -18,26 +19,21 @@ var clients_lock: std.Thread.Mutex = .{};
 var pending_starts: std.ArrayList([]const u8) = undefined;
 var pending_starts_lock: std.Thread.Mutex = .{};
 
-fn frpClientStartThread(node_name: []const u8) void {
-    std.log.debug("[FRP] Background start thread initiated for node {s}", .{node_name});
-
-    clients_lock.lock();
-    defer clients_lock.unlock();
-
-    if (clients == null) {
-        std.log.warn("[FRP] Clients map is null in start thread", .{});
-        return;
-    }
-
-    if (clients.?.get(node_name)) |holder_ptr| {
-        std.log.debug("[FRP] Background thread: calling start() for node {s}", .{node_name});
-        holder_ptr.*.client.start() catch |err| {
+fn flushFrpClient(holder: *ClientHolder, node_name: []const u8) void {
+    if (holder.started) {
+        std.log.debug("[FRP] Client {s} already started, flushing changes", .{node_name});
+        std.log.debug("[FRP] About to call flush for node {s}", .{node_name});
+        holder.client.flush() catch |err| {
+            std.log.warn("[FRP] Failed to flush client {s}: {any}", .{ node_name, err });
+        };
+        std.log.debug("[FRP] Flush completed for node {s}", .{node_name});
+    } else {
+        holder.started = true;
+        holder.*.client.start() catch |err| {
             std.log.warn("[FRP] Failed to start client {s}: {any}", .{ node_name, err });
             return;
         };
-        std.log.info("[FRP] Client {s} started successfully in background thread", .{node_name});
-    } else {
-        std.log.warn("[FRP] Client holder not found for node {s}", .{node_name});
+        std.log.info("[FRP] Client {s} started successfully", .{node_name});
     }
 }
 
@@ -108,15 +104,25 @@ fn addProxyForPorts(
     project_id: usize,
     remark: []const u8,
 ) !void {
-    const proxy_name = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
-    defer allocator.free(proxy_name);
-
     switch (mapping.protocol) {
-        .tcp => try holder.client.addTcpProxy(proxy_name, local_ip, local_port, remote_port),
-        .udp => try holder.client.addUdpProxy(proxy_name, local_ip, local_port, remote_port),
-        .both => {
+        .tcp => {
+            const proxy_name = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
+            defer allocator.free(proxy_name);
             try holder.client.addTcpProxy(proxy_name, local_ip, local_port, remote_port);
+        },
+        .udp => {
+            const proxy_name = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
+            defer allocator.free(proxy_name);
             try holder.client.addUdpProxy(proxy_name, local_ip, local_port, remote_port);
+        },
+        .both => {
+            const proxy_name_tcp = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}_tcp", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
+            defer allocator.free(proxy_name_tcp);
+            try holder.client.addTcpProxy(proxy_name_tcp, local_ip, local_port, remote_port);
+
+            const proxy_name_udp = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}_udp", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
+            defer allocator.free(proxy_name_udp);
+            try holder.client.addUdpProxy(proxy_name_udp, local_ip, local_port, remote_port);
         },
     }
 }
@@ -179,28 +185,7 @@ fn applyFrpForMapping(
                 continue;
             };
         }
-
-        if (holder.started) {
-            std.log.debug("[FRP] Client {s} already started, flushing changes", .{fwd.node_name});
-            std.log.debug("[FRP] About to call flush for node {s}", .{fwd.node_name});
-            holder.client.flush() catch |err| {
-                std.log.warn("[FRP] Failed to flush client {s}: {any}", .{ fwd.node_name, err });
-            };
-            std.log.debug("[FRP] Flush completed for node {s}", .{fwd.node_name});
-        } else {
-            std.log.debug("[FRP] Spawning background thread to start client {s}", .{fwd.node_name});
-            std.log.debug("[FRP] Marking client {s} as started to prevent duplicate start attempts", .{fwd.node_name});
-            holder.started = true;
-
-            // Spawn background thread for start (avoid blocking with lock held)
-            const thread = std.Thread.spawn(.{}, frpClientStartThread, .{fwd.node_name}) catch |err| {
-                std.log.warn("[FRP] Failed to spawn start thread for node {s}: {any}", .{ fwd.node_name, err });
-                holder.started = false;
-                continue;
-            };
-            thread.detach();
-            std.log.debug("[FRP] Background thread spawned for node {s}", .{fwd.node_name});
-        }
+        flushFrpClient(holder, fwd.node_name);
     }
 
     std.log.debug("[FRP] applyFrpForMapping completed for project {d}", .{handle.id + 1});
@@ -211,19 +196,6 @@ pub fn startForwarding(
     handle: *project_status.ProjectHandle,
     frp_nodes: *const std.StringHashMap(types.FrpNode),
 ) !void {
-    // 仅在存在 FRP 转发配置时执行
-    var has_frp = false;
-    for (handle.cfg.port_mappings, 1..) |mapping, idx| {
-        if (mapping.frp.len != 0) {
-            has_frp = true;
-            std.log.debug("[FRP] project {d} mapping {d}/{d} frp entry(ies)", .{ handle.id + 1, idx, mapping.frp.len });
-        }
-    }
-    if (!has_frp) {
-        std.log.debug("[FRP] project {d} has no frp mappings, skip", .{handle.id + 1});
-        return;
-    }
-
     for (handle.cfg.port_mappings) |mapping| {
         applyFrpForMapping(allocator, handle, frp_nodes, mapping) catch |err| {
             std.log.warn("[FRP] Failed to apply mapping: {any}", .{err});

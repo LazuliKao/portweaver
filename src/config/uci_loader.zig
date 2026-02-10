@@ -200,6 +200,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         if (!std.mem.eql(u8, sec_type, "frp_node")) continue;
 
         var frp_node = types.FrpNode{
+            .enabled = true,
             .server = undefined,
             .port = 0,
             .token = &.{},
@@ -241,6 +242,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 frp_node.use_encryption = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "use_compression")) {
                 frp_node.use_compression = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "enabled")) {
+                frp_node.enabled = try types.parseBool(opt_val);
             }
         }
 
@@ -346,6 +349,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         if (!std.mem.eql(u8, sec_type, "ddns")) continue;
 
         var ddns_cfg = types.DdnsConfig{
+            .enabled = true,
             .name = undefined,
             .dns_provider = undefined,
         };
@@ -418,6 +422,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 ddns_cfg.webhook_body = try types.dupeIfNonEmpty(allocator, opt_val);
             } else if (std.mem.eql(u8, opt_name, "webhook_headers")) {
                 ddns_cfg.webhook_headers = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "enabled")) {
+                ddns_cfg.enabled = try types.parseBool(opt_val);
             }
         }
 
