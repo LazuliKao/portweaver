@@ -289,6 +289,8 @@ fn addGoLibrary(
 
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
     if (target.result.abi != .msvc) {
+        const wrapper_dir = b.path("wrapper");
+        go_cmd.addPathDir(wrapper_dir.getPath(b));
         if (b.graph.host.result.os.tag == .windows) {
             const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
             const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
@@ -297,8 +299,6 @@ fn addGoLibrary(
             go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
             go_cmd.setEnvironmentVariable("AR", ar_cmd);
         } else {
-            const wrapper_dir = b.path("wrapper");
-            go_cmd.addPathDir(wrapper_dir.getPath(b));
             // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
             const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
             const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
