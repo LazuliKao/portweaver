@@ -16,7 +16,23 @@ const ClientHolder = struct {
 var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Thread.Mutex = .{};
+pub fn flushAllClients() void {
+    if (clients == null) return;
+    clients_lock.lock();
+    defer clients_lock.unlock();
 
+    var map = clients.?;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        const node_name = entry.key_ptr.*;
+        const holder = entry.value_ptr.*;
+
+        holder.lock.lock();
+        defer holder.lock.unlock();
+
+        flushFrpcClient(holder, node_name);
+    }
+}
 fn flushFrpcClient(holder: *ClientHolder, node_name: []const u8) void {
     if (holder.started) {
         std.log.debug("[FRPC] Client {s} already started, flushing changes", .{node_name});
@@ -169,7 +185,7 @@ fn applyFrpcForMapping(
                 continue;
             };
         }
-        flushFrpcClient(holder, fwd.node_name);
+        // flushFrpcClient(holder, fwd.node_name);
     }
 
     std.log.debug("[FRPC] applyFrpcForMapping completed for project {d}", .{handle.id + 1});

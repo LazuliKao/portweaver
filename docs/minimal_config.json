@@ -1,0 +1,15 @@
+{
+    "projects": [
+        {
+            "remark": "Simple test",
+            "target_address": "127.0.0.1",
+            "listen_port": 8080,
+            "target_port": 80,
+            "protocol": "tcp",
+            "family": "any",
+            "enable_app_forward": true,
+            "open_firewall_port": false,
+            "add_firewall_forward": false
+        }
+    ]
+}

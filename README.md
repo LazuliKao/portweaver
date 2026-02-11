@@ -5,6 +5,7 @@ Port forwarding utils for OpenWrt
 
 - ✅ **防火墙规则集成**：自动配置 OpenWrt 防火墙规则
 - ✅ **应用层端口转发**：纯 Zig 实现的 TCP/UDP 转发（类似 socat）
+- ✅ **FRP 服务端**：集成 FRPS 功能，支持高性能内网穿透服务端
 - ✅ **UCI 配置支持**：原生支持 OpenWrt UCI 配置系统
 - ✅ **JSON 配置支持**：可选的 JSON 配置文件格式
 - ✅ **多协议支持**：TCP、UDP 或同时支持
@@ -37,6 +38,84 @@ PortWeaver 现在支持纯 Zig 实现的应用层端口转发，无需依赖系�
 - 🧵 多线程并发处理
 - 📝 详细的日志输出
 - 🎯 适合开发和测试环境
+
+## FRP 服务端 (FRPS)
+
+PortWeaver 集成了 FRPS 功能，允许将当前设备作为 FRP 服务端使用。
+
+### 编译启用
+
+FRP 服务端功能默认不编译进二进制。启用方式：
+
+```sh
+zig build -Dfrps=true
+```
+
+### UCI 配置
+
+在 `/etc/config/portweaver` 中添加 `frps_node` 配置：
+
+```uci
+config frps_node 'main'
+	option enabled '1'
+	option port '7000'
+	option token 'your_token'
+	option log_level 'info'
+	option allow_ports '10000-20000'
+	option bind_addr '0.0.0.0'
+	option max_pool_count '5'
+	option max_ports_per_client '0'
+	option tcp_mux '1'
+	option udp_mux '1'
+	option kcp_mux '1'
+	option dashboard_addr '0.0.0.0'
+	option dashboard_user 'admin'
+	option dashboard_pwd 'admin'
+```
+
+支持的配置项：
+
+- `enabled`: 是否启用此节点 (1/0)
+- `port`: 监听端口
+- `token`: 鉴权令牌
+- `log_level`: 日志级别 (info, debug, warn, error)
+- `allow_ports`: 允许客户端使用的端口范围 (例如 10000-20000)
+- `bind_addr`: 绑定地址 (例如 0.0.0.0)
+- `max_pool_count`: 每个代理最大的连接池数量
+- `max_ports_per_client`: 每个客户端允许开启的最大代理数量 (0 表示不限制)
+- `tcp_mux`: 是否启用 TCP 多路复用
+- `udp_mux`: 是否启用 UDP 多路复用
+- `kcp_mux`: 是否启用 KCP 多路复用
+- `dashboard_addr`: 仪表板监听地址 (例如 0.0.0.0)
+- `dashboard_user`: 仪表板用户名
+- `dashboard_pwd`: 仪表板密码
+
+### JSON 配置
+
+如果启用了 JSON 支持 (`-Djson=true`)，可以使用 `frps_nodes` 字段：
+
+```json
+{
+  "frps_nodes": {
+    "main": {
+      "enabled": true,
+      "port": 7000,
+      "token": "your_token",
+      "log_level": "info",
+      "allow_ports": "10000-20000",
+      "bind_addr": "0.0.0.0",
+      "max_pool_count": 5,
+      "max_ports_per_client": 0,
+      "tcp_mux": true,
+      "udp_mux": true,
+      "kcp_mux": true,
+      "dashboard_addr": "0.0.0.0",
+      "dashboard_user": "admin",
+      "dashboard_pwd": "admin"
+    }
+  }
+}
+```
 
 ## 配置文件
 

@@ -4,6 +4,8 @@ const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
 const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig") else struct {};
+const frps_forward = if (build_options.frps_mode) @import("impl/frps_forward.zig") else struct {};
+const libfrps = if (build_options.frps_mode) @import("impl/frps/libfrps.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
 const builtin = @import("builtin");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
@@ -47,6 +49,9 @@ pub fn main() !void {
     if (build_options.frpc_mode) {
         std.log.info("FRPC client mode enabled (build flag)", .{});
     }
+    if (build_options.frps_mode) {
+        std.log.info("FRPS server mode enabled (build flag)", .{});
+    }
 
     var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
     defer {
@@ -57,6 +62,10 @@ pub fn main() !void {
         }
         if (build_options.ddns_mode) {
             ddns_manager.deinit(allocator);
+        }
+        if (build_options.frps_mode) {
+            frps_forward.stopAll();
+            libfrps.cleanup();
         }
     }
 
@@ -151,6 +160,21 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
         };
     }
 
+    // 启动 FRPS 服务（如果启用）
+    if (build_options.frps_mode) {
+        std.log.info("Starting FRPS servers...", .{});
+        var frps_it = cfg.frps_nodes.iterator();
+        while (frps_it.next()) |entry| {
+            const node_name = entry.key_ptr.*;
+            const node = entry.value_ptr.*;
+            if (node.enabled) {
+                frps_forward.startServer(allocator, node_name, node) catch |err| {
+                    std.log.warn("Failed to start FRPS server {s}: {any}", .{ node_name, err });
+                };
+            }
+        }
+    }
+
     // 所有handle添加完成后，启动线程
     // 这样可以确保handles数组不会在线程运行时重新分配
     return try startForwardingThreads(allocator, handles, &cfg.frpc_nodes);
@@ -223,7 +247,9 @@ fn startForwardingThreads(
         }
         startForwarding(allocator, handle, frpc_nodes);
     }
-
+    if (build_options.frpc_mode) {
+        frpc_forward.flushAllClients();
+    }
     return has_app_forward;
 }
 

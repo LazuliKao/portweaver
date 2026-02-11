@@ -38,6 +38,36 @@ pub const FrpcNode = struct {
     }
 };
 
+/// FRP 服务器节点配置
+pub const FrpsNode = struct {
+    /// 是否启用此规则
+    enabled: bool = true,
+    port: u16,
+    token: []const u8 = "",
+    log_level: []const u8 = "info",
+    allow_ports: []const u8 = "",
+    bind_addr: []const u8 = "",
+    max_pool_count: u32 = 5,
+    max_ports_per_client: u32 = 0,
+    tcp_mux: bool = true,
+    udp_mux: bool = true,
+    kcp_mux: bool = true,
+    dashboard_addr: []const u8 = "",
+    dashboard_user: []const u8 = "",
+    dashboard_pwd: []const u8 = "",
+
+    pub fn deinit(self: *FrpsNode, allocator: std.mem.Allocator) void {
+        if (self.token.len != 0) allocator.free(self.token);
+        if (self.log_level.len != 0) allocator.free(self.log_level);
+        if (self.allow_ports.len != 0) allocator.free(self.allow_ports);
+        if (self.bind_addr.len != 0) allocator.free(self.bind_addr);
+        if (self.dashboard_addr.len != 0) allocator.free(self.dashboard_addr);
+        if (self.dashboard_user.len != 0) allocator.free(self.dashboard_user);
+        if (self.dashboard_pwd.len != 0) allocator.free(self.dashboard_pwd);
+        self.* = undefined;
+    }
+};
+
 /// FRP 转发配置（节点名称:远程端口）
 pub const FrpcForward = struct {
     /// 节点名称
@@ -254,6 +284,8 @@ pub const Config = struct {
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
     frpc_nodes: std.StringHashMap(FrpcNode),
+    /// FRPS 节点配置（key 为节点名称）
+    frps_nodes: std.StringHashMap(FrpsNode),
     /// DDNS 配置列表
     ddns_configs: []DdnsConfig,
 
@@ -267,6 +299,13 @@ pub const Config = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.frpc_nodes.deinit();
+
+        var frps_it = self.frps_nodes.iterator();
+        while (frps_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.frps_nodes.deinit();
 
         for (self.ddns_configs) |*d| d.deinit(allocator);
         allocator.free(self.ddns_configs);

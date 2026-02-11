@@ -291,28 +291,28 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         try list.append(project);
     }
 
-    // 解析 FRP 节点配置
-    var frp_nodes = std.StringHashMap(types.FrpcNode).init(allocator);
+    // 解析 FRPC 节点配置
+    var frpc_nodes = std.StringHashMap(types.FrpcNode).init(allocator);
     errdefer {
-        var it = frp_nodes.iterator();
+        var it = frpc_nodes.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
-        frp_nodes.deinit();
+        frpc_nodes.deinit();
     }
 
     if (root == .object) {
-        if (root.object.get("frp_nodes")) |frp_value| {
-            if (frp_value == .object) {
-                var node_it = frp_value.object.iterator();
+        if (root.object.get("frpc_nodes")) |frpc_value| {
+            if (frpc_value == .object) {
+                var node_it = frpc_value.object.iterator();
                 while (node_it.next()) |entry| {
                     const node_name = entry.key_ptr.*;
                     const node_obj = entry.value_ptr.*;
 
                     if (node_obj != .object) continue;
 
-                    var frp_node = types.FrpcNode{
+                    var frpc_node = types.FrpcNode{
                         .enabled = true,
                         .server = undefined,
                         .port = 0,
@@ -327,40 +327,176 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                         const s = try parseJsonString(v);
                         const trimmed = std.mem.trim(u8, s, " \t\r\n");
                         if (trimmed.len == 0) continue;
-                        frp_node.server = try allocator.dupe(u8, trimmed);
+                        frpc_node.server = try allocator.dupe(u8, trimmed);
                         have_server = true;
                     }
 
                     if (node_obj.object.get("port")) |v| {
-                        frp_node.port = try parseJsonPort(v);
+                        frpc_node.port = try parseJsonPort(v);
                         have_port = true;
                     }
 
                     if (node_obj.object.get("token")) |v| {
                         const s = try parseJsonString(v);
-                        frp_node.token = try types.dupeIfNonEmpty(allocator, s);
+                        frpc_node.token = try types.dupeIfNonEmpty(allocator, s);
                     }
 
                     if (node_obj.object.get("use_encryption")) |v| {
-                        frp_node.use_encryption = try parseJsonBool(v);
+                        frpc_node.use_encryption = try parseJsonBool(v);
                     }
 
                     if (node_obj.object.get("use_compression")) |v| {
-                        frp_node.use_compression = try parseJsonBool(v);
+                        frpc_node.use_compression = try parseJsonBool(v);
+                    }
+
+                    if (node_obj.object.get("log_level")) |v| {
+                        const s = try parseJsonString(v);
+                        frpc_node.log_level = try types.dupeIfNonEmpty(allocator, s);
                     }
 
                     if (node_obj.object.get("enabled")) |v| {
-                        frp_node.enabled = try parseJsonBool(v);
+                        frpc_node.enabled = try parseJsonBool(v);
                     }
 
                     if (!have_server or !have_port) {
-                        if (have_server) allocator.free(frp_node.server);
-                        if (frp_node.token.len != 0) allocator.free(frp_node.token);
+                        if (have_server) allocator.free(frpc_node.server);
+                        if (frpc_node.token.len != 0) allocator.free(frpc_node.token);
+                        if (frpc_node.log_level.len != 0 and !std.mem.eql(u8, frpc_node.log_level, "info")) allocator.free(frpc_node.log_level);
                         continue;
                     }
 
                     const key = try allocator.dupe(u8, node_name);
-                    try frp_nodes.put(key, frp_node);
+                    try frpc_nodes.put(key, frpc_node);
+                }
+            }
+        }
+    }
+
+    // 解析 FRPS 节点配置
+    var frps_nodes = std.StringHashMap(types.FrpsNode).init(allocator);
+    errdefer {
+        var it = frps_nodes.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        frps_nodes.deinit();
+    }
+
+    if (root == .object) {
+        if (root.object.get("frps_nodes")) |frps_value| {
+            if (frps_value == .object) {
+                var node_it = frps_value.object.iterator();
+                while (node_it.next()) |entry| {
+                    const node_name = entry.key_ptr.*;
+                    const node_obj = entry.value_ptr.*;
+
+                    if (node_obj != .object) continue;
+
+                    var frps_node = types.FrpsNode{
+                        .enabled = true,
+                        .port = 0,
+                        .token = "",
+                        .log_level = "info",
+                        .allow_ports = "",
+                        .bind_addr = "",
+                        .max_pool_count = 5,
+                        .max_ports_per_client = 0,
+                        .tcp_mux = true,
+                        .udp_mux = true,
+                        .kcp_mux = true,
+                        .dashboard_addr = "",
+                        .dashboard_user = "",
+                        .dashboard_pwd = "",
+                    };
+
+                    var have_port = false;
+
+                    if (node_obj.object.get("port")) |v| {
+                        frps_node.port = try parseJsonPort(v);
+                        have_port = true;
+                    }
+
+                    if (node_obj.object.get("token")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.token = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("log_level")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.log_level = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("allow_ports")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.allow_ports = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("bind_addr")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.bind_addr = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("max_pool_count")) |v| {
+                        frps_node.max_pool_count = switch (v) {
+                            .integer => |i| @intCast(i),
+                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 5,
+                            else => 5,
+                        };
+                    }
+
+                    if (node_obj.object.get("max_ports_per_client")) |v| {
+                        frps_node.max_ports_per_client = switch (v) {
+                            .integer => |i| @intCast(i),
+                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 0,
+                            else => 0,
+                        };
+                    }
+
+                    if (node_obj.object.get("tcp_mux")) |v| {
+                        frps_node.tcp_mux = try parseJsonBool(v);
+                    }
+
+                    if (node_obj.object.get("udp_mux")) |v| {
+                        frps_node.udp_mux = try parseJsonBool(v);
+                    }
+
+                    if (node_obj.object.get("kcp_mux")) |v| {
+                        frps_node.kcp_mux = try parseJsonBool(v);
+                    }
+
+                    if (node_obj.object.get("dashboard_addr")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.dashboard_addr = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("dashboard_user")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.dashboard_user = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("dashboard_pwd")) |v| {
+                        const s = try parseJsonString(v);
+                        frps_node.dashboard_pwd = try types.dupeIfNonEmpty(allocator, s);
+                    }
+
+                    if (node_obj.object.get("enabled")) |v| {
+                        frps_node.enabled = try parseJsonBool(v);
+                    }
+
+                    if (!have_port) {
+                        if (frps_node.token.len != 0) allocator.free(frps_node.token);
+                        if (frps_node.log_level.len != 0 and !std.mem.eql(u8, frps_node.log_level, "info")) allocator.free(frps_node.log_level);
+                        if (frps_node.allow_ports.len != 0) allocator.free(frps_node.allow_ports);
+                        if (frps_node.bind_addr.len != 0) allocator.free(frps_node.bind_addr);
+                        if (frps_node.dashboard_addr.len != 0) allocator.free(frps_node.dashboard_addr);
+                        if (frps_node.dashboard_user.len != 0) allocator.free(frps_node.dashboard_user);
+                        if (frps_node.dashboard_pwd.len != 0) allocator.free(frps_node.dashboard_pwd);
+                        continue;
+                    }
+
+                    const key = try allocator.dupe(u8, node_name);
+                    try frps_nodes.put(key, frps_node);
                 }
             }
         }
@@ -537,5 +673,5 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
         }
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frpc_nodes = frp_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
+    return .{ .projects = try list.toOwnedSlice(), .frpc_nodes = frpc_nodes, .frps_nodes = frps_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }

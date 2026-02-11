@@ -3,9 +3,6 @@ const c = @cImport({
     @cInclude("libgolibs.h");
 });
 
-// C declaration for DDNS version function
-extern "c" fn DdnsGetVersion() ?[*:0]const u8;
-
 pub const DdnsError = error{
     InitFailed,
     CreateInstanceFailed,

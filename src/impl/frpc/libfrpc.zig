@@ -14,12 +14,6 @@ pub const FrpcError = error{
     InvalidClientID,
 };
 
-// C declarations for new FRP functions
-extern "c" fn FrpcGetStatus(clientID: c_int) [*c]u8;
-extern "c" fn FrpcGetLogs(clientID: c_int) [*c]u8;
-extern "c" fn FrpcClearLogs(clientID: c_int) void;
-extern "c" fn FrpcGetProxyTrafficStats(clientID: c_int, proxyName: [*c]u8) [*c]u8;
-
 pub const ProxyType = enum {
     tcp,
     udp,

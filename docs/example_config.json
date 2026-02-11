@@ -7,7 +7,7 @@
       "enable_app_forward": true,
       "open_firewall_port": false,
       "add_firewall_forward": false,
-      "forwards": [
+      "port_mappings": [
         {
           "listen_port": "8085-8090",
           "target_port": "85-90",
@@ -22,22 +22,28 @@
       "enable_app_forward": true,
       "open_firewall_port": false,
       "add_firewall_forward": false,
-      "forwards": [
+      "port_mappings": [
         {
           "listen_port": 8080,
           "target_port": 80,
           "protocol": "tcp",
-           "frpc": [
-             "node1:9888"
-           ]
+          "frpc": [
+            {
+              "node_name": "node1",
+              "remote_port": 9888
+            }
+          ]
         },
         {
           "listen_port": 19132,
           "target_port": 19132,
           "protocol": "udp",
-           "frpc": [
-             "node1:9889"
-           ]
+          "frpc": [
+            {
+              "node_name": "node1",
+              "remote_port": 9889
+            }
+          ]
         }
       ]
     },
@@ -46,9 +52,6 @@
       "target_address": "127.0.0.1",
       "listen_port": 8080,
       "target_port": 80,
-       "frpc": [
-         "node1"
-       ],
       "protocol": "tcp",
       "family": "any",
       "enable_app_forward": true,
@@ -94,20 +97,46 @@
         "lan"
       ]
     }
-],
-   "frpc": {
-     "node1": {
-       "server": "1.2.3.4",
-       "port": 7000,
-       "token": "xxx"
-     },
-     "node2": {
-       "server": "4.2.3.4",
-       "port": 7000,
-       "token": "xxx"
-     }
-   },
-  "ddns": [
+  ],
+  "frpc_nodes": {
+    "node1": {
+      "enabled": true,
+      "server": "1.2.3.4",
+      "port": 7000,
+      "token": "xxx",
+      "log_level": "info",
+      "use_encryption": true,
+      "use_compression": true
+    },
+    "node2": {
+      "enabled": true,
+      "server": "4.2.3.4",
+      "port": 7000,
+      "token": "xxx",
+      "log_level": "info",
+      "use_encryption": true,
+      "use_compression": true
+    }
+  },
+  "frps_nodes": {
+    "server1": {
+      "enabled": true,
+      "port": 7000,
+      "token": "default_token_here",
+      "log_level": "info",
+      "allow_ports": "2000-3000,5000-6000",
+      "bind_addr": "0.0.0.0",
+      "max_pool_count": 5,
+      "max_ports_per_client": 0,
+      "tcp_mux": true,
+      "udp_mux": true,
+      "kcp_mux": true,
+      "dashboard_addr": "0.0.0.0",
+      "dashboard_user": "admin",
+      "dashboard_pwd": "admin_password"
+    }
+  },
+  "ddns_configs": [
     {
       "name": "cloudflare-home",
       "dns_provider": "cloudflare",

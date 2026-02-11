@@ -333,7 +333,6 @@ fn addCombinedGoLib(
     if (!frpc and !ddns and !frps) {
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
     }
-
     const tags = if (frpc and ddns and frps)
         "frpc,ddns,frps"
     else if (frpc and ddns)
@@ -350,7 +349,6 @@ fn addCombinedGoLib(
         "frps"
     else
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
-
     return addGoLibrary(b, target, optimize, "src/impl/golibs", "libgolibs.a", tags);
 }
 

@@ -336,6 +336,104 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         }
     }
 
+    // Parse FRPS nodes from UCI config
+    var frps_nodes = std.StringHashMap(types.FrpsNode).init(allocator);
+    errdefer {
+        var it = frps_nodes.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        frps_nodes.deinit();
+    }
+
+    var frps_sec_it = uci.sections(pkg);
+    while (frps_sec_it.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+        if (!std.mem.eql(u8, sec_type, "frps_node")) continue;
+
+        var frps_node = types.FrpsNode{
+            .enabled = true,
+            .port = 0,
+            .token = &.{},
+            .log_level = &.{},
+            .allow_ports = &.{},
+            .bind_addr = &.{},
+            .max_pool_count = 5,
+            .max_ports_per_client = 0,
+            .tcp_mux = true,
+            .udp_mux = true,
+            .kcp_mux = true,
+            .dashboard_addr = &.{},
+            .dashboard_user = &.{},
+            .dashboard_pwd = &.{},
+        };
+        var node_name: []const u8 = "";
+        var have_port = false;
+
+        // Get node name from section name or 'name' option
+        const sec_name = uci.cStr(sec.name());
+        if (sec_name.len > 0) {
+            node_name = sec_name;
+        }
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (!opt.isString()) continue;
+            const opt_val = uci.cStr(opt.getString());
+
+            if (std.mem.eql(u8, opt_name, "name")) {
+                node_name = opt_val;
+            } else if (std.mem.eql(u8, opt_name, "port")) {
+                frps_node.port = try types.parsePort(opt_val);
+                have_port = true;
+            } else if (std.mem.eql(u8, opt_name, "token")) {
+                frps_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "log_level")) {
+                frps_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "allow_ports")) {
+                frps_node.allow_ports = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "bind_addr")) {
+                frps_node.bind_addr = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "max_pool_count")) {
+                frps_node.max_pool_count = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 5;
+            } else if (std.mem.eql(u8, opt_name, "max_ports_per_client")) {
+                frps_node.max_ports_per_client = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 0;
+            } else if (std.mem.eql(u8, opt_name, "tcp_mux")) {
+                frps_node.tcp_mux = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "udp_mux")) {
+                frps_node.udp_mux = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "kcp_mux")) {
+                frps_node.kcp_mux = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "dashboard_addr")) {
+                frps_node.dashboard_addr = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "dashboard_user")) {
+                frps_node.dashboard_user = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "dashboard_pwd")) {
+                frps_node.dashboard_pwd = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "enabled")) {
+                frps_node.enabled = try types.parseBool(opt_val);
+            }
+        }
+
+        // Validate FRPS node
+        if (node_name.len == 0 or !have_port) {
+            if (frps_node.token.len != 0) allocator.free(frps_node.token);
+            if (frps_node.log_level.len != 0) allocator.free(frps_node.log_level);
+            if (frps_node.allow_ports.len != 0) allocator.free(frps_node.allow_ports);
+            if (frps_node.bind_addr.len != 0) allocator.free(frps_node.bind_addr);
+            if (frps_node.dashboard_addr.len != 0) allocator.free(frps_node.dashboard_addr);
+            if (frps_node.dashboard_user.len != 0) allocator.free(frps_node.dashboard_user);
+            if (frps_node.dashboard_pwd.len != 0) allocator.free(frps_node.dashboard_pwd);
+            continue;
+        }
+
+        const node_name_owned = try allocator.dupe(u8, node_name);
+        errdefer allocator.free(node_name_owned);
+
+        try frps_nodes.put(node_name_owned, frps_node);
+    }
+
     // Parse DDNS configs from UCI
     var ddns_list = std.array_list.Managed(types.DdnsConfig).init(allocator);
     errdefer {
@@ -437,5 +535,5 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try ddns_list.append(ddns_cfg);
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frp_nodes = frpc_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
+    return .{ .projects = try list.toOwnedSlice(), .frpc_nodes = frpc_nodes, .frps_nodes = frps_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
 }
