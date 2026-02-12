@@ -6,6 +6,11 @@ fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *
         exe.link_data_sections = true;
         exe.link_gc_sections = true;
     }
+    if (target.result.os.tag == .linux) {
+        if (optimize == .ReleaseSmall) {
+            exe.lto = .full;
+        }
+    }
 
     if (optimize == .ReleaseSmall) {
         exe.root_module.unwind_tables = .none;
@@ -14,16 +19,16 @@ fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *
 }
 fn applyCOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
     if (optimize == .ReleaseSmall) {
-        return "-O1 -ffunction-sections -fdata-sections -s";
+        return "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer";
     } else {
         return "-O1 -ffunction-sections -fdata-sections";
     }
 }
 fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
     if (optimize == .ReleaseSmall) {
-        return "-Wl -O1 --gc-sections --strip-all";
+        return "-Wl,--gc-sections,--strip-all,--strip-debug,--discard-all,--no-eh-frame-hdr";
     } else {
-        return "-Wl -O1 --gc-sections";
+        return "-Wl,--gc-sections";
     }
 }
 fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -264,7 +269,8 @@ fn addGoLibrary(
     if (optimize == .ReleaseSmall) {
         go_args.appendSlice(b.allocator, &.{
             "-trimpath",
-            "-ldflags=-linkmode external -s -extldflags=-static -w -buildid=",
+            "-ldflags=-linkmode external -s -w -buildid= -extldflags=-static",
+            "-gcflags=all=-l -B -C",
             "-o",
             output_name,
             ".",
@@ -311,13 +317,9 @@ fn addGoLibrary(
         }
     }
 
-    if (optimize == .ReleaseSmall) {
-        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static -O1 {s}", .{applyCOptimizationCmd(b, optimize)}));
-        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static -O1 {s}", .{applyLinkOptimizationCmd(b, optimize)}));
-    } else {
-        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
-        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
-    }
+    go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+    go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+    go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     return &go_cmd.step;
 }
 
