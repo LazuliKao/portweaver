@@ -1,4 +1,4 @@
-//go:build frpc
+//go:build libfrpc
 
 package main
 

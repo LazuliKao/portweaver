@@ -1,4 +1,4 @@
-//go:build ddns
+//go:build libddns
 
 package main
 

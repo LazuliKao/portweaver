@@ -336,19 +336,19 @@ fn addCombinedGoLib(
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
     }
     const tags = if (frpc and ddns and frps)
-        "frpc,ddns,frps"
+        "libfrpc,libddns,libfrps"
     else if (frpc and ddns)
-        "frpc,ddns"
+        "libfrpc,libddns"
     else if (frpc and frps)
-        "frpc,frps"
+        "libfrpc,libfrps"
     else if (ddns and frps)
-        "ddns,frps"
+        "libddns,libfrps"
     else if (frpc)
-        "frpc"
+        "libfrpc"
     else if (ddns)
-        "ddns"
+        "libddns"
     else if (frps)
-        "frps"
+        "libfrps"
     else
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
     return addGoLibrary(b, target, optimize, "src/impl/golibs", "libgolibs.a", tags);

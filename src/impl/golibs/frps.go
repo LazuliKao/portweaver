@@ -1,4 +1,4 @@
-//go:build frps
+//go:build libfrps
 
 package main
 

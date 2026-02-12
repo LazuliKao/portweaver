@@ -1,3 +1,4 @@
+//go:build libfrpc || libfrps
 package main
 
 import (

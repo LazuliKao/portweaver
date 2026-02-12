@@ -1,4 +1,4 @@
-//go:build frpc || ddns
+//go:build libfrpc || libfrps || libddns
 
 package main
 
