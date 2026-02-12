@@ -1,9 +1,11 @@
 const std = @import("std");
-fn applyLinkOptimization(_: *std.Build, exe: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
+fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
     // fix x_cgo_setenv crash
-    exe.link_function_sections = true;
-    exe.link_data_sections = true;
-    exe.link_gc_sections = true;
+    if (target.result.abi == .musl) {
+        exe.link_function_sections = true;
+        exe.link_data_sections = true;
+        exe.link_gc_sections = true;
+    }
 
     if (optimize == .ReleaseSmall) {
         exe.root_module.unwind_tables = .none;
@@ -34,7 +36,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             .optimize = optimize,
         }),
     });
-    applyLinkOptimization(b, uv, optimize);
+    applyLinkOptimization(b, target, uv, optimize);
 
     uv.addIncludePath(b.path("deps/libuv/include"));
     // libuv has internal headers included from its own C sources.
@@ -533,7 +535,7 @@ pub fn build(b: *std.Build) void {
     }
 
     exe.linkage = .dynamic;
-    applyLinkOptimization(b, exe, optimize);
+    applyLinkOptimization(b, target, exe, optimize);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
