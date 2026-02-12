@@ -12,6 +12,9 @@ pub const FrpcForward = types.FrpcForward;
 pub const PortMapping = types.PortMapping;
 pub const Project = types.Project;
 pub const Config = types.Config;
+pub const ErrorType = types.ErrorType;
+pub const ValidationError = types.ValidationError;
+pub const ErrorCollector = types.ErrorCollector;
 
 pub const parseBool = types.parseBool;
 pub const parsePort = types.parsePort;

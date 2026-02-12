@@ -5,6 +5,109 @@ pub const ConfigError = error{
     InvalidValue,
     UnsupportedFeature,
     JsonParseError,
+    ValidationFailed,
+};
+
+// ── Validation error context ────────────────────────────────────────────
+
+pub const ErrorType = enum {
+    missing_field,
+    wrong_type,
+    out_of_range,
+    invalid_format,
+    empty_value,
+    enum_value_invalid,
+    range_mismatch,
+    conflict,
+};
+
+pub const ValidationError = struct {
+    field_path: []const u8,
+    error_type: ErrorType,
+    expected: []const u8,
+    actual: []const u8,
+    message: []const u8,
+
+    pub fn format(self: ValidationError, writer: anytype) !void {
+        try writer.print("  {s}: {s}", .{ self.field_path, self.message });
+        if (self.expected.len > 0) try writer.print(" (expected {s}", .{self.expected});
+        if (self.actual.len > 0) try writer.print(", got '{s}'", .{self.actual});
+        if (self.expected.len > 0) try writer.writeAll(")");
+    }
+};
+
+/// Collects multiple validation errors during JSON config parsing.
+/// Uses an arena so callers do not need to free individual error strings.
+pub const ErrorCollector = struct {
+    arena: std.heap.ArenaAllocator,
+    errors: std.ArrayList(ValidationError),
+    alloc: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) ErrorCollector {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .errors = .empty,
+            .alloc = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ErrorCollector) void {
+        self.errors.deinit(self.alloc);
+        self.arena.deinit();
+    }
+
+    pub fn hasErrors(self: *const ErrorCollector) bool {
+        return self.errors.items.len > 0;
+    }
+
+    /// Add a validation error with pre-built strings (already in arena or comptime).
+    pub fn add(
+        self: *ErrorCollector,
+        field_path: []const u8,
+        error_type: ErrorType,
+        expected: []const u8,
+        actual: []const u8,
+        message: []const u8,
+    ) void {
+        self.errors.append(self.alloc, .{
+            .field_path = field_path,
+            .error_type = error_type,
+            .expected = expected,
+            .actual = actual,
+            .message = message,
+        }) catch {};
+    }
+
+    /// Convenience: format `actual` from a runtime value.
+    pub fn addFmt(
+        self: *ErrorCollector,
+        field_path: []const u8,
+        error_type: ErrorType,
+        expected: []const u8,
+        comptime actual_fmt: []const u8,
+        actual_args: anytype,
+        message: []const u8,
+    ) void {
+        const actual_str = std.fmt.allocPrint(self.arena.allocator(), actual_fmt, actual_args) catch "";
+        self.add(field_path, error_type, expected, actual_str, message);
+    }
+
+    /// Build a "field.path[idx].child" string inside the arena.
+    pub fn fieldPath(self: *ErrorCollector, comptime fmt: []const u8, args: anytype) []const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch "<oom>";
+    }
+
+    /// Format a human-readable report (caller owns the returned slice).
+    pub fn formatReport(self: *const ErrorCollector, allocator: std.mem.Allocator) ![]const u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(allocator);
+        const w = buf.writer(allocator);
+        try w.print("Configuration has {d} error(s):\n", .{self.errors.items.len});
+        for (self.errors.items) |e| {
+            try w.print("{f}\n", .{e});
+        }
+        return buf.toOwnedSlice(allocator);
+    }
 };
 
 pub const AddressFamily = enum {
