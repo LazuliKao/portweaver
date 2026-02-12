@@ -1309,3 +1309,654 @@ test "json: complex config no leak" {
     try testing.expectEqual(@as(u32, 1), cfg.frps_nodes.count());
     try testing.expectEqual(@as(usize, 1), cfg.ddns_configs.len);
 }
+
+// ── Additional memory safety tests (parse-failure edge cases) ───────────
+
+test "json: no leak - frpc node missing server" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frpc_nodes": {"bad": {"port": 7000, "token": "tk123", "log_level": "debug"}}
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    // frpc_node missing server -> error, but valid project still present
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - frpc node missing port" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frpc_nodes": {"bad": {"server": "1.2.3.4", "token": "secret"}}
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - frps node missing port with many fields" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frps_nodes": {"bad": {
+        \\    "token": "secret",
+        \\    "log_level": "trace",
+        \\    "allow_ports": "1000-2000",
+        \\    "bind_addr": "0.0.0.0",
+        \\    "dashboard_addr": "0.0.0.0",
+        \\    "dashboard_user": "admin",
+        \\    "dashboard_pwd": "password123"
+        \\  }}
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - ddns missing name and dns_provider" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "ddns": [{
+        \\    "dns_secret": "token123",
+        \\    "ipv4_enable": true,
+        \\    "ipv4_url": "https://api.ipify.org",
+        \\    "ipv4_domains": "example.com",
+        \\    "username": "user",
+        \\    "password": "pass",
+        \\    "webhook_url": "https://hooks.example.com/update",
+        \\    "webhook_body": "{\"ip\": \"$ip\"}",
+        \\    "webhook_headers": "Authorization: Bearer token"
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - ddns partial (has name, missing provider)" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "ddns": [{
+        \\    "name": "partial_ddns",
+        \\    "dns_id": "id123",
+        \\    "dns_secret": "secret",
+        \\    "dns_ext_param": "extra"
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - project with remark + zones but missing ports" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "remark": "alloc'd remark that should not leak",
+        \\    "target_address": "10.0.0.1",
+        \\    "src_zone": ["wan", "vpn", "guest"],
+        \\    "dest_zone": ["lan", "dmz"],
+        \\    "family": "ipv4",
+        \\    "protocol": "tcp"
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - project with port_mappings containing invalid entries" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "target_address": "192.168.1.1",
+        \\    "port_mappings": [
+        \\      {"listen_port": "8080-8085", "target_port": "80-85"},
+        \\      {"listen_port": 99999, "target_port": 80},
+        \\      {"listen_port": "bad", "target_port": 80},
+        \\      {"target_port": 80},
+        \\      42
+        \\    ]
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - mix of valid and invalid frpc nodes" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frpc_nodes": {
+        \\    "good": {"server": "1.2.3.4", "port": 7000, "token": "abc", "log_level": "warn"},
+        \\    "bad_no_server": {"port": 7001, "token": "xyz"},
+        \\    "bad_no_port": {"server": "5.6.7.8", "token": "def", "log_level": "error"},
+        \\    "good2": {"server": "9.0.1.2", "port": 7002}
+        \\  }
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    // Has errors from bad nodes, but also valid nodes that need cleanup
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - mix of valid and invalid frps nodes" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frps_nodes": {
+        \\    "good": {"port": 7000, "token": "tk", "bind_addr": "0.0.0.0", "dashboard_addr": "0.0.0.0", "dashboard_user": "admin", "dashboard_pwd": "pwd"},
+        \\    "bad_no_port": {"token": "tk2", "bind_addr": "::0", "allow_ports": "5000-6000"}
+        \\  }
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - wrong type for every field" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "target_address": 12345,
+        \\    "listen_port": "not_a_number",
+        \\    "target_port": [],
+        \\    "remark": 42,
+        \\    "enabled": "not_bool_string",
+        \\    "family": 99,
+        \\    "protocol": true,
+        \\    "src_zone": 123,
+        \\    "dest_zone": false,
+        \\    "open_firewall_port": "garbage",
+        \\    "enable_app_forward": []
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.errors.items.len >= 5);
+}
+
+test "json: no leak - root is a string" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc, "\"just a string\"");
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+}
+
+test "json: no leak - root is a number" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc, "42");
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+}
+
+test "json: no leak - root object missing projects key" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{"frpc_nodes": {"n1": {"server": "1.1.1.1", "port": 7000}}, "not_projects": []}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+}
+
+test "json: no leak - projects is not an array" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{"projects": "not_an_array"}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+}
+
+test "json: no leak - project entry is not an object" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{"projects": ["string_entry", 42, true, null]}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - valid projects + invalid frpc = all cleaned up" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {"remark": "proj1", "target_address": "10.0.0.1", "listen_port": 80, "target_port": 80, "src_zone": ["wan"]},
+        \\    {"remark": "proj2", "target_address": "10.0.0.2", "listen_port": 81, "target_port": 81, "dest_zone": "lan"}
+        \\  ],
+        \\  "frpc_nodes": {
+        \\    "bad": {"port": 7000}
+        \\  }
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - valid projects + invalid ddns = all cleaned up" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {"remark": "r1", "target_address": "10.0.0.1", "listen_port": 80, "target_port": 80}
+        \\  ],
+        \\  "ddns": [
+        \\    {"name": "ok_ddns", "dns_provider": "cloudflare"},
+        \\    {"dns_secret": "orphan_secret", "ipv4_domains": "orphan.com"}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - all sections have errors simultaneously" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {"remark": "bad_project", "target_address": "", "listen_port": 80, "target_port": 80, "src_zone": ["wan", "lan"]}
+        \\  ],
+        \\  "frpc_nodes": {
+        \\    "bad_frpc": {"token": "tk", "log_level": "debug"}
+        \\  },
+        \\  "frps_nodes": {
+        \\    "bad_frps": {"token": "tk", "bind_addr": "0.0.0.0", "allow_ports": "1000-2000", "dashboard_user": "admin"}
+        \\  },
+        \\  "ddns": [
+        \\    {"dns_secret": "sec", "ipv4_url": "https://example.com", "webhook_url": "https://hook.example.com"}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.errors.items.len >= 4);
+}
+
+test "json: no leak - port_mappings with frpc forwards (valid)" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "target_address": "192.168.1.1",
+        \\    "port_mappings": [
+        \\      {
+        \\        "listen_port": 8080,
+        \\        "target_port": 80,
+        \\        "protocol": "tcp",
+        \\        "frpc": [
+        \\          {"node_name": "node1", "remote_port": 9000},
+        \\          {"node_name": "node2", "remote_port": 9001}
+        \\        ]
+        \\      }
+        \\    ]
+        \\  }],
+        \\  "frpc_nodes": {
+        \\    "node1": {"server": "1.2.3.4", "port": 7000},
+        \\    "node2": {"server": "5.6.7.8", "port": 7001}
+        \\  }
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(@as(usize, 2), cfg.projects[0].port_mappings[0].frpc.len);
+}
+
+test "json: no leak - port_mappings with invalid frpc forwards" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "target_address": "192.168.1.1",
+        \\    "port_mappings": [
+        \\      {
+        \\        "listen_port": 8080,
+        \\        "target_port": 80,
+        \\        "frpc": [
+        \\          {"node_name": "n1"},
+        \\          "bad:format:extra",
+        \\          42
+        \\        ]
+        \\      }
+        \\    ]
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - deeply nested errors don't leak" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {
+        \\      "remark": "complex_failure",
+        \\      "target_address": "10.0.0.1",
+        \\      "port_mappings": [
+        \\        {"listen_port": "8080-8085", "target_port": "80-85", "protocol": "tcp"},
+        \\        {"listen_port": 99999, "target_port": 80},
+        \\        {"listen_port": "bad_range", "target_port": "also_bad"}
+        \\      ],
+        \\      "src_zone": ["wan", "vpn"],
+        \\      "dest_zone": "lan",
+        \\      "listen_port": 80,
+        \\      "target_port": 80
+        \\    }
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    // This has both single-port AND port_mappings -> conflict, plus invalid mappings
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - repeated error/success cycle" {
+    const alloc = testing.allocator;
+
+    const bad_path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"remark": "fail", "target_address": "", "listen_port": 80, "target_port": 80}],
+        \\  "frpc_nodes": {"n": {"server": "1.1.1.1", "port": 7000, "token": "t"}}
+        \\}
+    );
+    defer alloc.free(bad_path);
+
+    const good_path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"remark": "ok", "target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frpc_nodes": {"n": {"server": "1.1.1.1", "port": 7000, "token": "t"}}
+        \\}
+    );
+    defer alloc.free(good_path);
+
+    for (0..5) |i| {
+        var ec = types.ErrorCollector.init(alloc);
+        defer ec.deinit();
+        const p = if (i % 2 == 0) bad_path else good_path;
+        if (loadFromJsonFileWithErrors(alloc, p, &ec)) |cfg_val| {
+            var cfg = cfg_val;
+            cfg.deinit(alloc);
+        } else |_| {}
+    }
+}
+
+test "json: no leak - empty string values everywhere" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "remark": "",
+        \\    "target_address": "127.0.0.1",
+        \\    "listen_port": 80,
+        \\    "target_port": 80,
+        \\    "src_zone": ["", "wan", ""],
+        \\    "dest_zone": ""
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+}
+
+test "json: no leak - whitespace-only strings" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{
+        \\    "remark": "  \t  ",
+        \\    "target_address": "  127.0.0.1  ",
+        \\    "listen_port": 80,
+        \\    "target_port": 80
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+}
+
+test "json: no leak - ddns with all ipv4/ipv6 fields filled then missing required" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "ddns": [{
+        \\    "name": "full_ddns",
+        \\    "ipv4_enable": true,
+        \\    "ipv4_get_type": "url",
+        \\    "ipv4_url": "https://api4.ipify.org",
+        \\    "ipv4_net_interface": "eth0",
+        \\    "ipv4_cmd": "curl ifconfig.me",
+        \\    "ipv4_domains": "v4.example.com",
+        \\    "ipv6_enable": true,
+        \\    "ipv6_get_type": "net_interface",
+        \\    "ipv6_url": "https://api6.ipify.org",
+        \\    "ipv6_net_interface": "eth0",
+        \\    "ipv6_cmd": "ip -6 addr",
+        \\    "ipv6_reg": "fe80::.*",
+        \\    "ipv6_domains": "v6.example.com",
+        \\    "ttl": 300,
+        \\    "not_allow_wan_access": false,
+        \\    "username": "user",
+        \\    "password": "pass",
+        \\    "webhook_url": "https://hook.example.com",
+        \\    "webhook_body": "data",
+        \\    "webhook_headers": "X-Key: val"
+        \\  }]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    // Missing dns_provider -> error. All those allocated strings must be freed.
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - multiple valid ddns then one invalid" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "ddns": [
+        \\    {"name": "d1", "dns_provider": "cloudflare", "dns_secret": "s1"},
+        \\    {"name": "d2", "dns_provider": "aliyun", "dns_id": "id2", "dns_secret": "s2"},
+        \\    {"dns_secret": "orphan"}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
+
+test "json: no leak - frps nodes with all optional fields filled" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
+        \\  "frps_nodes": {
+        \\    "full": {
+        \\      "port": 7000,
+        \\      "token": "secret_token",
+        \\      "log_level": "trace",
+        \\      "allow_ports": "1000-9000",
+        \\      "bind_addr": "0.0.0.0",
+        \\      "max_pool_count": 10,
+        \\      "max_ports_per_client": 5,
+        \\      "tcp_mux": true,
+        \\      "udp_mux": false,
+        \\      "kcp_mux": true,
+        \\      "dashboard_addr": "127.0.0.1",
+        \\      "dashboard_user": "admin",
+        \\      "dashboard_pwd": "admin_pwd",
+        \\      "enabled": true
+        \\    }
+        \\  }
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(@as(u32, 1), cfg.frps_nodes.count());
+}
+
+test "json: no leak - large number of invalid projects" {
+    const alloc = testing.allocator;
+    // 10 projects, all missing target_address
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {"remark": "p0", "listen_port": 80, "target_port": 80, "src_zone": ["wan"]},
+        \\    {"remark": "p1", "listen_port": 81, "target_port": 81, "dest_zone": "lan"},
+        \\    {"remark": "p2", "listen_port": 82, "target_port": 82, "family": "ipv4"},
+        \\    {"remark": "p3", "listen_port": 83, "target_port": 83, "protocol": "tcp"},
+        \\    {"remark": "p4", "listen_port": 84, "target_port": 84, "enable_app_forward": true},
+        \\    {"remark": "p5", "listen_port": 85, "target_port": 85, "src_zone": ["wan", "vpn"]},
+        \\    {"remark": "p6", "listen_port": 86, "target_port": 86, "dest_zone": ["lan", "dmz"]},
+        \\    {"remark": "p7", "listen_port": 87, "target_port": 87, "reuseaddr": false},
+        \\    {"remark": "p8", "listen_port": 88, "target_port": 88, "open_firewall_port": false},
+        \\    {"remark": "p9", "listen_port": 89, "target_port": 89, "add_firewall_forward": false}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.errors.items.len >= 10);
+}
+
+test "json: no leak - port 0 and negative ports" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [
+        \\    {"target_address": "127.0.0.1", "listen_port": 0, "target_port": 80},
+        \\    {"target_address": "127.0.0.1", "listen_port": 80, "target_port": -1},
+        \\    {"target_address": "127.0.0.1", "listen_port": 80, "target_port": 99999}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
+    try testing.expect(ec.hasErrors());
+}
