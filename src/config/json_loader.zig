@@ -35,6 +35,7 @@ fn parseJsonPortString(v: std.json.Value, allocator: std.mem.Allocator) ![]const
             if (i <= 0 or i > 65535) return types.ConfigError.InvalidValue;
             // 对于整数，直接分配并返回，无需额外的 dupe
             const result = try std.fmt.allocPrint(allocator, "{d}", .{i});
+            errdefer allocator.free(result);
             try types.validatePortString(result);
             return result;
         },
@@ -88,8 +89,25 @@ fn parseJsonFrpcForwards(
         },
         .array => |a| {
             for (a.items) |item| {
-                const s = try parseJsonString(item);
-                const fwd = try helper.parseFrpcForwardString(allocator, s);
+                const fwd = switch (item) {
+                    .string => |s| try helper.parseFrpcForwardString(allocator, s),
+                    .object => |obj| blk: {
+                        const node_name_v = obj.get("node_name") orelse return types.ConfigError.MissingField;
+                        const remote_port_v = obj.get("remote_port") orelse return types.ConfigError.MissingField;
+                        
+                        const node_name_str = try parseJsonString(node_name_v);
+                        const node_name = try allocator.dupe(u8, std.mem.trim(u8, node_name_str, " \t\r\n"));
+                        errdefer allocator.free(node_name);
+                        
+                        const remote_port = try parseJsonPort(remote_port_v);
+                        
+                        break :blk types.FrpcForward{
+                            .node_name = node_name,
+                            .remote_port = remote_port,
+                        };
+                    },
+                    else => return types.ConfigError.InvalidValue,
+                };
                 try list.append(fwd);
             }
         },
@@ -134,6 +152,9 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             .target_address = undefined,
             .target_port = 0,
         };
+        errdefer {
+            if (project.remark.len > 0) allocator.free(project.remark);
+        }
 
         var have_listen_port = false;
         var have_target_address = false;
@@ -194,6 +215,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
             const trimmed = std.mem.trim(u8, s, " \t\r\n");
             if (trimmed.len == 0) return types.ConfigError.InvalidValue;
             project.target_address = try allocator.dupe(u8, trimmed);
+            errdefer allocator.free(project.target_address);
             have_target_address = true;
         }
 
@@ -232,11 +254,13 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
 
                 if (mapping_obj.get("listen_port")) |port_v| {
                     port_mapping.listen_port = try parseJsonPortString(port_v, allocator);
+                    errdefer allocator.free(port_mapping.listen_port);
                     have_listen = true;
                 }
 
                 if (mapping_obj.get("target_port")) |port_v| {
                     port_mapping.target_port = try parseJsonPortString(port_v, allocator);
+                    errdefer allocator.free(port_mapping.target_port);
                     have_target = true;
                 }
 
@@ -248,6 +272,10 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                 // 解析 FRPC 转发
                 if (mapping_obj.get("frpc")) |frpc_v| {
                     port_mapping.frpc = try parseJsonFrpcForwards(allocator, frpc_v);
+                    errdefer {
+                        for (port_mapping.frpc.?) |*f| f.deinit(allocator);
+                        allocator.free(port_mapping.frpc.?);
+                    }
                 }
 
                 if (!have_listen or !have_target) {
@@ -328,6 +356,7 @@ pub fn loadFromJsonFile(allocator: std.mem.Allocator, path: []const u8) !types.C
                         const trimmed = std.mem.trim(u8, s, " \t\r\n");
                         if (trimmed.len == 0) continue;
                         frpc_node.server = try allocator.dupe(u8, trimmed);
+                        errdefer allocator.free(frpc_node.server);
                         have_server = true;
                     }
 
