@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @cImport({
-    @cInclude("libgolibs.h");
+    @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
 });
 
 pub const DdnsError = error{

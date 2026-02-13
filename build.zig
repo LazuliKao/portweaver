@@ -325,6 +325,7 @@ fn addGoLibrary(
     return &go_cmd.step;
 }
 
+const LibResult = struct { step: *std.Build.Step, dir: std.Build.LazyPath, libname: []const u8, libfilename: []const u8 };
 fn addCombinedGoLib(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -332,7 +333,7 @@ fn addCombinedGoLib(
     frpc: bool,
     ddns: bool,
     frps: bool,
-) *std.Build.Step {
+) LibResult {
     // Determine build tags based on feature flags
     // Handle all possible combinations of frpc, ddns, and frps
 
@@ -355,7 +356,14 @@ fn addCombinedGoLib(
         "libfrps"
     else
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
-    return addGoLibrary(b, target, optimize, "src/impl/golibs", "libgolibs.a", tags);
+    const dist_dir = b.path("src/impl/golibs");
+    const filename = if (target.result.os.tag == .windows) "golibs.lib" else "libgolibs.a";
+    return .{
+        .step = addGoLibrary(b, target, optimize, "src/impl/golibs", filename, tags),
+        .dir = dist_dir,
+        .libname = "golibs",
+        .libfilename = filename,
+    };
 }
 
 // Although this function looks imperative, it does not perform the build
@@ -480,11 +488,34 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(b.path("src/impl/golibs"));
 
         // Static link libgolibs.a
-        const libgolibs_path = b.path("src/impl/golibs/libgolibs.a");
-        exe.addObjectFile(libgolibs_path);
+        if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) {
+            const extract_objects = b.addSystemCommand(&.{
+                b.graph.zig_exe,
+                "ar",
+                "x",
+                b.fmt("../{s}", .{libgolibs_build_step.libfilename}),
+            });
+            std.fs.cwd().access("src/impl/golibs/dist", .{ .mode = .read_only }) catch {
+                std.fs.cwd().makeDir("src/impl/golibs/dist") catch @panic("Failed to create dist directory");
+            };
+            extract_objects.setCwd(b.path("src/impl/golibs/dist"));
+            extract_objects.step.dependOn(libgolibs_build_step.step);
+            exe.step.dependOn(&extract_objects.step);
+            var dir = std.fs.cwd().openDir("src/impl/golibs/dist", .{ .iterate = true }) catch @panic("Failed to open dist directory");
+            defer dir.close();
+            var it = dir.iterate();
+            while (it.next() catch @panic("Failed to iterate over dist directory")) |*entry| {
+                exe.addObjectFile(b.path(b.fmt("src/impl/golibs/dist/{s}", .{entry.name})));
+            }
+        } else {
+            const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
+            exe.addObjectFile(libgolibs_path);
+            // exe.addLibraryPath(libgolibs_build_step.dir);
+            // exe.root_module.linkSystemLibrary(libgolibs_build_step.libname, .{ .preferred_link_mode = .static });
+        }
 
         // Ensure libgolibs is built before the executable
-        exe.step.dependOn(libgolibs_build_step);
+        exe.step.dependOn(libgolibs_build_step.step);
     }
 
     // Add C forwarder implementation

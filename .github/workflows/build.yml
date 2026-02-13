@@ -57,13 +57,16 @@ jobs:
             os: windows-latest
             name: portweaver-windows-x86_64-msvc.exe
 
-          # # Windows arm64 failed yet
-          # - target: aarch64-windows-gnu
-          #   os: windows-11-arm
-          #   name: portweaver-windows-aarch64-gnu.exe
-          # - target: aarch64-windows-msvc
-          #   os: windows-11-arm
-          #   name: portweaver-windows-aarch64-msvc.exe
+          # Windows arm64
+          - target: aarch64-windows-gnu
+            os: windows-11-arm
+            name: portweaver-windows-aarch64-gnu.exe
+            objfix: true
+          - target: aarch64-windows-msvc
+            os: windows-11-arm
+            name: portweaver-windows-aarch64-msvc.exe
+            objfix: true
+
 
           # macOS
           - target: x86_64-macos
@@ -140,7 +143,11 @@ jobs:
           if [ "${{ runner.os }}" == "macOS" ]; then
             ZIG_FLAGS="--sysroot $SDKROOT"
           fi
-          zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dddns=true
+          ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true"
+          if [ "${{ matrix.objfix }}" == "true" ]; then
+            zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }} || true
+          fi
+          zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }}
 
       - name: Prepare Artifact (Linux and macOS)
         if: runner.os == 'Linux' || runner.os == 'macOS'

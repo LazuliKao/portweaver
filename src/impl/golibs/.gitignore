@@ -1,2 +1,5 @@
 libgolibs.a
 libgolibs.h
+golibs.lib
+golibs.h
+dist
