@@ -1,0 +1,13 @@
+{
+  "name": "portweaver-schema-gen",
+  "version": "1.0.0",
+  "description": "JSON Schema generation for PortWeaver configuration",
+  "private": true,
+  "scripts": {
+    "generate": "pnpx ts-json-schema-generator --path schema-types.ts --type \"PortWeaverConfig\" --out ../docs/portweaver-config.schema.json --no-top-ref"
+  },
+  "devDependencies": {
+    "ts-json-schema-generator": "^2.4.0",
+    "typescript": "^5.7.0"
+  }
+}

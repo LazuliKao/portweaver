@@ -1,0 +1,460 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "ddns": {
+          "description": "DDNS configurations",
+          "items": {
+            "$ref": "#/definitions/DdnsConfig"
+          },
+          "type": "array"
+        },
+        "frpc_nodes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/FrpcNode"
+          },
+          "description": "FRP client nodes (key is node name)",
+          "type": "object"
+        },
+        "frps_nodes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/FrpsNode"
+          },
+          "description": "FRP server nodes (key is node name)",
+          "type": "object"
+        },
+        "projects": {
+          "description": "Port forwarding projects",
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "type": "object"
+    },
+    {
+      "allOf": [
+        {
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$schema": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    }
+  ],
+  "definitions": {
+    "AddressFamily": {
+      "description": "Address family restriction",
+      "enum": [
+        "any",
+        "ipv4",
+        "ipv6"
+      ],
+      "type": "string"
+    },
+    "DdnsConfig": {
+      "additionalProperties": false,
+      "description": "DDNS configuration IPv4/IPv6 config fields are flattened with prefixes in JSON",
+      "properties": {
+        "dns_ext_param": {
+          "description": "DNS extended parameter (e.g., Vercel Team ID)",
+          "type": "string"
+        },
+        "dns_id": {
+          "description": "DNS ID (required by some providers)",
+          "type": "string"
+        },
+        "dns_provider": {
+          "description": "DNS provider",
+          "type": "string"
+        },
+        "dns_secret": {
+          "description": "DNS Secret/Token",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Whether this config is enabled",
+          "type": "boolean"
+        },
+        "ipv4_cmd": {
+          "type": "string"
+        },
+        "ipv4_domains": {
+          "type": "string"
+        },
+        "ipv4_enable": {
+          "type": "boolean"
+        },
+        "ipv4_get_type": {
+          "$ref": "#/definitions/DdnsIpGetType"
+        },
+        "ipv4_net_interface": {
+          "type": "string"
+        },
+        "ipv4_url": {
+          "type": "string"
+        },
+        "ipv6_cmd": {
+          "type": "string"
+        },
+        "ipv6_domains": {
+          "type": "string"
+        },
+        "ipv6_enable": {
+          "type": "boolean"
+        },
+        "ipv6_get_type": {
+          "$ref": "#/definitions/DdnsIpGetType"
+        },
+        "ipv6_net_interface": {
+          "type": "string"
+        },
+        "ipv6_reg": {
+          "type": "string"
+        },
+        "ipv6_url": {
+          "type": "string"
+        },
+        "name": {
+          "description": "Configuration name (for display and identification)",
+          "type": "string"
+        },
+        "not_allow_wan_access": {
+          "description": "Disable WAN access",
+          "type": "boolean"
+        },
+        "password": {
+          "description": "Password (required by some providers)",
+          "type": "string"
+        },
+        "ttl": {
+          "description": "TTL in seconds",
+          "type": "number"
+        },
+        "username": {
+          "description": "Username (required by some providers)",
+          "type": "string"
+        },
+        "webhook_body": {
+          "description": "Webhook request body",
+          "type": "string"
+        },
+        "webhook_headers": {
+          "description": "Webhook request headers",
+          "type": "string"
+        },
+        "webhook_url": {
+          "description": "Webhook URL",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "dns_provider"
+      ],
+      "type": "object"
+    },
+    "DdnsIpGetType": {
+      "description": "DDNS IP get method",
+      "enum": [
+        "url",
+        "net_interface",
+        "cmd"
+      ],
+      "type": "string"
+    },
+    "FrpcForward": {
+      "additionalProperties": false,
+      "description": "FRP forwarding configuration In JSON: can be string \"node_name:port\" or object {node_name, remote_port}",
+      "properties": {
+        "node_name": {
+          "description": "Node name",
+          "type": "string"
+        },
+        "remote_port": {
+          "description": "Remote port",
+          "type": "number"
+        }
+      },
+      "required": [
+        "node_name",
+        "remote_port"
+      ],
+      "type": "object"
+    },
+    "FrpcNode": {
+      "additionalProperties": false,
+      "description": "FRP client node configuration",
+      "properties": {
+        "enabled": {
+          "description": "Whether this node is enabled",
+          "type": "boolean"
+        },
+        "log_level": {
+          "description": "Log level",
+          "type": "string"
+        },
+        "port": {
+          "description": "FRP server port",
+          "type": "number"
+        },
+        "server": {
+          "description": "FRP server address",
+          "type": "string"
+        },
+        "token": {
+          "description": "Authentication token",
+          "type": "string"
+        },
+        "use_compression": {
+          "description": "Use compression",
+          "type": "boolean"
+        },
+        "use_encryption": {
+          "description": "Use encryption",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "server",
+        "port"
+      ],
+      "type": "object"
+    },
+    "FrpsNode": {
+      "additionalProperties": false,
+      "description": "FRP server node configuration",
+      "properties": {
+        "allow_ports": {
+          "description": "Allowed ports (e.g., \"8000-9000,10000\")",
+          "type": "string"
+        },
+        "bind_addr": {
+          "description": "Bind address",
+          "type": "string"
+        },
+        "dashboard_addr": {
+          "description": "Dashboard address",
+          "type": "string"
+        },
+        "dashboard_pwd": {
+          "description": "Dashboard password",
+          "type": "string"
+        },
+        "dashboard_user": {
+          "description": "Dashboard username",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Whether this node is enabled",
+          "type": "boolean"
+        },
+        "kcp_mux": {
+          "description": "Enable KCP multiplexing",
+          "type": "boolean"
+        },
+        "log_level": {
+          "description": "Log level",
+          "type": "string"
+        },
+        "max_pool_count": {
+          "description": "Maximum pool count",
+          "type": "number"
+        },
+        "max_ports_per_client": {
+          "description": "Maximum ports per client",
+          "type": "number"
+        },
+        "port": {
+          "description": "Server listening port",
+          "type": "number"
+        },
+        "tcp_mux": {
+          "description": "Enable TCP multiplexing",
+          "type": "boolean"
+        },
+        "token": {
+          "description": "Authentication token",
+          "type": "string"
+        },
+        "udp_mux": {
+          "description": "Enable UDP multiplexing",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    },
+    "PortMapping": {
+      "additionalProperties": false,
+      "description": "Port mapping: one listen port range to one target port range",
+      "properties": {
+        "frpc": {
+          "description": "FRP forwarding list (can be string \"node:port\" or object)",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/definitions/FrpcForward"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        "listen_port": {
+          "description": "Listen port (supports range like \"8080-8090\" or single port like \"8080\" or number)",
+          "type": [
+            "number",
+            "string"
+          ]
+        },
+        "protocol": {
+          "$ref": "#/definitions/Protocol",
+          "description": "Protocol: TCP+UDP / TCP / UDP"
+        },
+        "target_port": {
+          "description": "Target port (supports range like \"80-90\" or single port like \"80\" or number)",
+          "type": [
+            "number",
+            "string"
+          ]
+        }
+      },
+      "required": [
+        "listen_port",
+        "target_port"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "additionalProperties": false,
+      "description": "Port forwarding project/rule\n\nTwo modes (mutually exclusive): 1. Single-port mode: listen_port + target_port 2. Multi-port mode: port_mappings array",
+      "properties": {
+        "add_firewall_forward": {
+          "description": "Add firewall forward rule",
+          "type": "boolean"
+        },
+        "dest_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Destination firewall zone(s) - string or array of strings"
+        },
+        "enable_app_forward": {
+          "description": "Enable application-layer forwarding (Zig network lib, like socat)",
+          "type": "boolean"
+        },
+        "enable_stats": {
+          "description": "Enable traffic statistics (only when enable_app_forward=true)",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Whether this project is enabled",
+          "type": "boolean"
+        },
+        "family": {
+          "$ref": "#/definitions/AddressFamily",
+          "description": "Address family restriction"
+        },
+        "listen_port": {
+          "description": "Listen port (single-port mode)",
+          "type": "number"
+        },
+        "open_firewall_port": {
+          "description": "Open firewall port",
+          "type": "boolean"
+        },
+        "port_mappings": {
+          "description": "Port mappings (multi-port mode, mutually exclusive with listen_port/target_port)",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "preserve_source_ip": {
+          "description": "Preserve source IP (only when add_firewall_forward=true)",
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/definitions/Protocol",
+          "description": "Protocol (only valid in single-port mode)"
+        },
+        "remark": {
+          "description": "Description/remark",
+          "type": "string"
+        },
+        "reuseaddr": {
+          "description": "Reuse address when binding",
+          "type": "boolean"
+        },
+        "src_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Source firewall zone(s) - string or array of strings"
+        },
+        "target_address": {
+          "description": "Target address (required)",
+          "type": "string"
+        },
+        "target_port": {
+          "description": "Target port (single-port mode)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "target_address"
+      ],
+      "type": "object"
+    },
+    "Protocol": {
+      "description": "Protocol type",
+      "enum": [
+        "both",
+        "tcp",
+        "udp"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "PortWeaver configuration Supports two formats: 1. Object: { projects: [...], frpc_nodes: {...}, ... } 2. Array: Project[] (shorthand, only projects)"
+}

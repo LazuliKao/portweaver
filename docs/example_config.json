@@ -1,4 +1,6 @@
+
 {
+  "$schema": "portweaver-config.schema.json",
   "projects": [
     {
       "remark": "范围转发",
@@ -90,10 +92,10 @@
       "enable_app_forward": false,
       "open_firewall_port": true,
       "add_firewall_forward": true,
-      "src_zones": [
+      "src_zone": [
         "wan"
       ],
-      "dest_zones": [
+      "dest_zone": [
         "lan"
       ]
     }
@@ -121,7 +123,7 @@
   "frps_nodes": {
     "server1": {
       "enabled": true,
-      "port": 7000,
+      "port": 7701,
       "token": "default_token_here",
       "log_level": "info",
       "allow_ports": "2000-3000,5000-6000",
@@ -136,7 +138,7 @@
       "dashboard_pwd": "admin_password"
     }
   },
-  "ddns_configs": [
+  "ddns": [
     {
       "name": "cloudflare-home",
       "dns_provider": "cloudflare",
