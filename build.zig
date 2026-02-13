@@ -7,8 +7,10 @@ fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *
         exe.link_gc_sections = true;
     }
     if (target.result.os.tag == .linux) {
-        if (optimize == .ReleaseSmall) {
-            exe.lto = .full;
+        if (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64) {
+            if (optimize == .ReleaseSmall) {
+                exe.lto = .full;
+            }
         }
     }
 
