@@ -6,9 +6,158 @@ const common = @import("app_forward/common.zig");
 const main = @import("../main.zig");
 const event_log = main.event_log;
 const build_options = @import("build_options");
+const uci_firewall = @import("uci_firewall.zig");
+const uci = @import("../uci/mod.zig");
+
+/// Tracks firewall rules for a single FRPS server
+const ServerFirewallManager = struct {
+    allocator: std.mem.Allocator,
+    ctx: uci.UciContext,
+    /// Map: port -> protocol string ("tcp" or "udp")
+    active_ports: std.AutoHashMap(u16, []const u8),
+    lock: std.Thread.Mutex = .{},
+
+    fn init(allocator: std.mem.Allocator) !ServerFirewallManager {
+        const ctx = try uci.UciContext.init();
+        return .{
+            .allocator = allocator,
+            .ctx = ctx,
+            .active_ports = std.AutoHashMap(u16, []const u8).init(allocator),
+        };
+    }
+
+    fn deinit(self: *ServerFirewallManager) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        var it = self.active_ports.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.active_ports.deinit();
+        self.ctx.deinit();
+    }
+
+    /// Add firewall rule for a new proxy
+    fn addProxyRule(self: *ServerFirewallManager, port: u16, proxy_type: []const u8) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        // Determine protocol from proxy type
+        const protocol = if (std.mem.eql(u8, proxy_type, "tcp")) "tcp" else "udp";
+
+        // Check if rule already exists
+        if (self.active_ports.get(port)) |existing_protocol| {
+            if (std.mem.eql(u8, existing_protocol, protocol)) {
+                // Rule already exists
+                return;
+            }
+            // Different protocol on same port - remove old rule first
+            self.allocator.free(existing_protocol);
+            _ = self.active_ports.remove(port);
+        }
+
+        // Add firewall rule
+        const port_str = try std.fmt.allocPrint(self.allocator, "{d}", .{port});
+        defer self.allocator.free(port_str);
+
+        const remark = try std.fmt.allocPrint(
+            self.allocator,
+            "PORTWEAVER_FRPS_{s}_PORT_{d}",
+            .{ std.ascii.upperStringAlloc(self.allocator, proxy_type), port },
+        );
+        defer self.allocator.free(remark);
+
+        try uci_firewall.addFirewallAcceptRule(self.ctx, self.allocator, protocol, port_str, remark, "any");
+
+        // Track this port
+        const protocol_copy = try self.allocator.dupe(u8, protocol);
+        try self.active_ports.put(port, protocol_copy);
+
+        std.log.info("[FRPS Firewall] Added {s} rule for port {d} ({s})", .{ protocol, port, proxy_type });
+    }
+
+    /// Remove firewall rule for a removed proxy
+    fn removeProxyRule(self: *ServerFirewallManager, port: u16, proxy_type: []const u8) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        // Determine protocol from proxy type
+        const protocol = if (std.mem.eql(u8, proxy_type, "tcp")) "tcp" else "udp";
+
+        // Check if we have this port tracked
+        if (self.active_ports.get(port)) |existing_protocol| {
+            if (!std.mem.eql(u8, existing_protocol, protocol)) {
+                // Different protocol - don't remove
+                return;
+            }
+
+            // Remove from tracking
+            self.allocator.free(existing_protocol);
+            _ = self.active_ports.remove(port);
+
+            // Remove firewall rule
+            const port_str = std.fmt.allocPrint(self.allocator, "{d}", .{port}) catch return;
+            defer self.allocator.free(port_str);
+
+            const remark = std.fmt.allocPrint(
+                self.allocator,
+                "PORTWEAVER_FRPS_{s}_PORT_{d}",
+                .{ std.ascii.upperStringAlloc(self.allocator, proxy_type), port },
+            );
+            defer self.allocator.free(remark);
+
+            uci_firewall.removeFirewallRule(self.ctx, self.allocator, protocol, port_str, remark) catch |err| {
+                std.log.warn("[FRPS Firewall] Failed to remove rule: {any}", .{err});
+            };
+
+            std.log.info("[FRPS Firewall] Removed {s} rule for port {d} ({s})", .{ protocol, port, proxy_type });
+        }
+
+        // Reload firewall to apply changes
+        uci_firewall.reloadFirewall(self.allocator) catch |err| {
+            std.log.warn("[FRPS Firewall] Failed to reload firewall: {any}", .{err});
+        };
+    }
+
+    /// Clear all firewall rules for this server
+    fn clearAllRules(self: *ServerFirewallManager) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        var it = self.active_ports.iterator();
+        while (it.next()) |entry| {
+            const port = entry.key_ptr.*;
+            const protocol = entry.value_ptr.*;
+
+            const port_str = std.fmt.allocPrint(self.allocator, "{d}", .{port}) catch continue;
+            defer self.allocator.free(port_str);
+
+            const remark = std.fmt.allocPrint(
+                self.allocator,
+                "PORTWEAVER_FRPS_PORT_{d}",
+                .{port},
+            );
+            defer self.allocator.free(remark);
+
+            uci_firewall.removeFirewallRule(self.ctx, self.allocator, protocol, port_str, remark) catch |err| {
+                std.log.warn("[FRPS Firewall] Failed to remove rule: {any}", .{err});
+            };
+
+            self.allocator.free(protocol);
+        }
+        self.active_ports.clearRetaining();
+
+        // Reload firewall to apply changes
+        uci_firewall.reloadFirewall(self.allocator) catch |err| {
+            std.log.warn("[FRPS Firewall] Failed to reload firewall: {any}", .{err});
+        };
+    }
+};
 
 const ServerHolder = struct {
     server: libfrps.FrpsServer,
+    firewall_manager: ServerFirewallManager,
     started: bool = false,
     lock: std.Thread.Mutex = .{},
 };
@@ -16,6 +165,12 @@ const ServerHolder = struct {
 var servers: ?std.StringHashMap(*ServerHolder) = null;
 var servers_allocator: ?std.mem.Allocator = null;
 var servers_lock: std.Thread.Mutex = .{};
+
+/// Global map for Go callbacks to find firewall managers by server ID
+/// This is needed because the Go callback only provides the server ID
+var firewall_managers: ?std.AutoHashMap(c_int, *ServerFirewallManager) = null;
+var firewall_managers_allocator: ?std.mem.Allocator = null;
+var firewall_managers_lock: std.Thread.Mutex = .{};
 
 fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) void {
     if (holder.started) {
@@ -39,6 +194,50 @@ fn getServerMap(allocator: std.mem.Allocator) !*std.StringHashMap(*ServerHolder)
     return &servers.?;
 }
 
+/// Get or create the firewall managers map
+fn getFirewallManagersMap(allocator: std.mem.Allocator) !*std.AutoHashMap(c_int, *ServerFirewallManager) {
+    if (firewall_managers == null) {
+        firewall_managers = std.AutoHashMap(c_int, *ServerFirewallManager).init(allocator);
+        firewall_managers_allocator = allocator;
+    }
+    return &firewall_managers.?;
+}
+
+/// Callback function called from Go when proxy events occur
+fn proxyEventCallback(
+    event_type: libfrps.ProxyEventType,
+    proxy_name: [*:0]const u8,
+    proxy_type: [*:0]const u8,
+    bind_port: u16,
+    server_id: c_int,
+) callconv(.C) void {
+    _ = proxy_name; // Not currently used
+
+    firewall_managers_lock.lock();
+    defer firewall_managers_lock.unlock();
+
+    if (firewall_managers == null) return;
+
+    const map = &firewall_managers.?;
+    const manager = map.get(server_id) orelse {
+        std.log.warn("[FRPS Callback] Server ID {d} not found in firewall managers", .{server_id});
+        return;
+    };
+
+    const proxy_type_slice = std.mem.sliceTo(proxy_type, 0);
+
+    switch (event_type) {
+        .added => {
+            manager.addProxyRule(bind_port, proxy_type_slice) catch |err| {
+                std.log.err("[FRPS Callback] Failed to add firewall rule: {any}", .{err});
+            };
+        },
+        .removed => {
+            manager.removeProxyRule(bind_port, proxy_type_slice);
+        },
+    }
+}
+
 fn getOrCreateServer(
     allocator: std.mem.Allocator,
     node_name: []const u8,
@@ -59,21 +258,34 @@ fn getOrCreateServer(
     const config_json = try createFrpsConfigJson(allocator, node, node_name);
     defer allocator.free(config_json);
 
+    // Initialize firewall manager
+    const firewall_manager = ServerFirewallManager.init(allocator);
+
+    // Create server with callback
     holder.* = .{
-        .server = try libfrps.FrpsServer.init(
+        .server = try libfrps.FrpsServer.initWithCallback(
             allocator,
             config_json,
             node_name,
+            &proxyEventCallback,
         ),
+        .firewall_manager = firewall_manager,
         .started = false,
         .lock = .{},
     };
+
+    // Register firewall manager in global map
+    firewall_managers_lock.lock();
+    defer firewall_managers_lock.unlock();
+    const fw_map = try getFirewallManagersMap(allocator);
+    try fw_map.put(holder.server.id, &holder.firewall_manager);
 
     servers_lock.lock();
     defer servers_lock.unlock();
     map = try getServerMap(allocator);
     if (map.get(node_name)) |existing| {
         holder.server.deinit();
+        holder.firewall_manager.deinit();
         allocator.destroy(holder);
         return existing;
     }
@@ -135,6 +347,19 @@ pub fn stopAll() void {
     map.deinit();
     servers = null;
     servers_allocator = null;
+
+    // Clean up firewall managers map
+    firewall_managers_lock.lock();
+    defer firewall_managers_lock.unlock();
+    if (firewall_managers) |*fw_map| {
+        var fw_it = fw_map.iterator();
+        while (fw_it.next()) |fw_entry| {
+            fw_entry.value_ptr.*.deinit();
+        }
+        fw_map.deinit();
+        firewall_managers = null;
+        firewall_managers_allocator = null;
+    }
 }
 
 /// FRPS server status

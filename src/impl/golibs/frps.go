@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -18,12 +19,40 @@ import (
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server"
+
+	"github.com/fatedier/frp/server/proxy"
 )
+
+// Proxy event types
+const (
+	ProxyEventAdded   = 1
+	ProxyEventRemoved = 2
+)
+
+// ProxyEventCallback is the C function signature for proxy event callbacks
+// eventType: 1 = proxy added, 2 = proxy removed
+// proxyName: name of the proxy
+// proxyType: type of the proxy (tcp, udp, http, https, etc.)
+// bindPort: the bind port for the proxy
+// serverID: the server ID that owns this proxy
+type ProxyEventCallback func(eventType C.int, proxyName *C.char, proxyType *C.char, bindPort C.int, serverID C.int)
+
+//export FrpsRegisterProxyEventCallback
+func FrpsRegisterProxyEventCallback(callback unsafe.Pointer) {
+	proxyCallbackMutex.Lock()
+	defer proxyCallbackMutex.Unlock()
+	proxyEventCallback = callback
+	fmt.Println("FRPS: Proxy event callback registered")
+}
 
 var (
 	servers      = make(map[int]*serverWrapper)
 	serversMutex sync.RWMutex
 	nextServerID = 1
+
+	// Callback for proxy events
+	proxyEventCallback unsafe.Pointer
+	proxyCallbackMutex sync.RWMutex
 )
 
 type serverWrapper struct {
@@ -36,6 +65,11 @@ type serverWrapper struct {
 	lastError string
 	logs      []string
 	logMutex  sync.Mutex
+
+	// Proxy monitoring
+	proxyMap      map[string]struct{} // Track proxy names
+	proxyMapMutex sync.Mutex
+	monitorCancel context.CancelFunc // Cancel function for proxy monitor goroutine
 }
 
 type serverRingBufferLogger struct {
@@ -54,6 +88,150 @@ func (l *serverRingBufferLogger) Write(p []byte) (n int, err error) {
 	}
 
 	return len(p), nil
+}
+
+// startProxyMonitor starts a goroutine that monitors proxy changes
+func (w *serverWrapper) startProxyMonitor(serverID int) {
+	monitorCtx, monitorCancel := context.WithCancel(w.ctx)
+	w.monitorCancel = monitorCancel
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				w.checkProxyChanges(serverID)
+			case <-monitorCtx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// stopProxyMonitor stops the proxy monitor goroutine
+func (w *serverWrapper) stopProxyMonitor() {
+	if w.monitorCancel != nil {
+		w.monitorCancel()
+		w.monitorCancel = nil
+	}
+}
+
+// checkProxyChanges checks for proxy changes and triggers callbacks
+func (w *serverWrapper) checkProxyChanges(serverID int) {
+	if w.service == nil {
+		return
+	}
+
+	// Get current proxies from the service using reflection
+	// Access the private ctlManager.ctlsByRunID map
+	currentProxies := make(map[string]struct{})
+
+	// Get ctlManager field from service
+	serviceValue := reflect.ValueOf(w.service).Elem()
+	ctlManagerField := serviceValue.FieldByName("ctlManager")
+	if !ctlManagerField.IsValid() {
+		return
+	}
+
+	// Get ctlsByRunID map from ctlManager
+	ctlManagerValue := ctlManagerField.Elem()
+	ctlsByRunIDField := ctlManagerValue.FieldByName("ctlsByRunID")
+	if !ctlsByRunIDField.IsValid() {
+		return
+	}
+
+	// Iterate over all controls
+	ctlsByRunID := ctlsByRunIDField.MapRange()
+	for ctlsByRunID.Next() {
+		controlValue := ctlsByRunID.Value()
+		control := controlValue.Interface().(*server.Control)
+
+		// Get proxies map from control using reflection
+		controlElem := reflect.ValueOf(control).Elem()
+		proxiesField := controlElem.FieldByName("proxies")
+		if !proxiesField.IsValid() {
+			continue
+		}
+
+		// Iterate over all proxies in this control
+		proxiesMap := proxiesField.MapRange()
+		for proxiesMap.Next() {
+			proxyName := proxiesMap.Key().String()
+			pxyValue := proxiesMap.Value()
+			pxy, ok := pxyValue.Interface().(proxy.Proxy)
+			if !ok {
+				continue
+			}
+
+			currentProxies[proxyName] = struct{}{}
+
+			// Check if this is a new proxy
+			w.proxyMapMutex.Lock()
+			_, exists := w.proxyMap[proxyName]
+			w.proxyMapMutex.Unlock()
+
+			if !exists {
+				// New proxy added
+				configurer := pxy.GetConfigurer()
+				baseConfig := configurer.GetBaseConfig()
+				proxyType := baseConfig.Type
+
+				// Get the bind port based on proxy type
+				bindPort := 0
+				switch configurer := configurer.(type) {
+				case *v1.TCPProxyConfig:
+					bindPort = configurer.RemotePort
+				case *v1.UDPProxyConfig:
+					bindPort = configurer.RemotePort
+				case *v1.HTTPProxyConfig:
+					bindPort = 80
+				case *v1.HTTPSProxyConfig:
+					bindPort = 443
+				}
+
+				w.proxyMapMutex.Lock()
+				w.proxyMap[proxyName] = struct{}{}
+				w.proxyMapMutex.Unlock()
+
+				// Trigger callback
+				w.triggerProxyCallback(ProxyEventAdded, proxyName, proxyType, bindPort, serverID)
+			}
+		}
+	}
+
+	// Check for removed proxies
+	w.proxyMapMutex.Lock()
+	for proxyName := range w.proxyMap {
+		if _, exists := currentProxies[proxyName]; !exists {
+			// Proxy removed
+			delete(w.proxyMap, proxyName)
+
+			// Trigger callback - we don't have the proxy info anymore, so use defaults
+			w.triggerProxyCallback(ProxyEventRemoved, proxyName, "", 0, serverID)
+		}
+	}
+	w.proxyMapMutex.Unlock()
+}
+
+// triggerProxyCallback triggers the proxy event callback
+func (w *serverWrapper) triggerProxyCallback(eventType int, proxyName string, proxyType string, bindPort int, serverID int) {
+	proxyCallbackMutex.RLock()
+	callback := proxyEventCallback
+	proxyCallbackMutex.RUnlock()
+
+	if callback != nil {
+		// Convert the callback to the appropriate function type
+		fn := *(*ProxyEventCallback)(unsafe.Pointer(&callback))
+
+		cProxyName := C.CString(proxyName)
+		cProxyType := C.CString(proxyType)
+		defer C.free(unsafe.Pointer(cProxyName))
+		defer C.free(unsafe.Pointer(cProxyType))
+
+		fn(C.int(eventType), cProxyName, cProxyType, C.int(bindPort), C.int(serverID))
+	}
 }
 
 //export FrpsInit
@@ -101,6 +279,7 @@ func FrpsCreateServer(configJSON *C.char, serverName *C.char) C.int {
 		lastError: "",
 		logs:      make([]string, 0),
 		logMutex:  sync.Mutex{},
+		proxyMap:  make(map[string]struct{}),
 	}
 
 	serverID := nextServerID

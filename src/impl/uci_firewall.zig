@@ -465,3 +465,84 @@ pub fn reloadFirewall(allocator: std.mem.Allocator) !void {
         _ = waitpid(pid, &status, 0);
     }
 }
+
+/// 删除特定的防火墙规则
+pub fn removeFirewallRule(
+    ctx: uci.UciContext,
+    allocator: std.mem.Allocator,
+    proto: []const u8,
+    port_str: []const u8,
+    remark: []const u8,
+) !void {
+    var fw_pkg = try ctx.load("firewall");
+    defer fw_pkg.unload() catch {};
+
+    var sections_to_delete = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (sections_to_delete.items) |name| {
+            allocator.free(name);
+        }
+        sections_to_delete.deinit();
+    }
+
+    // 遍历所有 section，查找匹配的规则
+    var sec_it = uci.sections(fw_pkg);
+    while (sec_it.next()) |sec| {
+        const sec_name = uci.cStr(sec.name());
+
+        var name_matches = false;
+        var proto_matches = false;
+        var port_matches = false;
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+
+            if (std.mem.eql(u8, opt_name, "name")) {
+                if (opt.isString()) {
+                    const name_val = uci.cStr(opt.getString());
+                    if (std.mem.eql(u8, name_val, remark)) {
+                        name_matches = true;
+                    }
+                }
+            } else if (std.mem.eql(u8, opt_name, "proto")) {
+                if (opt.isString()) {
+                    const proto_val = uci.cStr(opt.getString());
+                    if (std.mem.eql(u8, proto_val, proto)) {
+                        proto_matches = true;
+                    }
+                }
+            } else if (std.mem.eql(u8, opt_name, "dest_port")) {
+                if (opt.isString()) {
+                    const port_val = uci.cStr(opt.getString());
+                    if (std.mem.eql(u8, port_val, port_str)) {
+                        port_matches = true;
+                    }
+                }
+            }
+        }
+
+        // 如果所有条件都匹配，删除该 section
+        if (name_matches and proto_matches and port_matches) {
+            try sections_to_delete.append(try allocator.dupe(u8, sec_name));
+        }
+    }
+
+    // 删除找到的 sections
+    for (sections_to_delete.items) |sec_name| {
+        var ptr = uci.UciPtr.init();
+        const ptr_str = try std.fmt.allocPrintSentinel(
+            allocator,
+            "firewall.{s}",
+            .{sec_name},
+            0,
+        );
+        defer allocator.free(ptr_str);
+
+        try ctx.parsePtr(&ptr, @constCast(@as([*c]u8, @ptrCast(ptr_str.ptr))));
+        try ctx.delete(&ptr);
+    }
+
+    const overwrite = false;
+    try fw_pkg.commit(overwrite);
+}
