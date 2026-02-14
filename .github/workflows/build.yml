@@ -48,6 +48,15 @@ jobs:
             name: portweaver-linux-armv7-musl
             custom_golang: true
 
+          # Linux arm (soft-float)
+          - target: arm-linux-gnueabi
+            os: ubuntu-latest
+            name: portweaver-linux-arm-gnu
+          - target: arm-linux-musleabi
+            os: ubuntu-latest
+            name: portweaver-linux-arm-musl
+            custom_golang: true
+
           # Linux i386 (32-bit x86)
           - target: x86-linux-gnu
             os: ubuntu-latest
@@ -93,6 +102,9 @@ jobs:
             name: portweaver-macos-aarch64
 
           # RISC-V
+          - target: riscv64-linux-gnu
+            os: ubuntu-latest
+            name: portweaver-linux-riscv64-gnu
           - target: riscv64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-riscv64-musl
