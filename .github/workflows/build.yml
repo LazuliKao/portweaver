@@ -139,11 +139,10 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          ZIG_FLAGS=""
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            ZIG_FLAGS="--sysroot $SDKROOT"
-          fi
           ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true"
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            ZIG_FLAGS="$ZIG_FLAGS --sysroot $SDKROOT"
+          fi
           if [ "${{ matrix.objfix }}" == "true" ]; then
             zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }} || true
           fi
