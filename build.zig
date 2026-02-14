@@ -298,25 +298,24 @@ fn addGoLibrary(
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
 
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
-    if (target.result.abi != .msvc) {
-        const wrapper_dir = b.path("wrapper");
-        go_cmd.addPathDir(wrapper_dir.getPath(b));
-        if (b.graph.host.result.os.tag == .windows) {
-            const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
-            const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
-            const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
-            go_cmd.setEnvironmentVariable("CC", cc_cmd);
-            go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
-            go_cmd.setEnvironmentVariable("AR", ar_cmd);
-        } else {
-            // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
-            const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
-            const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
-            const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
-            go_cmd.setEnvironmentVariable("CC", std.fs.path.basename(cc_wrapper.getPath(b)));
-            go_cmd.setEnvironmentVariable("CXX", std.fs.path.basename(cxx_wrapper.getPath(b)));
-            go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
-        }
+    // Always set CC/CXX/AR for cross-compilation - Go needs the correct C compiler
+    const wrapper_dir = b.path("wrapper");
+    go_cmd.addPathDir(wrapper_dir.getPath(b));
+    if (b.graph.host.result.os.tag == .windows) {
+        const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
+        const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
+        const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
+        go_cmd.setEnvironmentVariable("CC", cc_cmd);
+        go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
+        go_cmd.setEnvironmentVariable("AR", ar_cmd);
+    } else {
+        // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
+        const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
+        const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
+        const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
+        go_cmd.setEnvironmentVariable("CC", std.fs.path.basename(cc_wrapper.getPath(b)));
+        go_cmd.setEnvironmentVariable("CXX", std.fs.path.basename(cxx_wrapper.getPath(b)));
+        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
     }
 
     go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
