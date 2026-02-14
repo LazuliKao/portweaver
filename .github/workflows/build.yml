@@ -48,6 +48,14 @@ jobs:
             name: portweaver-linux-armv7-musl
             custom_golang: true
 
+          # Linux i386 (32-bit x86)
+          - target: x86-linux-gnu
+            os: ubuntu-latest
+            name: portweaver-linux-i386-gnu
+          - target: x86-linux-musl
+            os: ubuntu-latest
+            name: portweaver-linux-i386-musl
+            custom_golang: true
 
           # Windows x86_64
           - target: x86_64-windows-gnu
@@ -56,6 +64,14 @@ jobs:
           - target: x86_64-windows-msvc
             os: windows-latest
             name: portweaver-windows-x86_64-msvc.exe
+
+          # Windows x86 (32-bit)
+          - target: x86-windows-gnu
+            os: ubuntu-latest
+            name: portweaver-windows-x86-gnu.exe
+          - target: x86-windows-msvc
+            os: windows-latest
+            name: portweaver-windows-x86-msvc.exe
 
           # Windows arm64
           - target: aarch64-windows-gnu
