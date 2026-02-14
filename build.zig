@@ -220,8 +220,7 @@ fn addGoLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    lib_dir: []const u8,
-    output_name: []const u8,
+    output_path: []const u8, // Full output path including directory and filename
     tags: ?[]const u8,
 ) *std.Build.Step {
     const os_tag = target.result.os.tag;
@@ -274,24 +273,35 @@ fn addGoLibrary(
             "-ldflags=-linkmode external -s -w -buildid= -extldflags=-static",
             "-gcflags=all=-l -B -C",
             "-o",
-            output_name,
+            output_path,
             ".",
         }) catch @panic("OOM");
     } else {
         go_args.appendSlice(b.allocator, &.{
             "-ldflags=-linkmode external -extldflags=-static",
             "-o",
-            output_name,
+            output_path,
             ".",
         }) catch @panic("OOM");
     }
 
     const go_cmd = b.addSystemCommand(go_args.items);
 
-    go_cmd.setCwd(b.path(lib_dir));
+    // Go source files are always in src/impl/golibs
+    go_cmd.setCwd(b.path("src/impl/golibs"));
 
     go_cmd.setEnvironmentVariable("GOOS", goos);
     go_cmd.setEnvironmentVariable("GOARCH", goarch);
+
+    // Use architecture-specific GOCACHE to avoid conflicts during parallel builds
+    // GOCACHE must be an absolute path, use zig's cache root
+    const go_cache = b.cache_root.join(b.allocator, &.{ "go", goos, goarch }) catch @panic("OOM");
+    const go_cache_rel = b.path(go_cache).getPath(b);
+
+    std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
+
+    // const go_cache_path = go_cache_rel.getPath(b);
+    go_cmd.setEnvironmentVariable("GOCACHE", go_cache_rel);
 
     const zig_exe = b.graph.zig_exe;
     // 构建目标三元组
@@ -355,11 +365,19 @@ fn addCombinedGoLib(
         "libfrps"
     else
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
-    const dist_dir = b.path("src/impl/golibs");
+    // Use architecture-specific output directory for parallel build support
+    const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
+    const arch_dir = b.fmt("src/impl/golibs/dist/{s}", .{target_triple});
     const filename = if (target.result.os.tag == .windows) "golibs.lib" else "libgolibs.a";
+    // Output path is relative to the Go working directory (src/impl/golibs)
+    const output_path = b.fmt("dist/{s}/{s}", .{ target_triple, filename });
+
+    // Ensure output directory exists (at build script parse time)
+    std.fs.cwd().makePath(arch_dir) catch {};
+
     return .{
-        .step = addGoLibrary(b, target, optimize, "src/impl/golibs", filename, tags),
-        .dir = dist_dir,
+        .step = addGoLibrary(b, target, optimize, output_path, tags),
+        .dir = b.path(arch_dir),
         .libname = "golibs",
         .libfilename = filename,
     };
@@ -484,27 +502,31 @@ pub fn build(b: *std.Build) void {
         const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
 
         // Add combined library header file path
-        exe.addIncludePath(b.path("src/impl/golibs"));
+        exe.addIncludePath(libgolibs_build_step.dir);
 
         // Static link libgolibs.a
         if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) {
+            const real_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
+            std.debug.print("Extracting object files from {s}\n", .{real_path.getPath(b)});
             const extract_objects = b.addSystemCommand(&.{
                 b.graph.zig_exe,
                 "ar",
                 "x",
-                b.fmt("../{s}", .{libgolibs_build_step.libfilename}),
+                real_path.getPath(b),
             });
-            std.fs.cwd().access("src/impl/golibs/dist", .{ .mode = .read_only }) catch {
-                std.fs.cwd().makeDir("src/impl/golibs/dist") catch @panic("Failed to create dist directory");
+            const extract_objects_dir = libgolibs_build_step.dir.join(b.allocator, "obj") catch @panic("Failed to get path for extracted object files");
+            const extract_objects_dir_real = extract_objects_dir.getPath(b);
+            std.fs.cwd().access(extract_objects_dir_real, .{ .mode = .read_only }) catch {
+                std.fs.cwd().makeDir(extract_objects_dir_real) catch @panic("Failed to create dist directory");
             };
-            extract_objects.setCwd(b.path("src/impl/golibs/dist"));
+            extract_objects.setCwd(extract_objects_dir);
             extract_objects.step.dependOn(libgolibs_build_step.step);
             exe.step.dependOn(&extract_objects.step);
-            var dir = std.fs.cwd().openDir("src/impl/golibs/dist", .{ .iterate = true }) catch @panic("Failed to open dist directory");
+            var dir = std.fs.cwd().openDir(extract_objects_dir_real, .{ .iterate = true }) catch @panic("Failed to open dist directory");
             defer dir.close();
             var it = dir.iterate();
             while (it.next() catch @panic("Failed to iterate over dist directory")) |*entry| {
-                exe.addObjectFile(b.path(b.fmt("src/impl/golibs/dist/{s}", .{entry.name})));
+                exe.addObjectFile(extract_objects_dir.join(b.allocator, entry.name) catch @panic("Failed to join path for extracted object file"));
             }
         } else {
             const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
