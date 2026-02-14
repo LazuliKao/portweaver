@@ -78,9 +78,6 @@ jobs:
           - target: x86-windows-gnu
             os: ubuntu-latest
             name: portweaver-windows-x86-gnu.exe
-          - target: x86-windows-msvc
-            os: windows-latest
-            name: portweaver-windows-x86-msvc.exe
 
           # Windows arm64
           - target: aarch64-windows-gnu
