@@ -101,6 +101,87 @@ pub fn getVersion(allocator: std.mem.Allocator) ![]const u8 {
     return try allocator.dupe(u8, c_version[0..len]);
 }
 
+pub const ServerStats = struct {
+    status: []const u8,
+    last_error: []const u8,
+    client_count: usize,
+    proxy_count: usize,
+    server_count: usize,
+};
+
+pub fn getServerStats(allocator: std.mem.Allocator) !ServerStats {
+    const c_stats = c.FrpsGetServerStats();
+    defer c.FrpsFreeString(c_stats);
+
+    const len = std.mem.len(c_stats);
+    const json_str = c_stats[0..len];
+
+    return parseServerStatsJson(allocator, json_str);
+}
+
+fn parseServerStatsJson(allocator: std.mem.Allocator, json: []const u8) !ServerStats {
+    var status: []const u8 = "unknown";
+    var last_error: []const u8 = "";
+    var client_count: usize = 0;
+    var proxy_count: usize = 0;
+    var server_count: usize = 0;
+
+    if (std.mem.indexOf(u8, json, "\"status\":\"")) |start| {
+        const value_start = start + 10;
+        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
+            status = json[value_start..end];
+        }
+    }
+
+    if (std.mem.indexOf(u8, json, "\"last_error\":\"")) |start| {
+        const value_start = start + 14;
+        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
+            last_error = json[value_start..end];
+        }
+    }
+
+    if (std.mem.indexOf(u8, json, "\"client_count\":")) |start| {
+        const value_start = start + 15;
+        if (std.mem.indexOfPos(u8, json, value_start, ",")) |end| {
+            const num_str = json[value_start..end];
+            client_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        } else if (std.mem.indexOfPos(u8, json, value_start, "}")) |end| {
+            const num_str = json[value_start..end];
+            client_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        }
+    }
+
+    if (std.mem.indexOf(u8, json, "\"proxy_count\":")) |start| {
+        const value_start = start + 14;
+        if (std.mem.indexOfPos(u8, json, value_start, ",")) |end| {
+            const num_str = json[value_start..end];
+            proxy_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        } else if (std.mem.indexOfPos(u8, json, value_start, "}")) |end| {
+            const num_str = json[value_start..end];
+            proxy_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        }
+    }
+
+    if (std.mem.indexOf(u8, json, "\"server_count\":")) |start| {
+        const value_start = start + 15;
+        if (std.mem.indexOfPos(u8, json, value_start, ",")) |end| {
+            const num_str = json[value_start..end];
+            server_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        } else if (std.mem.indexOfPos(u8, json, value_start, "}")) |end| {
+            const num_str = json[value_start..end];
+            server_count = std.fmt.parseInt(usize, num_str, 10) catch 0;
+        }
+    }
+
+    return ServerStats{
+        .status = try allocator.dupe(u8, status),
+        .last_error = try allocator.dupe(u8, last_error),
+        .client_count = client_count,
+        .proxy_count = proxy_count,
+        .server_count = server_count,
+    };
+}
+
 pub fn cleanup() void {
     c.FrpsCleanup();
 }

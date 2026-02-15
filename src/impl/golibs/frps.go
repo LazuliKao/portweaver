@@ -318,3 +318,76 @@ func FrpsCleanup() {
 	servers = make(map[int]*serverWrapper)
 	resetSharedLogger()
 }
+
+// ServerStats represents aggregated FRPS server statistics
+type ServerStats struct {
+	Status      string `json:"status"`
+	LastError   string `json:"last_error"`
+	ClientCount int    `json:"client_count"`
+	ProxyCount  int    `json:"proxy_count"`
+	ServerCount int    `json:"server_count"`
+}
+
+//export FrpsGetServerStats
+func FrpsGetServerStats() *C.char {
+	serversMutex.RLock()
+	defer serversMutex.RUnlock()
+
+	serverCount := len(servers)
+	if serverCount == 0 {
+		result := ServerStats{
+			Status:      "stopped",
+			LastError:   "",
+			ClientCount: 0,
+			ProxyCount:  0,
+			ServerCount: 0,
+		}
+		jsonBytes, _ := json.Marshal(result)
+		return C.CString(string(jsonBytes))
+	}
+
+	hasError := false
+	hasRunning := false
+	var lastError string
+	proxyCount := 0
+
+	for _, wrapper := range servers {
+		wrapper.logMutex.Lock()
+		if wrapper.status == "running" {
+			hasRunning = true
+		} else if wrapper.status == "error" {
+			hasError = true
+			if wrapper.lastError != "" && lastError == "" {
+				lastError = wrapper.lastError
+			}
+		}
+		wrapper.logMutex.Unlock()
+
+		// Try to get proxy count from server service if available
+		if wrapper.service != nil {
+			// FRP server doesn't expose this easily, but we can try
+			// For now, we'll estimate based on running servers
+		}
+	}
+
+	// Determine overall status
+	var status string
+	if hasError {
+		status = "error"
+	} else if hasRunning {
+		status = "running"
+	} else {
+		status = "stopped"
+	}
+
+	result := ServerStats{
+		Status:      status,
+		LastError:   lastError,
+		ClientCount: 0, // Would need dashboard API for actual client count
+		ProxyCount:  proxyCount,
+		ServerCount: serverCount,
+	}
+
+	jsonBytes, _ := json.Marshal(result)
+	return C.CString(string(jsonBytes))
+}

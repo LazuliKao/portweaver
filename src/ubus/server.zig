@@ -190,6 +190,8 @@ const field_names = struct {
     pub const ddns_enabled: [:0]const u8 = "ddns_enabled";
     pub const ddns_version: [:0]const u8 = "ddns_version";
     pub const ddns_status: [:0]const u8 = "ddns_status";
+    pub const proxy_count: [:0]const u8 = "proxy_count";
+    pub const server_count: [:0]const u8 = "server_count";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -547,21 +549,24 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         return c.UBUS_STATUS_UNKNOWN_ERROR;
     };
     defer {
-        if (status.frpc.version) |v| state.allocator.free(v);
+        if (status.frp_version) |v| state.allocator.free(v);
         if (status.frpc.status) |s| state.allocator.free(s);
         if (status.frpc.last_error) |e| state.allocator.free(e);
-        if (status.frps.version) |v| state.allocator.free(v);
+        if (status.frps.status) |s| state.allocator.free(s);
+        if (status.frps.last_error) |e| state.allocator.free(e);
     }
 
-    // Add FRPC data
+    addBool(&buf, field_names.frp_enabled, status.frp_enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    if (status.frp_version) |v| {
+        const ztv = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        defer state.allocator.free(ztv);
+        addString(&buf, field_names.frp_version, ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+
     const frpc_obj = ubox.blobmsgOpenNested(&buf, "frpc", false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (frpc_obj != null) {
         addBool(&buf, field_names.enabled, status.frpc.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        if (status.frpc.version) |v| {
-            const ztv = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-            defer state.allocator.free(ztv);
-            addString(&buf, "version", ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        }
         if (status.frpc.status) |s| {
             const zts = state.allocator.dupeZ(u8, s) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
             defer state.allocator.free(zts);
@@ -576,15 +581,22 @@ fn handleGetFrpStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         ubox.blobNestEnd(&buf, frpc_obj) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
 
-    // Add FRPS data
     const frps_obj = ubox.blobmsgOpenNested(&buf, "frps", false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (frps_obj != null) {
         addBool(&buf, field_names.enabled, status.frps.enabled) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-        if (status.frps.version) |v| {
-            const ztv = state.allocator.dupeZ(u8, v) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
-            defer state.allocator.free(ztv);
-            addString(&buf, "version", ztv) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (status.frps.status) |s| {
+            const zts = state.allocator.dupeZ(u8, s) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(zts);
+            addString(&buf, field_names.status, zts) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         }
+        if (status.frps.last_error) |e| {
+            const zte = state.allocator.dupeZ(u8, e) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+            defer state.allocator.free(zte);
+            addString(&buf, field_names.last_error, zte) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        }
+        addU32(&buf, field_names.client_count, @intCast(status.frps.client_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU32(&buf, field_names.proxy_count, @intCast(status.frps.proxy_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU32(&buf, field_names.server_count, @intCast(status.frps.server_count)) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         ubox.blobNestEnd(&buf, frps_obj) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     }
 
