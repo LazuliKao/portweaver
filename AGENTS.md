@@ -17,15 +17,18 @@ zig build -Doptimize=ReleaseSmall  # Optimized for embedded
 
 ### Feature Flags (Conditional Compilation)
 ```bash
-zig build -Dfrpc=true       # Enable FRP client support (links libfrp.a)
-zig build -Dddns=true       # Enable DDNS support (links libddns.a)
+zig build -Dfrpc=true       # Enable FRP client support
+zig build -Dfrps=true       # Enable FRP server support
+zig build -Dddns=true       # Enable DDNS support
 zig build -Djson=true       # Enable JSON config file support
-zig build -Duci=true        # Enable UCI config support (default)
-zig build -Dubus=true       # Enable UBUS integration (default)
+zig build -Duci=true        # Enable UCI config support
+zig build -Dubus=true       # Enable UBUS integration
 
-# Combined example:
-zig build -Dfrpc=true -Dddns=true -Doptimize=ReleaseSmall
+# Combined example (all Go features compiled into single libgolibs.a):
+zig build -Dfrpc=true -Dddns=true -Dfrps=true -Doptimize=ReleaseSmall
 ```
+
+**Note:** FRP client, FRP server, and DDNS are compiled together into `libgolibs.a` from `src/impl/golibs/`.
 
 ### Testing
 ```bash
@@ -53,13 +56,13 @@ zig build dev-remote        # Watch, build, and auto-upload to remote (requires 
 ```
 src/
 ├── main.zig                 # Application entry point, main loop
+├── all_tests.zig            # Test aggregator for `zig build test`
 ├── config/
 │   ├── types.zig           # Configuration data structures
 │   ├── mod.zig             # Config module exports
 │   ├── provider.zig        # Config provider abstraction
 │   ├── uci_loader.zig      # UCI config loading
 │   ├── json_loader.zig     # JSON config loading (optional)
-│   ├── file_loader.zig     # File I/O utilities
 │   └── helper.zig          # Config parsing helpers
 ├── impl/
 │   ├── app_forward.zig     # Application-layer forwarding (TCP/UDP)
@@ -67,31 +70,41 @@ src/
 │   │   ├── common.zig      # Shared forwarding utilities
 │   │   ├── uv.zig          # libuv integration
 │   │   ├── tcp_forwarder_uv.zig  # TCP forwarder implementation
-│   │   └── udp_forwarder_uv.zig  # UDP forwarder implementation
+│   │   ├── udp_forwarder_uv.zig  # UDP forwarder implementation
+│   │   └── forwarder/      # C forwarder implementation
 │   ├── uci_firewall.zig    # Firewall rule management
-│   ├── frp_forward.zig     # FRP forwarding logic
+│   ├── frpc_forward.zig    # FRP client forwarding logic
+│   ├── frps_forward.zig    # FRP server forwarding logic
 │   ├── frp_status.zig      # FRP status monitoring
 │   ├── frpc/
-│   │   ├── libfrp.zig      # FRP C API bindings
-│   │   └── example.zig     # FRP usage example
+│   │   └── libfrpc.zig     # FRP client C API bindings
+│   ├── frps/
+│   │   └── libfrps.zig     # FRP server C API bindings
+│   ├── golibs/             # Go library sources (FRP client/server + DDNS)
 │   ├── ddns_manager.zig    # DDNS management
 │   ├── ddns/
-│   │   ├── libddns.zig     # DDNS C API bindings
-│   │   └── example.zig     # DDNS usage example
+│   │   └── libddns.zig     # DDNS C API bindings
 │   └── project_status.zig  # Project status tracking
 ├── uci/
 │   ├── mod.zig             # UCI module exports
 │   ├── types.zig           # UCI data types
-│   ├── libuci.zig          # libuci C bindings
-│   └── [platform-specific files]
+│   └── libuci.zig          # libuci C bindings
 ├── ubus/
 │   ├── server.zig          # UBUS RPC server
 │   ├── libubus.zig         # libubus C bindings
-│   ├── ubox.zig            # ubox utilities
-│   └── [platform-specific files]
+│   ├── libblobmsg_json.zig # blobmsg JSON utilities
+│   └── ubox.zig            # ubox utilities
 ├── loader/
 │   └── dynamic_lib.zig     # Dynamic library loading
 └── event_log.zig           # Event logging system
+
+deps/                        # External C libraries
+├── libuv/                  # libuv event loop library
+├── uci/                    # libuci headers
+├── ubus/                   # libubus headers
+└── openwrt-tools/          # OpenWrt utility headers
+
+wrapper/                     # CGO cross-compile wrapper scripts
 ```
 
 ---
@@ -159,24 +172,47 @@ const data = file.readAllAlloc(allocator, 1024 * 1024) catch |err| {
 
 ## 4. Important Context: Feature Modules
 
-### FRP Integration (Statically Linked)
+### FRP Client Integration (Statically Linked)
 
-**FRP is NOT an external program** — it is a statically linked library (`libfrp.a`) compiled from Go and linked into the portweaver binary at build time.
+**FRP is NOT an external program** — it is a statically linked library compiled from Go and linked into the portweaver binary at build time.
 
 - **Enable**: Use build flag `-Dfrpc=true`
 - **Check if enabled**: Use `build_options.frpc_mode` (compile-time constant)
-- **Get version**: Import `src/impl/frpc/libfrp.zig` and call `libfrp.getVersion(allocator)`
+- **Get version**: Import `src/impl/frpc/libfrpc.zig` and call `libfrpc.getVersion(allocator)`
 - **DO NOT**: Try to detect FRP by running external commands (`pidof frpc`, `frpc --version`)
-- **DO**: Check `build_options.frpc_mode` and use libfrp C API through Zig bindings
+- **DO**: Check `build_options.frpc_mode` and use libfrpc C API through Zig bindings
 
-**Build Integration** (in `build.zig`):
-- FRP library built from `src/impl/frpc/libfrpc-go/libfrp.go`
-- Output: `src/impl/frpc/libfrpc-go/libfrp.a`
-- Linked only when `-Dfrpc=true` is set
+### FRP Server Integration (Statically Linked)
+
+PortWeaver can act as an FRP server, allowing other clients to connect for reverse proxying.
+
+- **Enable**: Use build flag `-Dfrps=true`
+- **Check if enabled**: Use `build_options.frps_mode` (compile-time constant)
+- **Get version**: Import `src/impl/frps/libfrps.zig` and call `libfrps.getVersion(allocator)`
+- **DO NOT**: Try to detect FRPS by running external commands
+- **DO**: Check `build_options.frps_mode` and use libfrps C API through Zig bindings
+
+**FRPS Configuration** (UCI):
+```uci
+config frps_node 'main'
+    option enabled '1'
+    option port '7000'
+    option token 'your_token'
+    option log_level 'info'
+    option allow_ports '10000-20000'
+    option bind_addr '0.0.0.0'
+    option max_pool_count '5'
+    option tcp_mux '1'
+    option udp_mux '1'
+    option kcp_mux '1'
+    option dashboard_addr '0.0.0.0'
+    option dashboard_user 'admin'
+    option dashboard_pwd 'admin'
+```
 
 ### DDNS Integration (Statically Linked)
 
-**DDNS is a statically linked library** (`libddns.a`) compiled from Go and linked into the portweaver binary at build time.
+**DDNS is a statically linked library** compiled from Go and linked into the portweaver binary at build time.
 
 - **Enable**: Use build flag `-Dddns=true`
 - **Check if enabled**: Use `build_options.ddns_mode` (compile-time constant)
@@ -184,20 +220,24 @@ const data = file.readAllAlloc(allocator, 1024 * 1024) catch |err| {
 - **DO NOT**: Try to detect DDNS by running external commands
 - **DO**: Check `build_options.ddns_mode` and use libddns C API through Zig bindings
 
-**Build Integration** (in `build.zig`):
-- DDNS library built from `src/impl/ddns/libddns-go/libddns.go`
-- Output: `src/impl/ddns/libddns-go/libddns.a`
-- Linked only when `-Dddns=true` is set
-
 **Configuration** (UCI):
 ```uci
-config project 'ddns_example'
-    option remark 'DDNS Service'
-    option enable_ddns '1'
-    option ddns_provider 'cloudflare'
-    option ddns_domain 'example.com'
-    option ddns_token 'your-token'
+config ddns 'example'
+    option enabled '1'
+    option name 'my-ddns'
+    option dns_provider 'cloudflare'
+    option dns_secret 'your-token'
+    option ttl '3600'
 ```
+
+### Go Library Build Integration
+
+FRP client, FRP server, and DDNS are compiled together into a single `libgolibs.a`:
+
+- **Source**: `src/impl/golibs/`
+- **Output**: `src/impl/golibs/dist/<target-triple>/libgolibs.a`
+- **Build tags**: Automatically selected based on enabled features
+- **Linked when**: Any of `-Dfrpc=true`, `-Dfrps=true`, or `-Dddns=true` is set
 
 ### Application-Layer Forwarding
 
@@ -257,15 +297,40 @@ Pure Zig implementation using libuv for TCP/UDP forwarding (no system firewall r
 remark              # Project description
 family              # IPv4, IPv6, or both
 protocol            # TCP, UDP, or TCP+UDP
-listen_port         # Local listening port
+listen_port         # Local listening port (single port mode)
 target_address      # Destination IP
-target_port         # Destination port
+target_port         # Destination port (single port mode)
+port_mappings       # Port mapping list (multi-port/range mode)
+src_zones           # Firewall source zones
+dest_zones          # Firewall destination zones
 reuseaddr           # Reuse local address
 open_firewall_port  # Open firewall port
 add_firewall_forward # Add firewall forward rule
+preserve_source_ip  # Keep source IP (only when add_firewall_forward=true)
 enable_app_forward  # Use app-layer forwarding
-enable_frp          # Use FRP forwarding
-enable_ddns         # Use DDNS service
+enable_stats        # Enable traffic statistics
+frpc                # FRP forwarding config (node_name + remote_port)
+```
+
+**FRPC Node Configuration** (in `frpc_nodes`):
+```
+server              # FRP server address
+port                # FRP server port
+token               # Authentication token
+log_level           # Log level (info, debug, warn, error)
+use_encryption      # Enable encryption
+use_compression     # Enable compression
+```
+
+**FRPS Node Configuration** (in `frps_nodes`):
+```
+port                # Server listen port
+token               # Authentication token
+allow_ports         # Allowed client port range
+bind_addr           # Bind address
+max_pool_count      # Max connection pool size
+tcp_mux/udp_mux/kcp_mux  # Multiplexing options
+dashboard_*         # Dashboard settings
 ```
 
 ---
@@ -302,10 +367,12 @@ enable_ddns         # Use DDNS service
 | Add UBUS RPC method | `src/ubus/server.zig` |
 | Add UCI integration | `src/uci/libuci.zig` |
 | Modify firewall rules | `src/impl/uci_firewall.zig` |
-| Add FRP feature | `src/impl/frpc/libfrp.zig`, `src/impl/frp_*.zig` |
+| Add FRP client feature | `src/impl/frpc/libfrpc.zig`, `src/impl/frpc_forward.zig` |
+| Add FRP server feature | `src/impl/frps/libfrps.zig`, `src/impl/frps_forward.zig` |
 | Add DDNS feature | `src/impl/ddns/libddns.zig`, `src/impl/ddns_manager.zig` |
 | Add app-layer forwarding | `src/impl/app_forward/` |
 | Event logging | `src/event_log.zig` |
+| Go library source | `src/impl/golibs/` |
 
 ---
 
@@ -323,14 +390,14 @@ enable_ddns         # Use DDNS service
 
 The `build.zig` file orchestrates:
 - **libuv compilation** from `deps/libuv/` (C library)
-- **FRP library compilation** from Go (when `-Dfrpc=true`)
-- **DDNS library compilation** from Go (when `-Dddns=true`)
+- **Go library compilation** from `src/impl/golibs/` (when any Go feature enabled)
 - **Zig executable compilation** with conditional imports
 - **Cross-compilation support** via Zig's target system
 
 Key functions:
 - `addLibuv()` — Builds libuv static library
-- `addGoLibrary()` — Generic Go library builder (used for FRP and DDNS)
-- `addLibFrp()` — Builds FRP library
-- `addLibDdns()` — Builds DDNS library
+- `addGoLibrary()` — Generic Go library builder (used for combined golibs)
+- `addCombinedGoLib()` — Builds combined FRP+DDNS library (`libgolibs.a`)
+- `createWrapperScript()` — Creates CGO cross-compile wrapper scripts
+- `applyLinkOptimization()` — Applies LTO and section optimization
 - `build()` — Main build orchestration
