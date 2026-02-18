@@ -51,6 +51,7 @@ type serverWrapper struct {
 	cancel    context.CancelFunc
 	config    *v1.ServerConfig
 	name      string
+	routingID string
 	status    string
 	lastError string
 	logs      []string
@@ -189,6 +190,7 @@ func FrpsCreateServer(cConfig *C.FrpsConfig) C.int {
 		cancel:    cancel,
 		config:    &cfg,
 		name:      name,
+		routingID: "",
 		status:    "stopped",
 		lastError: "",
 		logs:      make([]string, 0),
@@ -215,10 +217,16 @@ func FrpsStartServer(serverID C.int) C.int {
 	}
 
 	logger := &serverRingBufferLogger{wrapper: wrapper}
-	logKey := fmt.Sprintf("frps-%d", serverID)
 
 	initSharedLogger(wrapper.config.Log.Level)
-	addLogWriter(logKey, logger)
+
+	// Generate a routing UUID and inject it as the first (lowest-priority)
+	// xlog prefix so every log line from this instance — including lines from
+	// FRP's internal child goroutines that inherit this context — contains the
+	// unique token "[uuid]". The dispatch writer matches on this token.
+	routingID := newRoutingID()
+	wrapper.routingID = routingID
+	registerInstanceWriter(routingID, logger)
 
 	lvl := strings.ToLower(strings.TrimSpace(wrapper.config.Log.Level))
 
@@ -226,7 +234,12 @@ func FrpsStartServer(serverID C.int) C.int {
 	if name == "" {
 		name = fmt.Sprintf("server-%d", serverID)
 	}
-	serverXLog := xlog.New().AppendPrefix(name)
+	// Priority 1: routing tag (displayed first, used for dispatch matching)
+	// Priority 10: human-readable name (displayed second via AppendPrefix default)
+	// Rendered in every log line as: [pw:xxxxxxxxxxxxxxxx] [name] ...
+	serverXLog := xlog.New().
+		AddPrefix(xlog.LogPrefix{Name: "routing-id", Value: "pw:" + routingID, Priority: 1}).
+		AppendPrefix(name)
 
 	ctxWithLogger := xlog.NewContext(wrapper.ctx, serverXLog)
 	wrapper.ctx = ctxWithLogger
@@ -256,7 +269,7 @@ func FrpsStartServer(serverID C.int) C.int {
 		wrapper.logMutex.Unlock()
 	}
 
-	svr, err := server.NewService(wrapper.config)
+	svr, err := server.NewService(wrapper.ctx, wrapper.config)
 	if err != nil {
 		fmt.Printf("Failed to create frp server service: %v\n", err)
 		return -2
@@ -265,6 +278,8 @@ func FrpsStartServer(serverID C.int) C.int {
 	wrapper.service = svr
 
 	go func() {
+		defer unregisterInstanceWriter(routingID)
+
 		wrapper.logMutex.Lock()
 		wrapper.status = "running"
 		wrapper.logMutex.Unlock()
@@ -294,8 +309,7 @@ func FrpsStopServer(serverID C.int) C.int {
 		wrapper.service = nil
 	}
 
-	logKey := fmt.Sprintf("frps-%d", serverID)
-	removeLogWriter(logKey)
+	unregisterInstanceWriter(wrapper.routingID)
 
 	wrapper.logMutex.Lock()
 	wrapper.status = "stopped"
@@ -322,9 +336,7 @@ func FrpsDestroyServer(serverID C.int) C.int {
 		wrapper.service = nil
 	}
 
-	logKey := fmt.Sprintf("frps-%d", serverID)
-	removeLogWriter(logKey)
-
+	unregisterInstanceWriter(wrapper.routingID)
 	delete(servers, int(serverID))
 
 	return 0

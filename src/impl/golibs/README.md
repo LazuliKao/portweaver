@@ -1,0 +1,1 @@
+go mod edit -replace github.com/fatedier/frp=github.com/LazuliKao/frp@master

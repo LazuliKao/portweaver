@@ -37,6 +37,7 @@ type clientWrapper struct {
 	config         *v1.ClientCommonConfig
 	proxies        []v1.TypedProxyConfig
 	name           string
+	routingID      string
 	status         string
 	lastError      string
 	logs           []string
@@ -121,6 +122,7 @@ func FrpcCreateClient(
 		config:         &cfg,
 		proxies:        make([]v1.TypedProxyConfig, 0),
 		name:           name,
+		routingID:      "",
 		status:         "stopped",
 		lastError:      "",
 		logs:           make([]string, 0),
@@ -262,10 +264,16 @@ func FrpcStartClient(clientID C.int) C.int {
 	}
 
 	logger := &clientRingBufferLogger{wrapper: wrapper}
-	logKey := fmt.Sprintf("frpc-%d", clientID)
 
 	initSharedLogger(wrapper.config.Log.Level)
-	addLogWriter(logKey, logger)
+
+	// Generate a routing UUID and inject it as the first (lowest-priority)
+	// xlog prefix so every log line from this instance — including lines from
+	// FRP's internal child goroutines that inherit this context — contains the
+	// unique token "[uuid]". The dispatch writer matches on this token.
+	routingID := newRoutingID()
+	wrapper.routingID = routingID
+	registerInstanceWriter(routingID, logger)
 
 	lvl := strings.ToLower(strings.TrimSpace(wrapper.config.Log.Level))
 
@@ -273,7 +281,12 @@ func FrpcStartClient(clientID C.int) C.int {
 	if name == "" {
 		name = fmt.Sprintf("client-%d", clientID)
 	}
-	clientXLog := xlog.New().AppendPrefix(name)
+	// Priority 1: routing tag (displayed first, used for dispatch matching)
+	// Priority 10: human-readable name (displayed second via AppendPrefix default)
+	// Rendered in every log line as: [pw:xxxxxxxxxxxxxxxx] [name] ...
+	clientXLog := xlog.New().
+		AddPrefix(xlog.LogPrefix{Name: "routing-id", Value: "pw:" + routingID, Priority: 1}).
+		AppendPrefix(name)
 
 	ctxWithLogger := xlog.NewContext(wrapper.ctx, clientXLog)
 	wrapper.ctx = ctxWithLogger
@@ -303,7 +316,7 @@ func FrpcStartClient(clientID C.int) C.int {
 		wrapper.logMutex.Unlock()
 	}
 
-	svr, err := client.NewService(client.ServiceOptions{
+	svr, err := client.NewService(wrapper.ctx, client.ServiceOptions{
 		Common:      wrapper.config,
 		ProxyCfgs:   makeProxyConfigurers(wrapper.proxies),
 		VisitorCfgs: nil,
@@ -316,6 +329,8 @@ func FrpcStartClient(clientID C.int) C.int {
 	wrapper.service = svr
 
 	go func() {
+		defer unregisterInstanceWriter(routingID)
+
 		wrapper.logMutex.Lock()
 		wrapper.status = "connected"
 		wrapper.logMutex.Unlock()
@@ -351,8 +366,7 @@ func FrpcStopClient(clientID C.int) C.int {
 		wrapper.service = nil
 	}
 
-	logKey := fmt.Sprintf("frpc-%d", clientID)
-	removeLogWriter(logKey)
+	unregisterInstanceWriter(wrapper.routingID)
 
 	wrapper.logMutex.Lock()
 	wrapper.status = "stopped"
@@ -379,9 +393,7 @@ func FrpcDestroyClient(clientID C.int) C.int {
 		wrapper.service = nil
 	}
 
-	logKey := fmt.Sprintf("frpc-%d", clientID)
-	removeLogWriter(logKey)
-
+	unregisterInstanceWriter(wrapper.routingID)
 	delete(clients, int(clientID))
 
 	return 0
