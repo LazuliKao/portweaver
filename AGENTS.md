@@ -192,24 +192,6 @@ PortWeaver can act as an FRP server, allowing other clients to connect for rever
 - **DO NOT**: Try to detect FRPS by running external commands
 - **DO**: Check `build_options.frps_mode` and use libfrps C API through Zig bindings
 
-**FRPS Configuration** (UCI):
-```uci
-config frps_node 'main'
-    option enabled '1'
-    option port '7000'
-    option token 'your_token'
-    option log_level 'info'
-    option allow_ports '10000-20000'
-    option bind_addr '0.0.0.0'
-    option max_pool_count '5'
-    option tcp_mux '1'
-    option udp_mux '1'
-    option kcp_mux '1'
-    option dashboard_addr '0.0.0.0'
-    option dashboard_user 'admin'
-    option dashboard_pwd 'admin'
-```
-
 ### DDNS Integration (Statically Linked)
 
 **DDNS is a statically linked library** compiled from Go and linked into the portweaver binary at build time.
@@ -219,16 +201,6 @@ config frps_node 'main'
 - **Get version**: Import `src/impl/ddns/libddns.zig` and call `libddns.getVersion(allocator)`
 - **DO NOT**: Try to detect DDNS by running external commands
 - **DO**: Check `build_options.ddns_mode` and use libddns C API through Zig bindings
-
-**Configuration** (UCI):
-```uci
-config ddns 'example'
-    option enabled '1'
-    option name 'my-ddns'
-    option dns_provider 'cloudflare'
-    option dns_secret 'your-token'
-    option ttl '3600'
-```
 
 ### Go Library Build Integration
 
@@ -291,48 +263,6 @@ Pure Zig implementation using libuv for TCP/UDP forwarding (no system firewall r
 - **File**: User-specified JSON file
 - **Format**: Array of project objects or `{ "projects": [...] }`
 - **Loader**: `src/config/json_loader.zig`
-
-### Configuration Fields
-```
-remark              # Project description
-family              # IPv4, IPv6, or both
-protocol            # TCP, UDP, or TCP+UDP
-listen_port         # Local listening port (single port mode)
-target_address      # Destination IP
-target_port         # Destination port (single port mode)
-port_mappings       # Port mapping list (multi-port/range mode)
-src_zones           # Firewall source zones
-dest_zones          # Firewall destination zones
-reuseaddr           # Reuse local address
-open_firewall_port  # Open firewall port
-add_firewall_forward # Add firewall forward rule
-preserve_source_ip  # Keep source IP (only when add_firewall_forward=true)
-enable_app_forward  # Use app-layer forwarding
-enable_stats        # Enable traffic statistics
-frpc                # FRP forwarding config (node_name + remote_port)
-```
-
-**FRPC Node Configuration** (in `frpc_nodes`):
-```
-server              # FRP server address
-port                # FRP server port
-token               # Authentication token
-log_level           # Log level (info, debug, warn, error)
-use_encryption      # Enable encryption
-use_compression     # Enable compression
-```
-
-**FRPS Node Configuration** (in `frps_nodes`):
-```
-port                # Server listen port
-token               # Authentication token
-allow_ports         # Allowed client port range
-bind_addr           # Bind address
-max_pool_count      # Max connection pool size
-tcp_mux/udp_mux/kcp_mux  # Multiplexing options
-dashboard_*         # Dashboard settings
-```
-
 ---
 
 ## 7. Agent Operational Guidelines

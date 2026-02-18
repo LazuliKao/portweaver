@@ -43,35 +43,38 @@ export interface FrpcNode {
 
 /**
  * FRP server node configuration
+ * Aligned with FRP v1 ServerConfig
  */
 export interface FrpsNode {
   /** Whether this node is enabled */
   enabled?: boolean;
-  /** Server listening port */
-  port: number;
-  /** Authentication token */
+  /** Server listening port (FRP v1: BindPort) */
+  bind_port?: number;
+  /** @deprecated Use bind_port instead. Kept for backward compatibility. */
+  port?: number;
+  /** Authentication token (FRP v1: Auth.Token) */
+  auth_token?: string;
+  /** @deprecated Use auth_token instead. Kept for backward compatibility. */
   token?: string;
   /** Log level */
   log_level?: string;
   /** Allowed ports (e.g., "8000-9000,10000") */
   allow_ports?: string;
-  /** Bind address */
+  /** Bind address (FRP v1: BindAddr) */
   bind_addr?: string;
-  /** Maximum pool count */
+  /** Maximum pool count (FRP v1: Transport.MaxPoolCount) */
   max_pool_count?: number;
-  /** Maximum ports per client */
+  /** Maximum ports per client (FRP v1: MaxPortsPerClient) */
   max_ports_per_client?: number;
-  /** Enable TCP multiplexing */
+  /** Enable TCP multiplexing (FRP v1: Transport.TCPMux) */
   tcp_mux?: boolean;
-  /** Enable UDP multiplexing */
-  udp_mux?: boolean;
-  /** Enable KCP multiplexing */
-  kcp_mux?: boolean;
-  /** Dashboard address */
+  /** Dashboard address (FRP v1: WebServer.Addr) */
   dashboard_addr?: string;
-  /** Dashboard username */
+  /** Dashboard port (FRP v1: WebServer.Port) */
+  dashboard_port?: number;
+  /** Dashboard username (FRP v1: WebServer.User) */
   dashboard_user?: string;
-  /** Dashboard password */
+  /** Dashboard password (FRP v1: WebServer.Password) */
   dashboard_pwd?: string;
 }
 

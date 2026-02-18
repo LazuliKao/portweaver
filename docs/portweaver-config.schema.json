@@ -242,34 +242,42 @@
     },
     "FrpsNode": {
       "additionalProperties": false,
-      "description": "FRP server node configuration",
+      "description": "FRP server node configuration Aligned with FRP v1 ServerConfig",
       "properties": {
         "allow_ports": {
           "description": "Allowed ports (e.g., \"8000-9000,10000\")",
           "type": "string"
         },
-        "bind_addr": {
-          "description": "Bind address",
+        "auth_token": {
+          "description": "Authentication token (FRP v1: Auth.Token)",
           "type": "string"
+        },
+        "bind_addr": {
+          "description": "Bind address (FRP v1: BindAddr)",
+          "type": "string"
+        },
+        "bind_port": {
+          "description": "Server listening port (FRP v1: BindPort)",
+          "type": "number"
         },
         "dashboard_addr": {
-          "description": "Dashboard address",
+          "description": "Dashboard address (FRP v1: WebServer.Addr)",
           "type": "string"
         },
+        "dashboard_port": {
+          "description": "Dashboard port (FRP v1: WebServer.Port)",
+          "type": "number"
+        },
         "dashboard_pwd": {
-          "description": "Dashboard password",
+          "description": "Dashboard password (FRP v1: WebServer.Password)",
           "type": "string"
         },
         "dashboard_user": {
-          "description": "Dashboard username",
+          "description": "Dashboard username (FRP v1: WebServer.User)",
           "type": "string"
         },
         "enabled": {
           "description": "Whether this node is enabled",
-          "type": "boolean"
-        },
-        "kcp_mux": {
-          "description": "Enable KCP multiplexing",
           "type": "boolean"
         },
         "log_level": {
@@ -277,33 +285,26 @@
           "type": "string"
         },
         "max_pool_count": {
-          "description": "Maximum pool count",
+          "description": "Maximum pool count (FRP v1: Transport.MaxPoolCount)",
           "type": "number"
         },
         "max_ports_per_client": {
-          "description": "Maximum ports per client",
+          "description": "Maximum ports per client (FRP v1: MaxPortsPerClient)",
           "type": "number"
         },
         "port": {
-          "description": "Server listening port",
+          "deprecated": "Use bind_port instead. Kept for backward compatibility.",
           "type": "number"
         },
         "tcp_mux": {
-          "description": "Enable TCP multiplexing",
+          "description": "Enable TCP multiplexing (FRP v1: Transport.TCPMux)",
           "type": "boolean"
         },
         "token": {
-          "description": "Authentication token",
+          "deprecated": "Use auth_token instead. Kept for backward compatibility.",
           "type": "string"
-        },
-        "udp_mux": {
-          "description": "Enable UDP multiplexing",
-          "type": "boolean"
         }
       },
-      "required": [
-        "port"
-      ],
       "type": "object"
     },
     "PortMapping": {

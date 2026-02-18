@@ -162,8 +162,9 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
 
     // 启动 FRPS 服务（如果启用）
     if (build_options.frps_mode) {
-        std.log.info("Starting FRPS servers...", .{});
+        std.log.info("Starting FRPS servers... {any}", .{cfg.frps_nodes});
         var frps_it = cfg.frps_nodes.iterator();
+
         while (frps_it.next()) |entry| {
             const node_name = entry.key_ptr.*;
             const node = entry.value_ptr.*;

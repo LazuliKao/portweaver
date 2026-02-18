@@ -29,21 +29,134 @@ pub const FrpsServer = struct {
     id: c_int,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config_json: []const u8, server_name: ?[]const u8) !FrpsServer {
+    pub const Config = struct {
+        // === ServerConfig fields ===
+        bind_addr: ?[]const u8 = null,
+        bind_port: ?u16 = null,
+        auth_token: ?[]const u8 = null,
+        // === WebServerConfig fields (flattened) ===
+        dashboard_addr: ?[]const u8 = null,
+        dashboard_port: ?u16 = null,
+        dashboard_user: ?[]const u8 = null,
+        dashboard_pwd: ?[]const u8 = null,
+        // === LogConfig fields ===
+        log_level: ?[]const u8 = null,
+        // === ServerTransportConfig fields (flattened) ===
+        max_pool_count: ?u32 = null,
+        max_ports_per_client: ?u32 = null,
+        tcp_mux: ?bool = null,
+        // === Access control ===
+        allow_ports: ?[]const u8 = null,
+    };
+
+    // Keep consistent with Go struct definition
+    const CFrpsConfig = extern struct {
+        server_name: ?[*:0]const u8,
+        bind_addr: ?[*:0]const u8,
+        bind_port: ?*c_int,
+        auth_token: ?[*:0]const u8,
+        dashboard_addr: ?[*:0]const u8,
+        dashboard_port: ?*c_int,
+        dashboard_user: ?[*:0]const u8,
+        dashboard_pwd: ?[*:0]const u8,
+        log_level: ?[*:0]const u8,
+        max_pool_count: ?*c_int,
+        max_ports_per_client: ?*c_int,
+        tcp_mux: ?*bool,
+        allow_ports: ?[*:0]const u8,
+    };
+
+    // Override the C import signature manually since the header might not be updated yet
+    extern fn FrpsCreateServer(config: *const CFrpsConfig) c_int;
+
+    pub fn init(allocator: std.mem.Allocator, config: Config, server_name: []const u8) !FrpsServer {
         try ensureFrpsInit();
-        const c_config = try allocator.dupeZ(u8, config_json);
-        defer allocator.free(c_config);
 
-        var server_name_buf: ?[:0]u8 = null;
-        if (server_name) |sn| {
-            server_name_buf = try allocator.dupeZ(u8, sn);
-        }
-        defer if (server_name_buf) |snb| allocator.free(snb);
+        // Helper to duplicate string to C string
+        const toCString = struct {
+            fn call(alloc: std.mem.Allocator, str: ?[]const u8) !?[*:0]const u8 {
+                if (str) |s| {
+                    return try alloc.dupeZ(u8, s);
+                }
+                return null;
+            }
+        }.call;
 
-        const server_id = c.FrpsCreateServer(
-            c_config.ptr,
-            if (server_name_buf) |snb| snb.ptr else null,
-        );
+        // Prepare C config struct
+        const c_name = try toCString(allocator, server_name);
+        errdefer if (c_name) |p| allocator.free(std.mem.span(p));
+
+        const c_bind_addr = try toCString(allocator, config.bind_addr);
+        errdefer if (c_bind_addr) |p| allocator.free(std.mem.span(p));
+
+        const c_token = try toCString(allocator, config.auth_token);
+        errdefer if (c_token) |p| allocator.free(std.mem.span(p));
+
+        const c_dash_addr = try toCString(allocator, config.dashboard_addr);
+        errdefer if (c_dash_addr) |p| allocator.free(std.mem.span(p));
+
+        const c_dash_user = try toCString(allocator, config.dashboard_user);
+        errdefer if (c_dash_user) |p| allocator.free(std.mem.span(p));
+
+        const c_dash_pwd = try toCString(allocator, config.dashboard_pwd);
+        errdefer if (c_dash_pwd) |p| allocator.free(std.mem.span(p));
+
+        const c_log_level = try toCString(allocator, config.log_level);
+        errdefer if (c_log_level) |p| allocator.free(std.mem.span(p));
+
+        const c_allow_ports = try toCString(allocator, config.allow_ports);
+        errdefer if (c_allow_ports) |p| allocator.free(std.mem.span(p));
+
+        // Allocate space for optional integer/bool values
+        var bind_port_val: c_int = undefined;
+        var dash_port_val: c_int = undefined;
+        var max_pool_val: c_int = undefined;
+        var max_ports_val: c_int = undefined;
+        var tcp_mux_val: bool = undefined;
+
+        const c_config = CFrpsConfig{
+            .server_name = c_name,
+            .bind_addr = c_bind_addr,
+            .bind_port = if (config.bind_port) |p| blk: {
+                bind_port_val = @intCast(p);
+                break :blk &bind_port_val;
+            } else null,
+            .auth_token = c_token,
+            .dashboard_addr = c_dash_addr,
+            .dashboard_port = if (config.dashboard_port) |p| blk: {
+                dash_port_val = @intCast(p);
+                break :blk &dash_port_val;
+            } else null,
+            .dashboard_user = c_dash_user,
+            .dashboard_pwd = c_dash_pwd,
+            .log_level = c_log_level,
+            .max_pool_count = if (config.max_pool_count) |p| blk: {
+                max_pool_val = @intCast(p);
+                break :blk &max_pool_val;
+            } else null,
+            .max_ports_per_client = if (config.max_ports_per_client) |p| blk: {
+                max_ports_val = @intCast(p);
+                break :blk &max_ports_val;
+            } else null,
+            .tcp_mux = if (config.tcp_mux) |p| blk: {
+                tcp_mux_val = p;
+                break :blk &tcp_mux_val;
+            } else null,
+            .allow_ports = c_allow_ports,
+        };
+
+        const server_id = FrpsCreateServer(&c_config);
+
+        // Cleanup C strings
+        if (c_name) |p| allocator.free(std.mem.span(p));
+        if (c_bind_addr) |p| allocator.free(std.mem.span(p));
+        if (c_token) |p| allocator.free(std.mem.span(p));
+        if (c_dash_addr) |p| allocator.free(std.mem.span(p));
+        if (c_dash_user) |p| allocator.free(std.mem.span(p));
+        if (c_dash_pwd) |p| allocator.free(std.mem.span(p));
+        if (c_log_level) |p| allocator.free(std.mem.span(p));
+        if (c_allow_ports) |p| allocator.free(std.mem.span(p));
+
         if (server_id < 0) {
             return FrpsError.CreateServerFailed;
         }

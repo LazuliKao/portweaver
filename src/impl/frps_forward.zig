@@ -23,8 +23,9 @@ fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) void {
         return;
     }
 
+    std.log.info("[FRPS] Initializing server {s}...", .{node_name});
     holder.*.server.start() catch |err| {
-        std.log.warn("[FRPS] Failed to start server {s}: {any}", .{ node_name, err });
+        std.log.err("[FRPS] Failed to start server {s}: {any}", .{ node_name, err });
         return;
     };
     holder.started = true;
@@ -33,6 +34,7 @@ fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) void {
 
 fn getServerMap(allocator: std.mem.Allocator) !*std.StringHashMap(*ServerHolder) {
     if (servers == null) {
+        std.log.debug("[FRPS] Initializing server map", .{});
         servers = std.StringHashMap(*ServerHolder).init(allocator);
         servers_allocator = allocator;
     }
@@ -48,21 +50,34 @@ fn getOrCreateServer(
     var map = try getServerMap(allocator);
     if (map.get(node_name)) |holder_ptr| {
         servers_lock.unlock();
+        std.log.debug("[FRPS] Server {s} already exists in map", .{node_name});
         return holder_ptr;
     }
     servers_lock.unlock();
 
+    std.log.debug("[FRPS] Creating new server instance for {s}", .{node_name});
     const holder = try allocator.create(ServerHolder);
     errdefer allocator.destroy(holder);
 
-    // Convert FrpsNode to JSON configuration for the server
-    const config_json = try createFrpsConfigJson(allocator, node, node_name);
-    defer allocator.free(config_json);
+    const config = libfrps.FrpsServer.Config{
+        .bind_port = node.bind_port,
+        .bind_addr = node.bind_addr,
+        .auth_token = node.auth_token,
+        .dashboard_addr = node.dashboard_addr,
+        .dashboard_port = node.dashboard_port,
+        .dashboard_user = node.dashboard_user,
+        .dashboard_pwd = node.dashboard_pwd,
+        .log_level = node.log_level,
+        .max_pool_count = node.max_pool_count,
+        .max_ports_per_client = node.max_ports_per_client,
+        .tcp_mux = node.tcp_mux,
+        .allow_ports = node.allow_ports,
+    };
 
     holder.* = .{
         .server = try libfrps.FrpsServer.init(
             allocator,
-            config_json,
+            config,
             node_name,
         ),
         .started = false,
@@ -73,6 +88,7 @@ fn getOrCreateServer(
     defer servers_lock.unlock();
     map = try getServerMap(allocator);
     if (map.get(node_name)) |existing| {
+        std.log.debug("[FRPS] Server {s} was created by another thread, using existing instance", .{node_name});
         holder.server.deinit();
         allocator.destroy(holder);
         return existing;
@@ -80,6 +96,7 @@ fn getOrCreateServer(
 
     const key = try allocator.dupe(u8, node_name);
     try map.put(key, holder);
+    std.log.debug("[FRPS] Server {s} added to server map", .{node_name});
     return holder;
 }
 
@@ -88,6 +105,13 @@ pub fn startServer(
     node_name: []const u8,
     node: types.FrpsNode,
 ) !void {
+    std.log.info("[FRPS] Loading configuration for server {s}...", .{node_name});
+    std.log.debug("[FRPS] Server config - bind_port: {any}, max_pool_count: {any}, tcp_mux: {any}", .{
+        node.bind_port,
+        node.max_pool_count,
+        node.tcp_mux,
+    });
+
     const holder = try getOrCreateServer(allocator, node_name, node);
 
     holder.lock.lock();
@@ -97,6 +121,7 @@ pub fn startServer(
 }
 
 pub fn stopServer(node_name: []const u8) void {
+    std.log.info("[FRPS] Stopping server {s}...", .{node_name});
     servers_lock.lock();
     defer servers_lock.unlock();
 
@@ -107,9 +132,10 @@ pub fn stopServer(node_name: []const u8) void {
 
             if (holder.started) {
                 holder.server.stop() catch |err| {
-                    std.log.warn("[FRPS] Failed to stop server {s}: {any}", .{ node_name, err });
+                    std.log.err("[FRPS] Failed to stop server {s}: {any}", .{ node_name, err });
                 };
                 holder.started = false;
+                std.log.info("[FRPS] Server {s} stopped", .{node_name});
             }
         }
     }
@@ -124,9 +150,11 @@ pub fn stopAll() void {
     const allocator = servers_allocator orelse std.heap.c_allocator;
 
     var it = map.iterator();
+    var count: usize = 0;
     while (it.next()) |entry| {
         if (entry.value_ptr.*.started) {
             entry.value_ptr.*.server.stop() catch {};
+            count += 1;
         }
         entry.value_ptr.*.server.deinit();
         allocator.free(entry.key_ptr.*);
@@ -135,6 +163,7 @@ pub fn stopAll() void {
     map.deinit();
     servers = null;
     servers_allocator = null;
+    std.log.info("[FRPS] All {d} FRPS servers stopped and cleaned up", .{count});
 }
 
 /// FRPS server status
@@ -156,6 +185,7 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
 
     // No servers initialized
     if (servers == null) {
+        std.log.debug("[FRPS] No servers initialized, returning stopped status for {s}", .{node_name});
         return .{
             .status = try allocator.dupe(u8, "stopped"),
             .last_error = try allocator.dupe(u8, ""),
@@ -166,6 +196,7 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
 
     const holder = map.get(node_name) orelse {
         // Node not found
+        std.log.debug("[FRPS] Server {s} not found in map", .{node_name});
         return .{
             .status = try allocator.dupe(u8, "stopped"),
             .last_error = try allocator.dupe(u8, ""),
@@ -175,6 +206,7 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
 
     // Server exists but not started
     if (!holder.started) {
+        std.log.debug("[FRPS] Server {s} exists but not started", .{node_name});
         return .{
             .status = try allocator.dupe(u8, "stopped"),
             .last_error = try allocator.dupe(u8, ""),
@@ -206,6 +238,7 @@ pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]con
 
     // No servers initialized
     if (servers == null) {
+        std.log.debug("[FRPS] No servers initialized, returning empty stats for {s}", .{node_name});
         // Return empty array
         return std.fmt.allocPrint(allocator, "[]", .{});
     }
@@ -213,11 +246,13 @@ pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]con
     const map = servers.?;
     const holder = map.get(node_name) orelse {
         // Node not found - return empty array
+        std.log.debug("[FRPS] Server {s} not found, returning empty stats", .{node_name});
         return std.fmt.allocPrint(allocator, "[]", .{});
     };
 
     // Server exists but not started
     if (!holder.started) {
+        std.log.debug("[FRPS] Server {s} not started, returning empty stats", .{node_name});
         return std.fmt.allocPrint(allocator, "[]", .{});
     }
 
@@ -231,14 +266,24 @@ pub fn clearServerLogs(node_name: []const u8) void {
     servers_lock.lock();
     defer servers_lock.unlock();
 
-    if (servers == null) return;
+    if (servers == null) {
+        std.log.debug("[FRPS] No servers to clear logs for {s}", .{node_name});
+        return;
+    }
 
     const map = servers.?;
-    const holder = map.get(node_name) orelse return;
+    const holder = map.get(node_name) orelse {
+        std.log.debug("[FRPS] Server {s} not found, skipping log clear", .{node_name});
+        return;
+    };
 
-    if (!holder.started) return;
+    if (!holder.started) {
+        std.log.debug("[FRPS] Server {s} not started, skipping log clear", .{node_name});
+        return;
+    }
 
     holder.server.clearLogs();
+    std.log.debug("[FRPS] Logs cleared for server {s}", .{node_name});
 }
 
 /// Parse the status JSON from FrpsGetStatus
@@ -272,88 +317,4 @@ fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
         .status = try allocator.dupe(u8, status),
         .last_error = try allocator.dupe(u8, last_error),
     };
-}
-
-/// Create FRPS configuration JSON from FrpsNode
-fn createFrpsConfigJson(allocator: std.mem.Allocator, node: types.FrpsNode, server_name: []const u8) ![]const u8 {
-    _ = server_name; // unused parameter
-
-    // Calculate the maximum possible JSON size
-    const max_size = 1024 +
-        node.token.len +
-        node.log_level.len +
-        node.allow_ports.len +
-        node.bind_addr.len +
-        node.dashboard_addr.len +
-        node.dashboard_user.len +
-        node.dashboard_pwd.len;
-
-    var buffer = try allocator.alloc(u8, max_size);
-    defer allocator.free(buffer);
-
-    var written: usize = 0;
-
-    // Start with opening brace and first field
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], "{{\"bindPort\":{d}", .{node.port});
-        written += result.len;
-    }
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"maxPoolCount\":{d}", .{node.max_pool_count});
-        written += result.len;
-    }
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"maxPortsPerClient\":{d}", .{node.max_ports_per_client});
-        written += result.len;
-    }
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"tcpMux\":{}", .{if (node.tcp_mux) true else false});
-        written += result.len;
-    }
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"udpMux\":{}", .{if (node.udp_mux) true else false});
-        written += result.len;
-    }
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"kcpMux\":{}", .{if (node.kcp_mux) true else false});
-        written += result.len;
-    }
-
-    // Optional fields
-    if (node.token.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"token\":\"{s}\"", .{node.token});
-        written += result.len;
-    }
-    if (node.log_level.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"logLevel\":\"{s}\"", .{node.log_level});
-        written += result.len;
-    }
-    if (node.allow_ports.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"allowPorts\":\"{s}\"", .{node.allow_ports});
-        written += result.len;
-    }
-    if (node.bind_addr.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"bindAddr\":\"{s}\"", .{node.bind_addr});
-        written += result.len;
-    }
-    if (node.dashboard_addr.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"dashboardAddr\":\"{s}\"", .{node.dashboard_addr});
-        written += result.len;
-    }
-    if (node.dashboard_user.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"dashboardUser\":\"{s}\"", .{node.dashboard_user});
-        written += result.len;
-    }
-    if (node.dashboard_pwd.len > 0) {
-        const result = try std.fmt.bufPrint(buffer[written..], ",\"dashboardPwd\":\"{s}\"", .{node.dashboard_pwd});
-        written += result.len;
-    }
-
-    // Close the JSON object
-    {
-        const result = try std.fmt.bufPrint(buffer[written..], "}}", .{});
-        written += result.len;
-    }
-
-    return allocator.dupe(u8, buffer[0..written]);
 }

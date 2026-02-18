@@ -353,22 +353,20 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
 
         var frps_node = types.FrpsNode{
             .enabled = true,
-            .port = 0,
-            .token = &.{},
-            .log_level = &.{},
-            .allow_ports = &.{},
-            .bind_addr = &.{},
-            .max_pool_count = 5,
-            .max_ports_per_client = 0,
-            .tcp_mux = true,
-            .udp_mux = true,
-            .kcp_mux = true,
-            .dashboard_addr = &.{},
-            .dashboard_user = &.{},
-            .dashboard_pwd = &.{},
+            .bind_port = null,
+            .auth_token = null,
+            .log_level = null,
+            .allow_ports = null,
+            .bind_addr = null,
+            .max_pool_count = null,
+            .max_ports_per_client = null,
+            .tcp_mux = null,
+            .dashboard_addr = null,
+            .dashboard_port = null,
+            .dashboard_user = null,
+            .dashboard_pwd = null,
         };
         var node_name: []const u8 = "";
-        var have_port = false;
 
         // Get node name from section name or 'name' option
         const sec_name = uci.cStr(sec.name());
@@ -384,47 +382,47 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
 
             if (std.mem.eql(u8, opt_name, "name")) {
                 node_name = opt_val;
-            } else if (std.mem.eql(u8, opt_name, "port")) {
-                frps_node.port = try types.parsePort(opt_val);
-                have_port = true;
-            } else if (std.mem.eql(u8, opt_name, "token")) {
-                frps_node.token = try types.dupeIfNonEmpty(allocator, opt_val);
+            } else if (std.mem.eql(u8, opt_name, "bind_port") or std.mem.eql(u8, opt_name, "port")) {
+                // Support both "bind_port" (canonical) and "port" (alias) for FRPS server port
+                frps_node.bind_port = try types.parsePort(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "auth_token") or std.mem.eql(u8, opt_name, "token")) {
+                // Support both "auth_token" (canonical) and "token" (alias)
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.auth_token = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "log_level")) {
-                frps_node.log_level = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.log_level = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "allow_ports")) {
-                frps_node.allow_ports = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.allow_ports = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "bind_addr")) {
-                frps_node.bind_addr = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.bind_addr = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "max_pool_count")) {
-                frps_node.max_pool_count = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 5;
+                frps_node.max_pool_count = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch null;
             } else if (std.mem.eql(u8, opt_name, "max_ports_per_client")) {
-                frps_node.max_ports_per_client = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 0;
+                frps_node.max_ports_per_client = std.fmt.parseUnsigned(u32, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch null;
             } else if (std.mem.eql(u8, opt_name, "tcp_mux")) {
                 frps_node.tcp_mux = try types.parseBool(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "udp_mux")) {
-                frps_node.udp_mux = try types.parseBool(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "kcp_mux")) {
-                frps_node.kcp_mux = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "dashboard_addr")) {
-                frps_node.dashboard_addr = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.dashboard_addr = try allocator.dupe(u8, trimmed);
+            } else if (std.mem.eql(u8, opt_name, "dashboard_port")) {
+                frps_node.dashboard_port = std.fmt.parseUnsigned(u16, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch null;
             } else if (std.mem.eql(u8, opt_name, "dashboard_user")) {
-                frps_node.dashboard_user = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.dashboard_user = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "dashboard_pwd")) {
-                frps_node.dashboard_pwd = try types.dupeIfNonEmpty(allocator, opt_val);
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len > 0) frps_node.dashboard_pwd = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "enabled")) {
                 frps_node.enabled = try types.parseBool(opt_val);
             }
         }
 
-        // Validate FRPS node
-        if (node_name.len == 0 or !have_port) {
-            if (frps_node.token.len != 0) allocator.free(frps_node.token);
-            if (frps_node.log_level.len != 0) allocator.free(frps_node.log_level);
-            if (frps_node.allow_ports.len != 0) allocator.free(frps_node.allow_ports);
-            if (frps_node.bind_addr.len != 0) allocator.free(frps_node.bind_addr);
-            if (frps_node.dashboard_addr.len != 0) allocator.free(frps_node.dashboard_addr);
-            if (frps_node.dashboard_user.len != 0) allocator.free(frps_node.dashboard_user);
-            if (frps_node.dashboard_pwd.len != 0) allocator.free(frps_node.dashboard_pwd);
+        // Validate FRPS node - only node_name is required
+        if (node_name.len == 0) {
+            frps_node.deinit(allocator);
             continue;
         }
 

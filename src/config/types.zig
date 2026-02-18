@@ -142,31 +142,49 @@ pub const FrpcNode = struct {
 };
 
 /// FRP 服务器节点配置
+/// 字段命名与 FRP v1 ServerConfig 保持一致
 pub const FrpsNode = struct {
     /// 是否启用此规则
     enabled: bool = true,
-    port: u16,
-    token: []const u8 = "",
-    log_level: []const u8 = "info",
-    allow_ports: []const u8 = "",
-    bind_addr: []const u8 = "",
-    max_pool_count: u32 = 5,
-    max_ports_per_client: u32 = 0,
-    tcp_mux: bool = true,
-    udp_mux: bool = true,
-    kcp_mux: bool = true,
-    dashboard_addr: []const u8 = "",
-    dashboard_user: []const u8 = "",
-    dashboard_pwd: []const u8 = "",
+
+    // === ServerConfig fields ===
+    /// 服务器监听端口 (FRP v1: BindPort, default: 7000)
+    bind_port: ?u16 = null,
+    /// 服务器绑定地址 (FRP v1: BindAddr, default: "0.0.0.0")
+    bind_addr: ?[]const u8 = null,
+    /// 认证令牌 (FRP v1: Auth.Token)
+    auth_token: ?[]const u8 = null,
+    /// 日志级别: trace, debug, info, warn, error (FRP v1: Log.Level)
+    log_level: ?[]const u8 = null,
+    /// 允许的端口范围，如 "10000-20000" 或 "8080,8081,8082" (FRP v1: AllowPorts)
+    allow_ports: ?[]const u8 = null,
+
+    // === ServerTransportConfig fields (flattened) ===
+    /// 连接池大小 (FRP v1: Transport.MaxPoolCount, default: 5)
+    max_pool_count: ?u32 = null,
+    /// 每个客户端最大端口数，0表示无限制 (FRP v1: MaxPortsPerClient)
+    max_ports_per_client: ?u32 = null,
+    /// TCP 多路复用 (FRP v1: Transport.TCPMux, default: true)
+    tcp_mux: ?bool = null,
+
+    // === WebServerConfig fields (flattened) ===
+    /// Dashboard/管理界面地址 (FRP v1: WebServer.Addr)
+    dashboard_addr: ?[]const u8 = null,
+    /// Dashboard/管理界面端口 (FRP v1: WebServer.Port)
+    dashboard_port: ?u16 = null,
+    /// Dashboard 用户名 (FRP v1: WebServer.User)
+    dashboard_user: ?[]const u8 = null,
+    /// Dashboard 密码 (FRP v1: WebServer.Password)
+    dashboard_pwd: ?[]const u8 = null,
 
     pub fn deinit(self: *FrpsNode, allocator: std.mem.Allocator) void {
-        if (self.token.len != 0) allocator.free(self.token);
-        if (self.log_level.len != 0) allocator.free(self.log_level);
-        if (self.allow_ports.len != 0) allocator.free(self.allow_ports);
-        if (self.bind_addr.len != 0) allocator.free(self.bind_addr);
-        if (self.dashboard_addr.len != 0) allocator.free(self.dashboard_addr);
-        if (self.dashboard_user.len != 0) allocator.free(self.dashboard_user);
-        if (self.dashboard_pwd.len != 0) allocator.free(self.dashboard_pwd);
+        if (self.auth_token) |s| allocator.free(s);
+        if (self.log_level) |s| allocator.free(s);
+        if (self.allow_ports) |s| allocator.free(s);
+        if (self.bind_addr) |s| allocator.free(s);
+        if (self.dashboard_addr) |s| allocator.free(s);
+        if (self.dashboard_user) |s| allocator.free(s);
+        if (self.dashboard_pwd) |s| allocator.free(s);
         self.* = undefined;
     }
 };

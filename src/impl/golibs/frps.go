@@ -4,16 +4,35 @@ package main
 
 // #include <stdlib.h>
 // #include <string.h>
+// #include <stdbool.h>
+//
+// typedef struct {
+//     const char* server_name;
+//     const char* bind_addr;
+//     int* bind_port;
+//     const char* auth_token;
+//     const char* dashboard_addr;
+//     int* dashboard_port;
+//     const char* dashboard_user;
+//     const char* dashboard_pwd;
+//     const char* log_level;
+//     int* max_pool_count;
+//     int* max_ports_per_client;
+//     bool* tcp_mux;
+//     const char* allow_ports;
+// } FrpsConfig;
 import "C"
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
+	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/xlog"
@@ -62,31 +81,104 @@ func FrpsInit() {
 }
 
 //export FrpsCreateServer
-func FrpsCreateServer(configJSON *C.char, serverName *C.char) C.int {
-	if configJSON == nil {
+func FrpsCreateServer(cConfig *C.FrpsConfig) C.int {
+	if cConfig == nil {
 		return -1
 	}
 
 	serversMutex.Lock()
 	defer serversMutex.Unlock()
 
-	configStr := C.GoString(configJSON)
-	var cfg v1.ServerConfig
+	cfg := v1.ServerConfig{}
 
-	if err := json.Unmarshal([]byte(configStr), &cfg); err != nil {
-		fmt.Printf("Failed to parse server config: %v\n", err)
-		return -1
+	// Basic Config
+	if cConfig.bind_addr != nil {
+		cfg.BindAddr = C.GoString(cConfig.bind_addr)
+	}
+	if cConfig.bind_port != nil {
+		cfg.BindPort = int(*cConfig.bind_port)
 	}
 
+	// Auth Config
+	if cConfig.auth_token != nil {
+		cfg.Auth.Method = "token"
+		cfg.Auth.Token = C.GoString(cConfig.auth_token)
+	}
+
+	// Dashboard Config
+	if cConfig.dashboard_addr != nil {
+		cfg.WebServer.Addr = C.GoString(cConfig.dashboard_addr)
+	}
+	if cConfig.dashboard_port != nil {
+		cfg.WebServer.Port = int(*cConfig.dashboard_port)
+	}
+	if cConfig.dashboard_user != nil {
+		cfg.WebServer.User = C.GoString(cConfig.dashboard_user)
+	}
+	if cConfig.dashboard_pwd != nil {
+		cfg.WebServer.Password = C.GoString(cConfig.dashboard_pwd)
+	}
+
+	// Log Config
+	if cConfig.log_level != nil {
+		cfg.Log.Level = C.GoString(cConfig.log_level)
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	// Force log to stdout/console so we can capture it
+	cfg.Log.To = "console"
+
+	// Transport Config
+	if cConfig.max_pool_count != nil {
+		cfg.Transport.MaxPoolCount = int64(*cConfig.max_pool_count)
+	}
+	if cConfig.tcp_mux != nil {
+		val := bool(*cConfig.tcp_mux)
+		cfg.Transport.TCPMux = &val
+	}
+
+	// Access Control
+	if cConfig.max_ports_per_client != nil {
+		cfg.MaxPortsPerClient = int64(*cConfig.max_ports_per_client)
+	}
+
+	if cConfig.allow_ports != nil {
+		allowPortsStr := C.GoString(cConfig.allow_ports)
+		if allowPortsStr != "" {
+			// Simple parsing for single ports or ranges if needed
+			// v1.ServerConfig AllowPorts is []types.PortsRange
+			// For now, let's try to parse simple ranges or single ports
+			// This is a simplified implementation
+			ranges := []types.PortsRange{}
+			parts := strings.Split(allowPortsStr, ",")
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if strings.Contains(p, "-") {
+					rangeParts := strings.Split(p, "-")
+					if len(rangeParts) == 2 {
+						start, _ := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+						end, _ := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+						if start > 0 && end > 0 {
+							ranges = append(ranges, types.PortsRange{Start: start, End: end})
+						}
+					}
+				} else {
+					port, _ := strconv.Atoi(p)
+					if port > 0 {
+						ranges = append(ranges, types.PortsRange{Start: port, End: port})
+					}
+				}
+			}
+			cfg.AllowPorts = ranges
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	name := ""
-	if serverName != nil {
-		name = C.GoString(serverName)
+	if cConfig.server_name != nil {
+		name = C.GoString(cConfig.server_name)
 	}
 	if name == "" {
 		name = fmt.Sprintf("server-%d", nextServerID)

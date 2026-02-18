@@ -576,84 +576,72 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
                     var frps_node = types.FrpsNode{
                         .enabled = true,
-                        .port = 0,
-                        .log_level = "",
                     };
-                    var have_port = false;
 
+                    // Accept both "bind_port" and "port" (FRP v1 naming)
+                    if (node_obj.object.get("bind_port")) |v| {
+                        if (parseJsonPort(v, ec.fieldPath("{s}.bind_port", .{np}), ec)) |p|
+                            frps_node.bind_port = p;
+                    }
                     if (node_obj.object.get("port")) |v| {
-                        if (parseJsonPort(v, ec.fieldPath("{s}.port", .{np}), ec)) |p| {
-                            frps_node.port = p;
-                            have_port = true;
-                        }
+                        if (parseJsonPort(v, ec.fieldPath("{s}.port", .{np}), ec)) |p|
+                            frps_node.bind_port = p;
+                    }
+                    // Accept both "auth_token" and "token" (FRP v1 naming)
+                    if (node_obj.object.get("auth_token")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.auth_token", .{np}), ec)) |s|
+                            frps_node.auth_token = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("token")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.token", .{np}), ec)) |s|
-                            frps_node.token = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.auth_token = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("log_level")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.log_level", .{np}), ec)) |s|
-                            frps_node.log_level = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.log_level = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("allow_ports")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.allow_ports", .{np}), ec)) |s|
-                            frps_node.allow_ports = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.allow_ports = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("bind_addr")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.bind_addr", .{np}), ec)) |s|
-                            frps_node.bind_addr = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.bind_addr = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("max_pool_count")) |v| {
                         frps_node.max_pool_count = switch (v) {
                             .integer => |i| @intCast(i),
-                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 5,
-                            else => 5,
+                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch null,
+                            else => null,
                         };
                     }
                     if (node_obj.object.get("max_ports_per_client")) |v| {
                         frps_node.max_ports_per_client = switch (v) {
                             .integer => |i| @intCast(i),
-                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch 0,
-                            else => 0,
+                            .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch null,
+                            else => null,
                         };
                     }
                     if (node_obj.object.get("tcp_mux")) |v| {
                         if (parseJsonBool(v, ec.fieldPath("{s}.tcp_mux", .{np}), ec)) |b| frps_node.tcp_mux = b;
                     }
-                    if (node_obj.object.get("udp_mux")) |v| {
-                        if (parseJsonBool(v, ec.fieldPath("{s}.udp_mux", .{np}), ec)) |b| frps_node.udp_mux = b;
-                    }
-                    if (node_obj.object.get("kcp_mux")) |v| {
-                        if (parseJsonBool(v, ec.fieldPath("{s}.kcp_mux", .{np}), ec)) |b| frps_node.kcp_mux = b;
-                    }
                     if (node_obj.object.get("dashboard_addr")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.dashboard_addr", .{np}), ec)) |s|
-                            frps_node.dashboard_addr = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.dashboard_addr = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("dashboard_user")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.dashboard_user", .{np}), ec)) |s|
-                            frps_node.dashboard_user = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.dashboard_user = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("dashboard_pwd")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.dashboard_pwd", .{np}), ec)) |s|
-                            frps_node.dashboard_pwd = types.dupeIfNonEmpty(a, s) catch "";
+                            frps_node.dashboard_pwd = types.dupeIfNonEmpty(a, s) catch null;
                     }
                     if (node_obj.object.get("enabled")) |v| {
                         if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| frps_node.enabled = b;
                     }
 
-                    if (!have_port) {
-                        ec.add(ec.fieldPath("{s}.port", .{np}), .missing_field, "", "", "required field missing");
-                        // Clean up partial node
-                        if (frps_node.token.len != 0) a.free(frps_node.token);
-                        if (frps_node.log_level.len != 0) a.free(frps_node.log_level);
-                        if (frps_node.allow_ports.len != 0) a.free(frps_node.allow_ports);
-                        if (frps_node.bind_addr.len != 0) a.free(frps_node.bind_addr);
-                        if (frps_node.dashboard_addr.len != 0) a.free(frps_node.dashboard_addr);
-                        if (frps_node.dashboard_user.len != 0) a.free(frps_node.dashboard_user);
-                        if (frps_node.dashboard_pwd.len != 0) a.free(frps_node.dashboard_pwd);
-                        continue;
-                    }
+                    // bind_port is optional - FRP v1 defaults to 7000 if not specified
 
                     const key = a.dupe(u8, node_name) catch continue;
                     frps_nodes.put(key, frps_node) catch {};
@@ -1345,28 +1333,27 @@ test "json: no leak - frpc node missing port" {
     try testing.expect(ec.hasErrors());
 }
 
-test "json: no leak - frps node missing port with many fields" {
+test "json: no leak - frps node with all optional fields" {
     const alloc = testing.allocator;
     const path = try writeTmpJson(alloc,
         \\{
         \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
-        \\  "frps_nodes": {"bad": {
-        \\    "token": "secret",
-        \\    "log_level": "trace",
-        \\    "allow_ports": "1000-2000",
-        \\    "bind_addr": "0.0.0.0",
-        \\    "dashboard_addr": "0.0.0.0",
-        \\    "dashboard_user": "admin",
-        \\    "dashboard_pwd": "password123"
-        \\  }}
+        \\  "frps_nodes": {
+        \\    "node1": {"bind_port": 7000, "auth_token": "abc", "bind_addr": "0.0.0.0", "dashboard_addr": "0.0.0.0", "dashboard_user": "admin", "dashboard_pwd": "pwd", "allow_ports": "5000-6000", "log_level": "info", "max_pool_count": 10, "max_ports_per_client": 5, "tcp_mux": true}
+        \\  }
         \\}
     );
     defer alloc.free(path);
 
     var ec = types.ErrorCollector.init(alloc);
     defer ec.deinit();
-    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
-    try testing.expect(ec.hasErrors());
+    var result = loadFromJsonFileWithErrors(alloc, path, &ec) catch {
+        try testing.expect(false); // Should not fail
+        return;
+    };
+    defer result.deinit(alloc);
+    // bind_port is now optional - this is a valid config, no errors expected
+    try testing.expect(!ec.hasErrors());
 }
 
 test "json: no leak - ddns missing name and dns_provider" {
@@ -1484,14 +1471,14 @@ test "json: no leak - mix of valid and invalid frpc nodes" {
     try testing.expect(ec.hasErrors());
 }
 
-test "json: no leak - mix of valid and invalid frps nodes" {
+test "json: no leak - multiple valid frps nodes" {
     const alloc = testing.allocator;
     const path = try writeTmpJson(alloc,
         \\{
         \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 80, "target_port": 80}],
         \\  "frps_nodes": {
-        \\    "good": {"port": 7000, "token": "tk", "bind_addr": "0.0.0.0", "dashboard_addr": "0.0.0.0", "dashboard_user": "admin", "dashboard_pwd": "pwd"},
-        \\    "bad_no_port": {"token": "tk2", "bind_addr": "::0", "allow_ports": "5000-6000"}
+        \\    "node1": {"bind_port": 7000, "auth_token": "tk", "bind_addr": "0.0.0.0", "dashboard_addr": "0.0.0.0", "dashboard_user": "admin", "dashboard_pwd": "pwd"},
+        \\    "node2": {"auth_token": "tk2", "bind_addr": "::0", "allow_ports": "5000-6000"}
         \\  }
         \\}
     );
@@ -1499,8 +1486,13 @@ test "json: no leak - mix of valid and invalid frps nodes" {
 
     var ec = types.ErrorCollector.init(alloc);
     defer ec.deinit();
-    _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
-    try testing.expect(ec.hasErrors());
+    var result = loadFromJsonFileWithErrors(alloc, path, &ec) catch {
+        try testing.expect(false); // Should not fail
+        return;
+    };
+    defer result.deinit(alloc);
+    // bind_port is now optional - both nodes are valid, no errors expected
+    try testing.expect(!ec.hasErrors());
 }
 
 test "json: no leak - wrong type for every field" {
