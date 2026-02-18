@@ -267,7 +267,7 @@ fn ubusThread(state: *RuntimeState) void {
     const frpcMethods = if (build_options.frpc_mode) [_]c.ubus_method{
         .{
             .name = method_names.get_frpc_info,
-            .handler = handleGetFrpInfo,
+            .handler = handleGetFrpcInfo,
             .mask = 0,
             .tags = 0,
             .policy = &frp_info_policy,
@@ -644,7 +644,7 @@ fn handleGetDdnsGlobalStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, re
     return c.UBUS_STATUS_OK;
 }
 
-fn handleGetFrpInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+fn handleGetFrpcInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
     _ = obj;
     _ = method;
     if (msg == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
