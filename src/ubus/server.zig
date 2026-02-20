@@ -149,6 +149,7 @@ const method_names = struct {
     pub const get_ddns_status: [:0]const u8 = "get_ddns_status";
     pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
     pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
+    pub const get_full_status: [:0]const u8 = "get_full_status";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -192,6 +193,12 @@ const field_names = struct {
     pub const ddns_status: [:0]const u8 = "ddns_status";
     pub const proxy_count: [:0]const u8 = "proxy_count";
     pub const server_count: [:0]const u8 = "server_count";
+    pub const frp: [:0]const u8 = "frp";
+    pub const ddns: [:0]const u8 = "ddns";
+    pub const clients: [:0]const u8 = "clients";
+    pub const servers: [:0]const u8 = "servers";
+    pub const instances: [:0]const u8 = "instances";
+    pub const version: [:0]const u8 = "version";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -248,6 +255,14 @@ fn ubusThread(state: *RuntimeState) void {
         .{
             .name = method_names.get_events,
             .handler = handleGetEvents,
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
+        .{
+            .name = method_names.get_full_status,
+            .handler = handleGetFullStatus,
             .mask = 0,
             .tags = 0,
             .policy = null,
@@ -1092,6 +1107,223 @@ fn handleClearDdnsLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
     var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
     ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     defer ubox.blobBufFree(&buf) catch {};
+
+    _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
+        return c.UBUS_STATUS_UNKNOWN_ERROR;
+    };
+    return c.UBUS_STATUS_OK;
+}
+
+fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
+    _ = obj;
+    _ = method;
+    _ = msg;
+    const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
+    ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    defer ubox.blobBufFree(&buf) catch {};
+
+    // === Top-level fields ===
+    const snapshot = state.globalSnapshot();
+    addString(&buf, field_names.status, snapshot.status) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU64(&buf, field_names.uptime, snapshot.uptime) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU32(&buf, field_names.total_projects, snapshot.total_projects) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU32(&buf, field_names.active_ports, snapshot.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU64(&buf, field_names.total_bytes_in, snapshot.total_bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    addU64(&buf, field_names.total_bytes_out, snapshot.total_bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // === Projects array ===
+    const projects_arr = ubox.blobmsgOpenNested(&buf, field_names.projects, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (projects_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+    {
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        var i: usize = 0;
+        while (i < state.projects.items.len) : (i += 1) {
+            const item = ubox.blobmsgOpenNested(&buf, null, false) catch break;
+            if (item == null) break;
+            const project = &state.projects.items[i];
+            addU32(&buf, field_names.id, @intCast(i)) catch {};
+            addBool(&buf, field_names.enabled, state.enabled[i]) catch {};
+            addString(&buf, field_names.status, if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED) catch {};
+            addString(&buf, field_names.startup_status, project.startup_status.toString()) catch {};
+            const info = project.getProjectRuntimeInfo();
+            addU32(&buf, field_names.active_ports, project.active_ports) catch {};
+            addU64(&buf, field_names.bytes_in, info.bytes_in) catch {};
+            addU64(&buf, field_names.bytes_out, info.bytes_out) catch {};
+            addU64(&buf, field_names.last_changed, state.last_changed[i]) catch {};
+            if (info.startup_status == .failed and info.error_code != 0) {
+                addI32(&buf, field_names.error_code, info.error_code) catch {};
+            }
+            ubox.blobNestEnd(&buf, item) catch {};
+        }
+    }
+    ubox.blobNestEnd(&buf, projects_arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // === FRP section ===
+    const frp_obj = ubox.blobmsgOpenNested(&buf, field_names.frp, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (frp_obj == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+    {
+        const frp_enabled = build_options.frpc_mode or build_options.frps_mode;
+        addBool(&buf, field_names.enabled, frp_enabled) catch {};
+
+        if (frp_enabled) {
+            if (build_options.frpc_mode) {
+                const libfrpc_lib = @import("../impl/frpc/libfrpc.zig");
+                const ver: ?[]const u8 = libfrpc_lib.getVersion(state.allocator) catch null;
+                if (ver) |v| {
+                    defer state.allocator.free(v);
+                    const vz = state.allocator.dupeZ(u8, v) catch null;
+                    if (vz) |z| {
+                        defer state.allocator.free(z);
+                        addString(&buf, field_names.version, z) catch {};
+                    }
+                }
+            } else if (build_options.frps_mode) {
+                const libfrps_lib = @import("../impl/frps/libfrps.zig");
+                const ver: ?[]const u8 = libfrps_lib.getVersion(state.allocator) catch null;
+                if (ver) |v| {
+                    defer state.allocator.free(v);
+                    const vz = state.allocator.dupeZ(u8, v) catch null;
+                    if (vz) |z| {
+                        defer state.allocator.free(z);
+                        addString(&buf, field_names.version, z) catch {};
+                    }
+                }
+            }
+        }
+
+        // Clients array
+        const clients_arr = ubox.blobmsgOpenNested(&buf, field_names.clients, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (clients_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (build_options.frpc_mode) {
+            const summaries: ?[]frpc_forward.ClientSummary = frpc_forward.getAllClientSummaries(state.allocator) catch null;
+            if (summaries) |items| {
+                defer frpc_forward.freeClientSummaries(state.allocator, items);
+                for (items) |item| {
+                    const node_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                    if (node_item == null) continue;
+                    const nz = state.allocator.dupeZ(u8, item.name) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(nz);
+                    addString(&buf, field_names.name, nz) catch {};
+                    const sz = state.allocator.dupeZ(u8, item.status) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(sz);
+                    addString(&buf, field_names.status, sz) catch {};
+                    addU32(&buf, field_names.client_count, @intCast(item.client_count)) catch {};
+                    const ez = state.allocator.dupeZ(u8, item.last_error) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(ez);
+                    addString(&buf, field_names.last_error, ez) catch {};
+                    ubox.blobNestEnd(&buf, node_item) catch {};
+                }
+            }
+        }
+        ubox.blobNestEnd(&buf, clients_arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+        // Servers array
+        const servers_arr = ubox.blobmsgOpenNested(&buf, field_names.servers, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (servers_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (build_options.frps_mode) {
+            const summaries: ?[]frps_forward.ServerSummary = frps_forward.getAllServerSummaries(state.allocator) catch null;
+            if (summaries) |items| {
+                defer frps_forward.freeServerSummaries(state.allocator, items);
+                for (items) |item| {
+                    const node_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                    if (node_item == null) continue;
+                    const nz = state.allocator.dupeZ(u8, item.name) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(nz);
+                    addString(&buf, field_names.name, nz) catch {};
+                    const sz = state.allocator.dupeZ(u8, item.status) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(sz);
+                    addString(&buf, field_names.status, sz) catch {};
+                    addU32(&buf, field_names.client_count, @intCast(item.client_count)) catch {};
+                    addU32(&buf, field_names.proxy_count, @intCast(item.proxy_count)) catch {};
+                    addU32(&buf, field_names.server_count, @intCast(item.server_count)) catch {};
+                    const ez = state.allocator.dupeZ(u8, item.last_error) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    defer state.allocator.free(ez);
+                    addString(&buf, field_names.last_error, ez) catch {};
+                    ubox.blobNestEnd(&buf, node_item) catch {};
+                }
+            }
+        }
+        ubox.blobNestEnd(&buf, servers_arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+    ubox.blobNestEnd(&buf, frp_obj) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // === DDNS section ===
+    const ddns_obj = ubox.blobmsgOpenNested(&buf, field_names.ddns, false) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (ddns_obj == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+    {
+        addBool(&buf, field_names.enabled, build_options.ddns_mode) catch {};
+        if (build_options.ddns_mode) {
+            const libddns_lib = @import("../impl/ddns/libddns.zig");
+            const ver_opt: ?[]const u8 = libddns_lib.getVersion(state.allocator) catch null;
+            defer if (ver_opt) |v| state.allocator.free(v);
+            if (ver_opt) |v| {
+                const vz = state.allocator.dupeZ(u8, v) catch null;
+                if (vz) |z| {
+                    defer state.allocator.free(z);
+                    addString(&buf, field_names.version, z) catch {};
+                }
+            }
+        }
+        const inst_arr = ubox.blobmsgOpenNested(&buf, field_names.instances, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (inst_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+        if (build_options.ddns_mode) {
+            const statuses = ddns_manager.getStatus(state.allocator) catch null;
+            if (statuses) |stats| {
+                defer {
+                    for (stats) |*s| { var sc = s.*; sc.deinit(state.allocator); }
+                    state.allocator.free(stats);
+                }
+                for (stats) |stat| {
+                    const inst_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                    if (inst_item == null) continue;
+                    const nz = state.allocator.dupeZ(u8, stat.name) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    defer state.allocator.free(nz);
+                    addString(&buf, field_names.name, nz) catch {};
+                    const pz = state.allocator.dupeZ(u8, stat.provider) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    defer state.allocator.free(pz);
+                    addString(&buf, field_names.provider, pz) catch {};
+                    const stz = state.allocator.dupeZ(u8, stat.status) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    defer state.allocator.free(stz);
+                    addString(&buf, field_names.status, stz) catch {};
+                    addI64(&buf, field_names.last_update, stat.last_update) catch {};
+                    const ipz = state.allocator.dupeZ(u8, stat.last_ip) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    defer state.allocator.free(ipz);
+                    addString(&buf, field_names.last_ip, ipz) catch {};
+                    const mz = state.allocator.dupeZ(u8, stat.message) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    defer state.allocator.free(mz);
+                    addString(&buf, field_names.message, mz) catch {};
+                    ubox.blobNestEnd(&buf, inst_item) catch {};
+                }
+            }
+        }
+        ubox.blobNestEnd(&buf, inst_arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    }
+    ubox.blobNestEnd(&buf, ddns_obj) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+
+    // === Events array ===
+    const events_arr = ubox.blobmsgOpenNested(&buf, field_names.events, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (events_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
+    if (event_log.getGlobal()) |logger| {
+        const evts = logger.getEvents(state.allocator) catch null;
+        if (evts) |events| {
+            defer event_log.EventLogger.freeEvents(state.allocator, events);
+            for (events) |event| {
+                const item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
+                if (item == null) continue;
+                addI64(&buf, field_names.timestamp, event.timestamp) catch {};
+                addString(&buf, field_names.event_type, event.event_type.toString()) catch {};
+                const mz = state.allocator.dupeZ(u8, event.message) catch { ubox.blobNestEnd(&buf, item) catch {}; continue; };
+                defer state.allocator.free(mz);
+                addString(&buf, field_names.message, mz) catch {};
+                addI32(&buf, field_names.project_id, event.project_id) catch {};
+                ubox.blobNestEnd(&buf, item) catch {};
+            }
+        }
+    }
+    ubox.blobNestEnd(&buf, events_arr) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     _ = ubus.ubus_send_reply(ctx, req, buf.head) catch {
         return c.UBUS_STATUS_UNKNOWN_ERROR;

@@ -318,3 +318,90 @@ fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
         .last_error = try allocator.dupe(u8, last_error),
     };
 }
+
+pub const ServerSummary = struct {
+    name: []const u8,
+    status: []const u8,
+    client_count: usize,
+    proxy_count: usize,
+    server_count: usize,
+    last_error: []const u8,
+};
+
+pub fn freeServerSummaries(allocator: std.mem.Allocator, items: []ServerSummary) void {
+    for (items) |item| {
+        allocator.free(item.name);
+        allocator.free(item.status);
+        allocator.free(item.last_error);
+    }
+    allocator.free(items);
+}
+
+/// Returns a slice of per-node server summaries. Caller must call freeServerSummaries.
+pub fn getAllServerSummaries(allocator: std.mem.Allocator) ![]ServerSummary {
+    var node_names = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (node_names.items) |n| allocator.free(n);
+        node_names.deinit();
+    }
+    {
+        servers_lock.lock();
+        defer servers_lock.unlock();
+        if (servers) |map| {
+            var it = map.iterator();
+            while (it.next()) |entry| {
+                try node_names.append(try allocator.dupe(u8, entry.key_ptr.*));
+            }
+        }
+    }
+
+    var list = std.array_list.Managed(ServerSummary).init(allocator);
+    errdefer {
+        for (list.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.status);
+            allocator.free(item.last_error);
+        }
+        list.deinit();
+    }
+
+    // Get aggregate counts once (global stats across all FRPS instances)
+    var agg_client_count: usize = 0;
+    var agg_proxy_count: usize = 0;
+    var agg_server_count: usize = 0;
+    if (libfrps.getServerStats(allocator)) |stats| {
+        defer allocator.free(stats.status);
+        defer allocator.free(stats.last_error);
+        agg_client_count = stats.client_count;
+        agg_proxy_count = stats.proxy_count;
+        agg_server_count = stats.server_count;
+    } else |_| {}
+
+    for (node_names.items) |name| {
+        const result = getServerStatus(allocator, name) catch |err| {
+            std.log.warn("[FRPS] getAllServerSummaries: getServerStatus failed for {s}: {any}", .{ name, err });
+            continue;
+        };
+        defer allocator.free(result.logs);
+        errdefer allocator.free(result.status);
+        errdefer allocator.free(result.last_error);
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
+        try list.append(ServerSummary{
+            .name = name_copy,
+            .status = result.status,
+            .client_count = agg_client_count,
+            .proxy_count = agg_proxy_count,
+            .server_count = agg_server_count,
+            .last_error = result.last_error,
+        });
+    }
+
+    return list.toOwnedSlice();
+}
+
+test "getProxyStats: returns empty array for unknown node" {
+    const result = try getProxyStats(std.testing.allocator, "no_such_node");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("[]", result);
+}

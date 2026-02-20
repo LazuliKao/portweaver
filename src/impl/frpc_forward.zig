@@ -443,3 +443,68 @@ fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
         .last_error = try allocator.dupe(u8, last_error),
     };
 }
+
+pub const ClientSummary = struct {
+    name: []const u8,
+    status: []const u8,
+    client_count: usize,
+    last_error: []const u8,
+};
+
+pub fn freeClientSummaries(allocator: std.mem.Allocator, items: []ClientSummary) void {
+    for (items) |item| {
+        allocator.free(item.name);
+        allocator.free(item.status);
+        allocator.free(item.last_error);
+    }
+    allocator.free(items);
+}
+
+/// Returns a slice of per-node client summaries. Caller must call freeClientSummaries.
+pub fn getAllClientSummaries(allocator: std.mem.Allocator) ![]ClientSummary {
+    var node_names = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (node_names.items) |n| allocator.free(n);
+        node_names.deinit();
+    }
+    {
+        clients_lock.lock();
+        defer clients_lock.unlock();
+        if (clients) |map| {
+            var it = map.iterator();
+            while (it.next()) |entry| {
+                try node_names.append(try allocator.dupe(u8, entry.key_ptr.*));
+            }
+        }
+    }
+
+    var list = std.array_list.Managed(ClientSummary).init(allocator);
+    errdefer {
+        for (list.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.status);
+            allocator.free(item.last_error);
+        }
+        list.deinit();
+    }
+
+    for (node_names.items) |name| {
+        const result = getClientStatus(allocator, name) catch |err| {
+            std.log.warn("[FRPC] getAllClientSummaries: getClientStatus failed for {s}: {any}", .{ name, err });
+            continue;
+        };
+        defer allocator.free(result.logs);
+        errdefer allocator.free(result.status);
+        errdefer allocator.free(result.last_error);
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
+        try list.append(ClientSummary{
+            .name = name_copy,
+            .status = result.status,
+            .client_count = 1,
+            .last_error = result.last_error,
+        });
+    }
+
+    return list.toOwnedSlice();
+}
