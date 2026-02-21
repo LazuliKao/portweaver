@@ -259,6 +259,7 @@ static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
 static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 static void tcp_conn_close_cb(uv_handle_t *handle);
 static int sockaddr_equal(const struct sockaddr *a, const struct sockaddr *b);
+static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
 
 /* Wrapper for write/send requests that carry a pointer back to the forwarder
  * so we can free memory with the right allocator in the completion callbacks.
@@ -306,6 +307,11 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)client->data;
     if (nread > 0)
     {
+        if (uv_is_closing((uv_handle_t *)&ctx->target))
+        {
+            DATA_FREE(ctx->forwarder, buf->base);
+            return;
+        }
         // Stats: count bytes received from client (bytes_in)
         if (ctx->forwarder->enable_stats)
         {
@@ -327,6 +333,7 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
             if (fw->req.data)
                 DATA_FREE(fw->fwd, fw->req.data);
             DATA_FREE(fw->fwd, fw);
+            tcp_terminate_connection(ctx);
         }
         return;
     }
@@ -334,13 +341,17 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
         DATA_FREE(ctx->forwarder, buf->base);
     if (nread < 0)
     {
-        // Gracefully shutdown target's write side to flush pending data, then close client
-        if (!uv_is_closing((uv_handle_t *)&ctx->target))
+        if (nread == UV_EOF)
         {
-            uv_shutdown(&ctx->shutdown_req_target, (uv_stream_t *)&ctx->target, NULL);
+            // Client sent FIN: stop reading client and half-close target write side.
+            uv_read_stop(client);
+            if (!uv_is_closing((uv_handle_t *)&ctx->target))
+            {
+                uv_shutdown(&ctx->shutdown_req_target, (uv_stream_t *)&ctx->target, NULL);
+            }
+            return;
         }
-        if (!uv_is_closing((uv_handle_t *)client))
-            uv_close((uv_handle_t *)client, tcp_conn_close_cb);
+        tcp_terminate_connection(ctx);
     }
 }
 
@@ -349,6 +360,11 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)target->data;
     if (nread > 0)
     {
+        if (uv_is_closing((uv_handle_t *)&ctx->client))
+        {
+            DATA_FREE(ctx->forwarder, buf->base);
+            return;
+        }
         // Stats: count bytes received from target (bytes_out)
         if (ctx->forwarder->enable_stats)
         {
@@ -370,6 +386,7 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
             if (fw->req.data)
                 DATA_FREE(fw->fwd, fw->req.data);
             DATA_FREE(fw->fwd, fw);
+            tcp_terminate_connection(ctx);
         }
         return;
     }
@@ -377,14 +394,32 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
         DATA_FREE(ctx->forwarder, buf->base);
     if (nread < 0)
     {
-        // Gracefully shutdown client's write side to flush pending data, then close target
-        if (!uv_is_closing((uv_handle_t *)&ctx->client))
+        if (nread == UV_EOF)
         {
-            uv_shutdown(&ctx->shutdown_req_client, (uv_stream_t *)&ctx->client, NULL);
+            // Target sent FIN: stop reading target and half-close client write side.
+            uv_read_stop(target);
+            if (!uv_is_closing((uv_handle_t *)&ctx->client))
+            {
+                uv_shutdown(&ctx->shutdown_req_client, (uv_stream_t *)&ctx->client, NULL);
+            }
+            return;
         }
-        if (!uv_is_closing((uv_handle_t *)target))
-            uv_close((uv_handle_t *)target, tcp_conn_close_cb);
+        tcp_terminate_connection(ctx);
     }
+}
+
+static void tcp_terminate_connection(tcp_conn_ctx_t *ctx)
+{
+    if (!ctx)
+        return;
+
+    uv_read_stop((uv_stream_t *)&ctx->client);
+    uv_read_stop((uv_stream_t *)&ctx->target);
+
+    if (!uv_is_closing((uv_handle_t *)&ctx->client))
+        uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
+    if (!uv_is_closing((uv_handle_t *)&ctx->target))
+        uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
 }
 
 static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
