@@ -300,8 +300,24 @@ fn addGoLibrary(
 
     std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
 
-    // const go_cache_path = go_cache_rel.getPath(b);
     go_cmd.setEnvironmentVariable("GOCACHE", go_cache_rel);
+
+    // Pass through GOROOT from environment if set - critical for using custom Go installation
+    // Without this, Go may use system's default GOROOT which can cause conflicts
+    if (std.process.getEnvVarOwned(b.allocator, "GOROOT")) |goroot| {
+        std.debug.print("Using GOROOT from environment: {s}\n", .{goroot});
+        go_cmd.setEnvironmentVariable("GOROOT", goroot);
+    } else |_| {
+        std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
+    }
+
+    // Also pass through GOPATH and GOMODCACHE if set
+    if (std.process.getEnvVarOwned(b.allocator, "GOPATH")) |gopath| {
+        go_cmd.setEnvironmentVariable("GOPATH", gopath);
+    } else |_| {}
+    if (std.process.getEnvVarOwned(b.allocator, "GOMODCACHE")) |gomodcache| {
+        go_cmd.setEnvironmentVariable("GOMODCACHE", gomodcache);
+    } else |_| {}
 
     const zig_exe = b.graph.zig_exe;
     // 构建目标三元组
