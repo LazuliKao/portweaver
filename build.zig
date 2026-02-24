@@ -216,6 +216,164 @@ fn createWrapperScript(
     return wrapper_path;
 }
 
+fn detectCustomGoBin(b: *std.Build, host_os: std.Target.Os.Tag, go_root_path: []const u8) ?[]const u8 {
+    const default_go_bin = if (host_os == .windows)
+        b.pathJoin(&.{ go_root_path, "bin", "go.exe" })
+    else
+        b.pathJoin(&.{ go_root_path, "bin", "go" });
+
+    if (std.fs.cwd().access(default_go_bin, .{ .mode = .read_only })) |_| {
+        return default_go_bin;
+    } else |_| {}
+
+    // Windows zip often extracts under a top-level "go" folder.
+    if (host_os == .windows) {
+        const nested_go_bin = b.pathJoin(&.{ go_root_path, "go", "bin", "go.exe" });
+        if (std.fs.cwd().access(nested_go_bin, .{ .mode = .read_only })) |_| {
+            return nested_go_bin;
+        } else |_| {}
+    }
+
+    return null;
+}
+
+fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []const u8, output_path: []const u8) void {
+    var downloaded = false;
+
+    const wget_argv = [_][]const u8{
+        "wget",
+        "-q",
+        "-O",
+        output_path,
+        url,
+    };
+    var wget_child = std.process.Child.init(&wget_argv, b.allocator);
+    const wget_result = wget_child.spawnAndWait() catch null;
+    if (wget_result) |result| {
+        if (result == .Exited and result.Exited == 0) {
+            downloaded = true;
+        }
+    }
+
+    if (!downloaded) {
+        const curl_argv = [_][]const u8{
+            "curl",
+            "-L",
+            "-f",
+            "-sS",
+            "-o",
+            output_path,
+            url,
+        };
+        var curl_child = std.process.Child.init(&curl_argv, b.allocator);
+        const curl_result = curl_child.spawnAndWait() catch null;
+        if (curl_result) |result| {
+            if (result == .Exited and result.Exited == 0) {
+                downloaded = true;
+            }
+        }
+    }
+
+    if (!downloaded and host_os == .windows) {
+        const ps_cmd = b.fmt("Invoke-WebRequest -Uri \"{s}\" -OutFile \"{s}\"", .{ url, output_path });
+        const ps_argv = [_][]const u8{
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            ps_cmd,
+        };
+        var ps_child = std.process.Child.init(&ps_argv, b.allocator);
+        const ps_result = ps_child.spawnAndWait() catch null;
+        if (ps_result) |result| {
+            if (result == .Exited and result.Exited == 0) {
+                downloaded = true;
+            }
+        }
+    }
+
+    if (!downloaded) {
+        @panic("Failed to download Go toolchain (tried wget, curl, and PowerShell on Windows)");
+    }
+}
+
+fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
+    const host_os = b.graph.host.result.os.tag;
+    const host_arch = b.graph.host.result.cpu.arch;
+
+    // Only support x86_64 hosts for now
+    if (host_arch != .x86_64) {
+        return null;
+    }
+
+    // Support both Linux and Windows hosts
+    if (host_os != .linux and host_os != .windows) {
+        return null;
+    }
+    const go_root = b.cache_root.join(b.allocator, &.{"portweaver-go"}) catch @panic("OOM");
+    const go_root_path = b.path(go_root).getPath(b);
+
+    if (detectCustomGoBin(b, host_os, go_root_path)) |cached_go_bin| {
+        std.debug.print("Using cached patched Go: {s}\n", .{cached_go_bin});
+        return cached_go_bin;
+    }
+
+    {
+        // Need to download Go toolchain synchronously at config time
+        std.debug.print("Downloading patched Go 1.25.7 for musl builds...\n", .{});
+        const tarball_ext = if (host_os == .windows) ".zip" else ".tar.gz";
+        const temp_tarball = b.cache_root.join(b.allocator, &.{b.fmt("portweaver-go{s}", .{tarball_ext})}) catch @panic("OOM");
+        const temp_tarball_path = b.path(temp_tarball).getPath(b);
+
+        // Determine download URL based on host OS
+        const go_url = switch (host_os) {
+            .linux => "https://github.com/LazuliKao/build-golang/releases/download/go1.25.7/go1.25.7.linux-amd64.tar.gz",
+            .windows => "https://github.com/LazuliKao/build-golang/releases/download/go1.25.7/go1.25.7.windows-amd64.zip",
+            else => return null,
+        };
+
+        // Download tarball with fallbacks
+        downloadFileWithFallback(b, host_os, go_url, temp_tarball_path);
+
+        // Create go_root directory
+        std.fs.cwd().makePath(go_root_path) catch @panic("Failed to create go_root directory");
+        // Extract based on file type
+        if (host_os == .windows) {
+            // Windows: use PowerShell to extract zip
+            const unzip_argv = [_][]const u8{
+                "powershell",
+                "-Command",
+                b.fmt("Expand-Archive -Path '{s}' -DestinationPath '{s}' -Force", .{ temp_tarball_path, go_root_path }),
+            };
+            var unzip_child = std.process.Child.init(&unzip_argv, b.allocator);
+            const unzip_result = unzip_child.spawnAndWait() catch @panic("Failed to run PowerShell");
+            if (unzip_result.Exited != 0) {
+                @panic("zip extraction failed");
+            }
+        } else {
+            // Linux: use tar
+            const tar_argv = [_][]const u8{
+                "tar",
+                "xzf",
+                temp_tarball_path,
+                "-C",
+                go_root_path,
+                "--strip-components=1",
+            };
+            var tar_child = std.process.Child.init(&tar_argv, b.allocator);
+            const tar_result = tar_child.spawnAndWait() catch @panic("Failed to run tar");
+            if (tar_result.Exited != 0) {
+                @panic("tar extraction failed");
+            }
+        }
+        // Remove tarball
+        std.fs.cwd().deleteFile(temp_tarball_path) catch {};
+
+        const extracted_go_bin = detectCustomGoBin(b, host_os, go_root_path) orelse
+            @panic("Downloaded Go toolchain but go binary was not found");
+        return extracted_go_bin;
+    }
+}
+
 fn addGoLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -225,6 +383,14 @@ fn addGoLibrary(
 ) *std.Build.Step {
     const os_tag = target.result.os.tag;
     const arch_tag = target.result.cpu.arch;
+
+    // Check if we should use custom Go toolchain for musl targets
+    const use_custom_go = target.result.abi == .musl and
+        (b.graph.host.result.os.tag == .linux or b.graph.host.result.os.tag == .windows) and
+        b.graph.host.result.cpu.arch == .x86_64;
+
+    // Get custom Go path if needed
+    const custom_go_path = if (use_custom_go) ensureMuslGoToolchain(b) else null;
 
     const goos = switch (os_tag) {
         .windows => "windows",
@@ -257,8 +423,9 @@ fn addGoLibrary(
     };
 
     var go_args = std.ArrayListUnmanaged([]const u8){};
+    const go_exe = if (custom_go_path) |path| path else "go";
     go_args.appendSlice(b.allocator, &.{
-        "go",
+        go_exe,
         "build",
         "-buildmode=c-archive",
     }) catch @panic("OOM");
@@ -301,23 +468,73 @@ fn addGoLibrary(
     std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
 
     go_cmd.setEnvironmentVariable("GOCACHE", go_cache_rel);
+    // Force module mode explicitly so cross-builds behave consistently.
+    go_cmd.setEnvironmentVariable("GO111MODULE", "on");
 
-    // Pass through GOROOT from environment if set - critical for using custom Go installation
-    // Without this, Go may use system's default GOROOT which can cause conflicts
-    if (std.process.getEnvVarOwned(b.allocator, "GOROOT")) |goroot| {
-        std.debug.print("Using GOROOT from environment: {s}\n", .{goroot});
-        go_cmd.setEnvironmentVariable("GOROOT", goroot);
-    } else |_| {
-        std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
+    // For musl targets, use sanitized environment with custom Go toolchain
+    // This prevents conflicts with system Go installation
+    if (use_custom_go) {
+        go_cmd.setEnvironmentVariable("GOENV", "off");
+        go_cmd.setEnvironmentVariable("GOTOOLDIR", "");
+        go_cmd.setEnvironmentVariable("GOROOT_FINAL", "");
+
+        // Set GOROOT to the actual root that contains src/pkg/bin.
+        // On Windows zip builds this can be either <cache>/portweaver-go or
+        // <cache>/portweaver-go/go depending on archive layout.
+        const go_exe_path = custom_go_path orelse @panic("custom_go_path is null in use_custom_go branch");
+        const go_bin_dir = std.fs.path.dirname(go_exe_path) orelse @panic("Invalid go executable path");
+        const go_root_path = std.fs.path.dirname(go_bin_dir) orelse @panic("Invalid go bin directory path");
+        go_cmd.setEnvironmentVariable("GOROOT", go_root_path);
+
+        // Set GOMODCACHE to cache path for isolation
+        const go_modcache = b.cache_root.join(b.allocator, &.{ "go", "modcache" }) catch @panic("OOM");
+        const go_modcache_path = b.path(go_modcache).getPath(b);
+        go_cmd.setEnvironmentVariable("GOMODCACHE", go_modcache_path);
+
+        // Set GOPATH as well to avoid GOPATH-derived defaults becoming invalid.
+        const go_path = b.cache_root.join(b.allocator, &.{"go"}) catch @panic("OOM");
+        go_cmd.setEnvironmentVariable("GOPATH", b.path(go_path).getPath(b));
+
+        // Prevent empty/invalid GOPROXY inherited from host from breaking module downloads.
+        if (std.process.getEnvVarOwned(b.allocator, "GOPROXY")) |goproxy| {
+            if (goproxy.len > 0) {
+                go_cmd.setEnvironmentVariable("GOPROXY", goproxy);
+            } else {
+                go_cmd.setEnvironmentVariable("GOPROXY", "https://proxy.golang.org,direct");
+            }
+        } else |_| {
+            go_cmd.setEnvironmentVariable("GOPROXY", "https://proxy.golang.org,direct");
+        }
+
+        if (std.process.getEnvVarOwned(b.allocator, "GOSUMDB")) |gosumdb| {
+            if (gosumdb.len > 0) {
+                go_cmd.setEnvironmentVariable("GOSUMDB", gosumdb);
+            } else {
+                go_cmd.setEnvironmentVariable("GOSUMDB", "sum.golang.org");
+            }
+        } else |_| {
+            go_cmd.setEnvironmentVariable("GOSUMDB", "sum.golang.org");
+        }
+
+        std.debug.print("Using sanitized Go environment for musl target\n", .{});
+    } else {
+        // Pass through GOROOT from environment if set - critical for using custom Go installation
+        // Without this, Go may use system's default GOROOT which can cause conflicts
+        if (std.process.getEnvVarOwned(b.allocator, "GOROOT")) |goroot| {
+            std.debug.print("Using GOROOT from environment: {s}\n", .{goroot});
+            go_cmd.setEnvironmentVariable("GOROOT", goroot);
+        } else |_| {
+            std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
+        }
+
+        // Also pass through GOPATH and GOMODCACHE if set
+        if (std.process.getEnvVarOwned(b.allocator, "GOPATH")) |gopath| {
+            go_cmd.setEnvironmentVariable("GOPATH", gopath);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(b.allocator, "GOMODCACHE")) |gomodcache| {
+            go_cmd.setEnvironmentVariable("GOMODCACHE", gomodcache);
+        } else |_| {}
     }
-
-    // Also pass through GOPATH and GOMODCACHE if set
-    if (std.process.getEnvVarOwned(b.allocator, "GOPATH")) |gopath| {
-        go_cmd.setEnvironmentVariable("GOPATH", gopath);
-    } else |_| {}
-    if (std.process.getEnvVarOwned(b.allocator, "GOMODCACHE")) |gomodcache| {
-        go_cmd.setEnvironmentVariable("GOMODCACHE", gomodcache);
-    } else |_| {}
 
     const zig_exe = b.graph.zig_exe;
     // 构建目标三元组
