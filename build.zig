@@ -430,7 +430,15 @@ fn addGoLibrary(
         "-buildmode=c-archive",
     }) catch @panic("OOM");
 
-    if (tags) |t| {
+    const effective_tags = if (os_tag == .linux)
+        if (tags) |t|
+            b.fmt("{s},netgo,osusergo", .{t})
+        else
+            "netgo,osusergo"
+    else
+        tags;
+
+    if (effective_tags) |t| {
         go_args.append(b.allocator, b.fmt("-tags={s}", .{t})) catch @panic("OOM");
     }
 
