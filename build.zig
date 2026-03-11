@@ -1,7 +1,7 @@
 const std = @import("std");
 fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
     // fix x_cgo_setenv crash
-    if (target.result.abi == .musl) {
+    if (target.result.abi.isMusl()) {
         exe.link_function_sections = true;
         exe.link_data_sections = true;
         exe.link_gc_sections = true;
@@ -385,7 +385,7 @@ fn addGoLibrary(
     const arch_tag = target.result.cpu.arch;
 
     // Check if we should use custom Go toolchain for musl targets
-    const use_custom_go = target.result.abi == .musl and
+    const use_custom_go = target.result.abi.isMusl() and
         (b.graph.host.result.os.tag == .linux or b.graph.host.result.os.tag == .windows) and
         b.graph.host.result.cpu.arch == .x86_64;
 
