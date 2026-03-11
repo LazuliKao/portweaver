@@ -498,6 +498,7 @@ fn addGoLibrary(
         const go_modcache = b.cache_root.join(b.allocator, &.{ "go", "modcache" }) catch @panic("OOM");
         const go_modcache_path = b.path(go_modcache).getPath(b);
         go_cmd.setEnvironmentVariable("GOMODCACHE", go_modcache_path);
+        go_cmd.setEnvironmentVariable("GOFLAGS", "-modcacherw");
 
         // Set GOPATH as well to avoid GOPATH-derived defaults becoming invalid.
         const go_path = b.cache_root.join(b.allocator, &.{"go"}) catch @panic("OOM");
