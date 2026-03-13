@@ -34,6 +34,13 @@ fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) [
     }
 }
 fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    // MIPS targets use -mabicalls by default (required by the N32/N64 ABI),
+    // which is incompatible with -fno-PIC that Zig passes to static libs.
+    // Force PIC on MIPS so clang doesn't error out.
+    const is_mips = switch (target.result.cpu.arch) {
+        .mips, .mipsel, .mips64, .mips64el => true,
+        else => false,
+    };
     const uv = b.addLibrary(.{
         .name = "uv",
         .linkage = .static,
@@ -41,9 +48,27 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             .link_libc = true,
             .target = target,
             .optimize = optimize,
+            .pic = if (is_mips) true else null,
         }),
     });
     applyLinkOptimization(b, target, uv, optimize);
+
+    // Zig (as of 0.14) does not inject musl libc header search paths for MIPS
+    // targets when compiling C files via the build system (unlike `zig cc`).
+    // Manually add them so that <stdio.h> and friends are found.
+    if (is_mips) {
+        const zig_lib = b.graph.zig_lib_directory.path orelse @panic("zig_lib_directory path is null");
+        const libc_include = b.pathJoin(&.{ zig_lib, "libc", "include" });
+        const arch_tag = switch (target.result.cpu.arch) {
+            .mips64, .mips64el => "mips64-linux-musl",
+            .mips, .mipsel => "mips-linux-musl",
+            else => unreachable,
+        };
+        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, arch_tag }) });
+        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "generic-musl" }) });
+        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "mips-linux-any" }) });
+        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "any-linux-any" }) });
+    }
 
     uv.addIncludePath(b.path("deps/libuv/include"));
     // libuv has internal headers included from its own C sources.
