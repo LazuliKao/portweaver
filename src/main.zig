@@ -13,6 +13,7 @@ const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
 pub const event_log = @import("event_log.zig");
+const process_lock = @import("process_lock.zig");
 
 pub fn main() !void {
     // 设置分配器：Debug 模式使用 GPA 检测内存泄漏，Release 模式使用 c_allocator
@@ -32,6 +33,11 @@ pub fn main() !void {
             }
         }
     }
+
+    // Ensure single instance - kill old process if exists
+    try process_lock.ensureSingleInstance(allocator);
+    defer process_lock.cleanup();
+
     // Initialize event logger
     event_log.initGlobal(allocator);
     defer event_log.deinitGlobal();
