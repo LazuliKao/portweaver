@@ -49,6 +49,7 @@ extern "C"
 #define UDP_SESSION_HASH_SIZE 256
 
     // TCP Forwarder API
+    // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).
     // Returns forwarder pointer on success, NULL on failure. Error code written to out_error if provided.
     tcp_forwarder_t *tcp_forwarder_create(
         uint16_t listen_port,
@@ -60,10 +61,13 @@ extern "C"
 
     int tcp_forwarder_start(tcp_forwarder_t *forwarder);
     void tcp_forwarder_stop(tcp_forwarder_t *forwarder);
+    // Must be called only after tcp_forwarder_start() has returned for this forwarder.
+    // Do not call destroy concurrently with start/stop/get_stats on the same object.
     void tcp_forwarder_destroy(tcp_forwarder_t *forwarder);
     traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder);
 
     // UDP Forwarder API
+    // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).
     // Returns forwarder pointer on success, NULL on failure. Error code written to out_error if provided.
     udp_forwarder_t *udp_forwarder_create(
         uint16_t listen_port,
@@ -75,6 +79,8 @@ extern "C"
 
     int udp_forwarder_start(udp_forwarder_t *forwarder);
     void udp_forwarder_stop(udp_forwarder_t *forwarder);
+    // Must be called only after udp_forwarder_start() has returned for this forwarder.
+    // Do not call destroy concurrently with start/stop/get_stats on the same object.
     void udp_forwarder_destroy(udp_forwarder_t *forwarder);
     traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder);
 

@@ -1,5 +1,6 @@
 #include "forwarder.h"
 #include "uv.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,9 +17,20 @@
  */
 static const uint32_t DATA_MAGIC = 0xF00DBEEF;
 
+typedef union data_alloc_header
+{
+    struct
+    {
+        uint32_t magic;
+        uint32_t reserved;
+    } fields;
+    max_align_t _align;
+} data_alloc_header_t;
+
 typedef struct alloc_entry
 {
     void *ptr; /* user-facing pointer (after header) */
+    void *raw_ptr;
     size_t size;
     const char *file; /* allocation site file */
     int line;         /* allocation site line */
@@ -27,18 +39,19 @@ typedef struct alloc_entry
 
 static alloc_entry_t *alloc_map_head = NULL;
 static uv_mutex_t alloc_map_lock;
-static int alloc_map_initialized = 0;
+static uv_once_t alloc_map_once = UV_ONCE_INIT;
+
+static void alloc_map_init_once(void)
+{
+    uv_mutex_init(&alloc_map_lock);
+}
 
 static void ensure_alloc_map_init(void)
 {
-    if (!alloc_map_initialized)
-    {
-        uv_mutex_init(&alloc_map_lock);
-        alloc_map_initialized = 1;
-    }
+    uv_once(&alloc_map_once, alloc_map_init_once);
 }
 
-static void alloc_map_add(void *user_ptr, size_t size, const char *file, int line)
+static void alloc_map_add(void *user_ptr, void *raw_ptr, size_t size, const char *file, int line)
 {
     ensure_alloc_map_init();
     alloc_entry_t *e = (alloc_entry_t *)malloc(sizeof(alloc_entry_t));
@@ -48,6 +61,7 @@ static void alloc_map_add(void *user_ptr, size_t size, const char *file, int lin
         return;
     }
     e->ptr = user_ptr;
+    e->raw_ptr = raw_ptr;
     e->size = size;
     e->file = file;
     e->line = line;
@@ -59,22 +73,10 @@ static void alloc_map_add(void *user_ptr, size_t size, const char *file, int lin
 
     // fprintf(stderr, "[alloc_map_add] tracked user=%p size=%zu (%s:%d)\n", user_ptr, size, file, line);
 }
-static int link_list_len(alloc_entry_t *next)
-{
-    int len = 0;
-    alloc_entry_t *cur = next;
-    while (cur)
-    {
-        len++;
-        cur = cur->next;
-    }
-    return len;
-}
 
-static int alloc_map_remove(void *user_ptr, size_t *size_out, const char **file_out, int *line_out)
+static int alloc_map_remove(void *user_ptr, void **raw_out, size_t *size_out, const char **file_out, int *line_out)
 {
-    if (!alloc_map_initialized)
-        return 0;
+    ensure_alloc_map_init();
     uv_mutex_lock(&alloc_map_lock);
     alloc_entry_t *prev = NULL;
     alloc_entry_t *cur = alloc_map_head;
@@ -82,6 +84,8 @@ static int alloc_map_remove(void *user_ptr, size_t *size_out, const char **file_
     {
         if (cur->ptr == user_ptr)
         {
+            if (raw_out)
+                *raw_out = cur->raw_ptr;
             if (size_out)
                 *size_out = cur->size;
             if (file_out)
@@ -107,94 +111,62 @@ static int alloc_map_remove(void *user_ptr, size_t *size_out, const char **file_
 
 static void *data_alloc(size_t size, const char *file, int line)
 {
-    size_t total = size + sizeof(uint32_t) * 2;
-    uint8_t *p = (uint8_t *)malloc(total);
-    if (!p)
+    size_t total = sizeof(data_alloc_header_t) + size;
+    data_alloc_header_t *hdr = (data_alloc_header_t *)malloc(total);
+    if (!hdr)
         return NULL;
-    uint32_t magic = DATA_MAGIC;
-    memcpy(p, &magic, sizeof(uint32_t));
-    void *user_ptr = (void *)(p + sizeof(uint32_t) * 2);
+    hdr->fields.magic = DATA_MAGIC;
+    hdr->fields.reserved = 0;
+
+    void *user_ptr = (void *)(hdr + 1);
 
     /* Track ownership */
-    alloc_map_add(user_ptr, size, file, line);
+    alloc_map_add(user_ptr, (void *)hdr, size, file, line);
 
-    // fprintf(stderr, "[data_alloc] alloc user=%p header=%p size=%zu (%s:%d) (malloc)\n", user_ptr, (void *)p, size, file, line);
+    // fprintf(stderr, "[data_alloc] alloc user=%p header=%p size=%zu (%s:%d) (malloc)\n", user_ptr, (void *)hdr, size, file, line);
 
     return user_ptr;
 }
-static int period = 1;
+
 static void data_free(void *ptr, const char *file, int line)
 {
     if (!ptr)
         return;
-    uint8_t *p = (uint8_t *)ptr - sizeof(uint32_t) * 2;
-    uint32_t magic = 0;
-    memcpy(&magic, p, sizeof(uint32_t));
-    if (magic != DATA_MAGIC)
-    {
-        /* Not our allocation header or already corrupted. Log for debugging. */
-        fprintf(stderr, "[data_free] detected invalid free header: ptr=%p header=%p magic=0x%08x (%s:%d)\n", ptr, (void *)p, magic, file, line);
-        /* Also check whether ptr was tracked but header corrupted */
-        size_t tracked_size = 0;
-        const char *tracked_file = NULL;
-        int tracked_line = 0;
-        if (!alloc_map_remove(ptr, &tracked_size, &tracked_file, &tracked_line))
-        {
-            fprintf(stderr, "[data_free] ptr %p was not tracked by alloc_map\n", ptr);
-        }
-        else
-        {
-            fprintf(stderr, "[data_free] ptr %p was tracked (size=%zu at %s:%d) but header corrupted, skipping free to avoid crash\n", ptr, tracked_size, tracked_file ? tracked_file : "?", tracked_line);
-        }
-        exit(1); /* likely double free or invalid free, abort to avoid undefined behavior */
-        return;  /* avoid freeing memory not owned by our data_alloc */
-    }
 
-    /* Verify ownership in map and remove it */
+    void *raw_ptr = NULL;
     size_t tracked_size = 0;
     const char *tracked_file = NULL;
     int tracked_line = 0;
-    if (!alloc_map_remove(ptr, &tracked_size, &tracked_file, &tracked_line))
+
+    if (!alloc_map_remove(ptr, &raw_ptr, &tracked_size, &tracked_file, &tracked_line))
     {
-        fprintf(stderr, "[data_free] ptr %p had valid header but was not tracked by alloc_map\n", ptr);
-        /* proceed with free anyway */
-        exit(1); /* likely double free or invalid free, abort to avoid undefined behavior */
-    }
-    else
-    {
-        // Reduce logging frequency for performance (only every 100 frees)
-        if (period++ > 100)
-        {
-            period = 0;
-            int count = link_list_len(alloc_map_head);
-            fprintf(stderr, "[data_free] alloc_map current size: %d\n", count);
-            // Only print details if count is small (potential leak detection)
-            if (count > 0 && count < 10)
-            {
-                for (alloc_entry_t *e = alloc_map_head; e != NULL; e = e->next)
-                {
-                    int current_magic = 0;
-                    memcpy(&current_magic, (uint8_t *)e->ptr - sizeof(uint32_t) * 2, sizeof(uint32_t));
-                    fprintf(stderr, "  -> user=%p size=%zu (%s:%d) magic=0x%08x\n", e->ptr, e->size, e->file ? e->file : "?", e->line, current_magic);
-                }
-            }
-        }
+        fprintf(stderr, "[data_free] ptr %p was not tracked by alloc_map (%s:%d)\n", ptr, file, line);
+        abort();
+        return;
     }
 
-    magic = 0;
-    memcpy(p, &magic, sizeof(uint32_t));
+    data_alloc_header_t *hdr = (data_alloc_header_t *)raw_ptr;
+    if (!hdr || hdr->fields.magic != DATA_MAGIC)
+    {
+        uint32_t magic = hdr ? hdr->fields.magic : 0u;
+        fprintf(stderr,
+                "[data_free] detected corrupted header: ptr=%p raw=%p magic=0x%08x alloc=(%s:%d) free=(%s:%d)\n",
+                ptr,
+                raw_ptr,
+                (unsigned int)magic,
+                tracked_file ? tracked_file : "?",
+                tracked_line,
+                file,
+                line);
+        abort();
+        return;
+    }
 
-    /* Dump header bytes to help diagnose allocator canary corruption */
-    // fprintf(stderr, "[data_free] dumping header bytes at %p: ", (void *)p);
-    // for (int i = 0; i < 32; ++i)
-    // {
-    //     fprintf(stderr, "%02x ", ((unsigned char *)p)[i]);
-    // }
-    // fprintf(stderr, "\n");
+    hdr->fields.magic = 0;
 
     /* Use free() to avoid panics while debugging */
-    free(p);
-    // fprintf(stderr, "[data_free] freed user=%p header=%p (free)\n", ptr, (void *)p);
+    free(raw_ptr);
+    // fprintf(stderr, "[data_free] freed user=%p header=%p (free)\n", ptr, raw_ptr);
 }
 
 #define DATA_ALLOC(ctx, sz) data_alloc((sz), __FILE__, __LINE__)
@@ -276,6 +248,7 @@ typedef struct fwd_write_req
 {
     uv_write_t req;
     struct tcp_forwarder *fwd;
+    tcp_conn_ctx_t *ctx;
 } fwd_write_req_t;
 
 typedef struct fwd_udp_send_req
@@ -291,6 +264,8 @@ static void tcp_on_client_write(uv_write_t *req, int status)
     if (status != 0)
     {
         fprintf(stderr, "[tcp_on_client_write] write error: %s\n", uv_strerror(status));
+        if (fw->ctx)
+            tcp_terminate_connection(fw->ctx);
     }
     if (req->data)
         DATA_FREE(fwd, req->data);
@@ -304,6 +279,8 @@ static void tcp_on_target_write(uv_write_t *req, int status)
     if (status != 0)
     {
         fprintf(stderr, "[tcp_on_target_write] write error: %s\n", uv_strerror(status));
+        if (fw->ctx)
+            tcp_terminate_connection(fw->ctx);
     }
     if (req->data)
         DATA_FREE(fwd, req->data);
@@ -329,9 +306,11 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
         if (!fw)
         {
             DATA_FREE(ctx->forwarder, buf->base);
+            tcp_terminate_connection(ctx);
             return;
         }
         fw->fwd = ctx->forwarder;
+        fw->ctx = ctx;
         uv_buf_t wbuf = uv_buf_init(buf->base, nread);
         fw->req.data = buf->base;
         int r = uv_write(&fw->req, (uv_stream_t *)&ctx->target, &wbuf, 1, tcp_on_client_write);
@@ -378,9 +357,11 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
         if (!fw)
         {
             DATA_FREE(ctx->forwarder, buf->base);
+            tcp_terminate_connection(ctx);
             return;
         }
         fw->fwd = ctx->forwarder;
+        fw->ctx = ctx;
         uv_buf_t wbuf = uv_buf_init(buf->base, nread);
         fw->req.data = buf->base;
         int r = uv_write(&fw->req, (uv_stream_t *)&ctx->client, &wbuf, 1, tcp_on_target_write);
@@ -534,6 +515,8 @@ static int sockaddr_equal(const struct sockaddr *a, const struct sockaddr *b)
         const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
         if (a6->sin6_port != b6->sin6_port)
             return 0;
+        if (a6->sin6_scope_id != b6->sin6_scope_id)
+            return 0;
         return memcmp(&a6->sin6_addr, &b6->sin6_addr, sizeof(a6->sin6_addr)) == 0;
     }
     return 0;
@@ -544,8 +527,17 @@ static void tcp_on_connect(uv_connect_t *req, int status)
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)req->data;
     if (status == 0)
     {
-        uv_read_start((uv_stream_t *)&ctx->client, tcp_alloc_cb, tcp_on_client_read);
-        uv_read_start((uv_stream_t *)&ctx->target, tcp_alloc_cb, tcp_on_target_read);
+        int r1 = uv_read_start((uv_stream_t *)&ctx->client, tcp_alloc_cb, tcp_on_client_read);
+        int r2 = uv_read_start((uv_stream_t *)&ctx->target, tcp_alloc_cb, tcp_on_target_read);
+        if (r1 != 0 || r2 != 0)
+        {
+            fprintf(stderr, "[tcp_on_connect] uv_read_start failed: client=%d target=%d\n", r1, r2);
+            if (r1 == 0)
+                uv_read_stop((uv_stream_t *)&ctx->client);
+            if (r2 == 0)
+                uv_read_stop((uv_stream_t *)&ctx->target);
+            tcp_terminate_connection(ctx);
+        }
     }
     else
     {
@@ -597,9 +589,24 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     ctx->closed = 0;
     ctx->close_count = 0;
     ctx->active_counted = 0;
-    uv_tcp_init(fwd->loop, &ctx->client);
-    uv_tcp_init(fwd->loop, &ctx->target);
+
+    int init_rc = uv_tcp_init(fwd->loop, &ctx->client);
+    if (init_rc != 0)
+    {
+        fprintf(stderr, "[tcp_on_new_connection] uv_tcp_init(client) failed: %s\n", uv_strerror(init_rc));
+        DATA_FREE(fwd, ctx);
+        return;
+    }
     ctx->client.data = ctx;
+
+    init_rc = uv_tcp_init(fwd->loop, &ctx->target);
+    if (init_rc != 0)
+    {
+        fprintf(stderr, "[tcp_on_new_connection] uv_tcp_init(target) failed: %s\n", uv_strerror(init_rc));
+        ctx->close_count = 1; // target not initialized, only client close callback will fire
+        uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
+        return;
+    }
     ctx->target.data = ctx;
     if (uv_accept(server, (uv_stream_t *)&ctx->client) == 0)
     {
@@ -842,7 +849,7 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
 {
-    traffic_stats_t stats = {0, 0, 0};
+    traffic_stats_t stats = {0};
     if (forwarder && forwarder->enable_stats)
     {
         stats.bytes_in = __atomic_load_n(&forwarder->bytes_in, __ATOMIC_RELAXED);
@@ -901,10 +908,11 @@ static inline uint32_t sockaddr_hash(const struct sockaddr *addr)
     else if (addr->sa_family == AF_INET6)
     {
         const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)addr;
-        const uint32_t *words = (const uint32_t *)&a6->sin6_addr;
-        for (int i = 0; i < 4; i++)
-            hash = ((hash << 5) + hash) ^ words[i];
+        const unsigned char *bytes = (const unsigned char *)&a6->sin6_addr;
+        for (int i = 0; i < 16; i++)
+            hash = ((hash << 5) + hash) ^ bytes[i];
         hash = ((hash << 5) + hash) ^ a6->sin6_port;
+        hash = ((hash << 5) + hash) ^ a6->sin6_scope_id;
     }
     return hash % UDP_SESSION_HASH_SIZE;
 }
@@ -1028,6 +1036,15 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
                                 const struct sockaddr *addr, unsigned flags)
 {
     udp_client_session_t *session = (udp_client_session_t *)handle->data;
+
+    if ((flags & UV_UDP_PARTIAL) != 0)
+    {
+        fprintf(stderr, "[udp_session_on_recv] dropping partial UDP datagram\n");
+        if (buf->base)
+            DATA_FREE(session->fwd, buf->base);
+        return;
+    }
+
     if (nread > 0)
     {
         // Stats: count bytes received from target (bytes_out)
@@ -1072,7 +1089,8 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
 // create a session (ephemeral socket) for a client address
 static udp_client_session_t *udp_session_create(udp_forwarder_t *fwd, const struct sockaddr *client_addr, int addr_len)
 {
-    if (fwd->active_sessions >= UDP_MAX_SESSIONS)
+    unsigned int active_sessions = __atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED);
+    if (active_sessions >= UDP_MAX_SESSIONS)
     {
         fprintf(stderr, "[udp_session_create] session limit reached (%u), dropping packet\n", UDP_MAX_SESSIONS);
         return NULL;
@@ -1192,6 +1210,15 @@ static void udp_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
                         const struct sockaddr *addr, unsigned flags)
 {
     udp_forwarder_t *fwd = (udp_forwarder_t *)handle->data;
+
+    if ((flags & UV_UDP_PARTIAL) != 0)
+    {
+        fprintf(stderr, "[udp_on_recv] dropping partial UDP datagram\n");
+        if (buf->base)
+            DATA_FREE((struct udp_forwarder *)fwd, buf->base);
+        return;
+    }
+
     if (nread > 0 && addr)
     {
         // Stats: count bytes received from client (bytes_in)
@@ -1472,7 +1499,7 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)
 {
-    traffic_stats_t stats = {0, 0, 0};
+    traffic_stats_t stats = {0};
     udp_forwarder_t *fwd = (udp_forwarder_t *)forwarder;
     if (fwd && fwd->enable_stats)
     {
