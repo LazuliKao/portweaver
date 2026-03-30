@@ -1,11 +1,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// PID file path (platform-specific)
-const pid_file_path = if (builtin.os.tag == .windows)
-    "portweaver.pid"
-else
-    "/var/run/portweaver.pid";
+/// Returns PID file path (platform-specific)
+/// Windows: current working directory
+/// Linux/Unix: prefer XDG_RUNTIME_DIR, fallback to /tmp
+pub fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8) []const u8 {
+    if (builtin.os.tag == .windows) {
+        return "portweaver.pid";
+    }
+
+    if (std.posix.getenv("XDG_RUNTIME_DIR")) |runtime_dir| {
+        return std.fmt.bufPrint(buf, "{s}/portweaver.pid", .{std.mem.sliceTo(runtime_dir, 0)}) catch "/tmp/portweaver.pid";
+    }
+
+    return "/tmp/portweaver.pid";
+}
 
 /// Ensures single instance by checking and managing PID file
 /// Automatically kills old process if found
@@ -43,6 +52,9 @@ pub fn ensureSingleInstance(allocator: std.mem.Allocator) !void {
 
 /// Removes PID file on clean exit
 pub fn cleanup() void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pid_file_path = getPidFilePath(&path_buf);
+
     std.fs.cwd().deleteFile(pid_file_path) catch |err| {
         std.log.warn("Failed to remove PID file: {any}", .{err});
     };
@@ -50,15 +62,24 @@ pub fn cleanup() void {
 
 /// Reads PID from file
 fn readPidFile(allocator: std.mem.Allocator) ![]const u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pid_file_path = getPidFilePath(&path_buf);
+
     const file = try std.fs.cwd().openFile(pid_file_path, .{});
     defer file.close();
 
     const content = try file.readToEndAlloc(allocator, 1024);
-    return std.mem.trim(u8, content, &std.ascii.whitespace);
+    defer allocator.free(content);
+
+    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+    return try allocator.dupe(u8, trimmed);
 }
 
 /// Writes current process PID to file
 fn writePidFile(allocator: std.mem.Allocator) !void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pid_file_path = getPidFilePath(&path_buf);
+
     const file = try std.fs.cwd().createFile(pid_file_path, .{ .truncate = true });
     defer file.close();
 
