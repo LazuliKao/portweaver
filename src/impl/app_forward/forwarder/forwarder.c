@@ -1,5 +1,6 @@
 #include "forwarder.h"
 #include "uv.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -217,6 +218,7 @@ struct tcp_forwarder
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions; /* active TCP client sessions */
+    uint16_t listen_port;
 };
 // Full UDP forwarder definition (kept here so C code can access members)
 struct udp_forwarder
@@ -235,6 +237,7 @@ struct udp_forwarder
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions; /* active UDP client sessions */
+    uint16_t listen_port;
 };
 
 // --- TCP Forwarder Implementation ---
@@ -259,8 +262,12 @@ static void tcp_on_target_write(uv_write_t *req, int status);
 static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 static void tcp_conn_close_cb(uv_handle_t *handle);
+static void udp_session_close_cb(uv_handle_t *handle);
 static int sockaddr_equal(const struct sockaddr *a, const struct sockaddr *b);
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
+static void close_handle_walk_cb(uv_handle_t *handle, void *arg);
+static void tcp_close_walk_cb(uv_handle_t *handle, void *arg);
+static void udp_close_walk_cb(uv_handle_t *handle, void *arg);
 
 /* Wrapper for write/send requests that carry a pointer back to the forwarder
  * so we can free memory with the right allocator in the completion callbacks.
@@ -344,12 +351,8 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
     {
         if (nread == UV_EOF)
         {
-            // Client sent FIN: stop reading client and half-close target write side.
-            uv_read_stop(client);
-            if (!uv_is_closing((uv_handle_t *)&ctx->target))
-            {
-                uv_shutdown(&ctx->shutdown_req_target, (uv_stream_t *)&ctx->target, NULL);
-            }
+            // Avoid half-close leaks: terminate both ends on EOF.
+            tcp_terminate_connection(ctx);
             return;
         }
         tcp_terminate_connection(ctx);
@@ -397,16 +400,63 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
     {
         if (nread == UV_EOF)
         {
-            // Target sent FIN: stop reading target and half-close client write side.
-            uv_read_stop(target);
-            if (!uv_is_closing((uv_handle_t *)&ctx->client))
-            {
-                uv_shutdown(&ctx->shutdown_req_client, (uv_stream_t *)&ctx->client, NULL);
-            }
+            // Avoid half-close leaks: terminate both ends on EOF.
+            tcp_terminate_connection(ctx);
             return;
         }
         tcp_terminate_connection(ctx);
     }
+}
+
+static void close_handle_walk_cb(uv_handle_t *handle, void *arg)
+{
+    (void)arg;
+    if (!handle || uv_is_closing(handle))
+        return;
+    uv_close(handle, NULL);
+}
+
+static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
+{
+    struct tcp_forwarder *fwd = (struct tcp_forwarder *)arg;
+    if (!handle || uv_is_closing(handle) || !fwd)
+        return;
+
+    if (handle == (uv_handle_t *)&fwd->server || handle == (uv_handle_t *)&fwd->stop_handle)
+    {
+        uv_close(handle, NULL);
+        return;
+    }
+
+    if (handle->type == UV_TCP)
+    {
+        uv_read_stop((uv_stream_t *)handle);
+        uv_close(handle, tcp_conn_close_cb);
+        return;
+    }
+
+    uv_close(handle, NULL);
+}
+
+static void udp_close_walk_cb(uv_handle_t *handle, void *arg)
+{
+    udp_forwarder_t *fwd = (udp_forwarder_t *)arg;
+    if (!handle || uv_is_closing(handle) || !fwd)
+        return;
+
+    if (handle == (uv_handle_t *)&fwd->server || handle == (uv_handle_t *)&fwd->stop_handle)
+    {
+        uv_close(handle, NULL);
+        return;
+    }
+
+    if ((handle->type == UV_UDP || handle->type == UV_TIMER) && handle->data)
+    {
+        uv_close(handle, udp_session_close_cb);
+        return;
+    }
+
+    uv_close(handle, NULL);
 }
 
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx)
@@ -510,10 +560,8 @@ static void tcp_stop_cb(uv_async_t *handle)
     struct tcp_forwarder *fwd = (struct tcp_forwarder *)handle->data;
     if (!fwd)
         return;
-    if (!uv_is_closing((uv_handle_t *)&fwd->server))
-        uv_close((uv_handle_t *)&fwd->server, NULL);
-    if (!uv_is_closing((uv_handle_t *)&fwd->stop_handle))
-        uv_close((uv_handle_t *)&fwd->stop_handle, NULL);
+
+    uv_walk(fwd->loop, tcp_close_walk_cb, fwd);
     uv_stop(fwd->loop);
 }
 
@@ -522,10 +570,8 @@ static void udp_stop_cb(uv_async_t *handle)
     udp_forwarder_t *fwd = (udp_forwarder_t *)handle->data;
     if (!fwd)
         return;
-    if (!uv_is_closing((uv_handle_t *)&fwd->server))
-        uv_close((uv_handle_t *)&fwd->server, NULL);
-    if (!uv_is_closing((uv_handle_t *)&fwd->stop_handle))
-        uv_close((uv_handle_t *)&fwd->stop_handle, NULL);
+
+    uv_walk(fwd->loop, udp_close_walk_cb, fwd);
     uv_stop(fwd->loop);
 }
 
@@ -603,16 +649,46 @@ tcp_forwarder_t *tcp_forwarder_create(
         return NULL;
     }
 
-    uv_tcp_init(fwd->loop, &fwd->server);
+    if (uv_tcp_init(fwd->loop, &fwd->server) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->server.data = fwd;
 
     // Initialize async stop handle for thread-safe stopping
-    uv_async_init(fwd->loop, &fwd->stop_handle, tcp_stop_cb);
+    if (uv_async_init(fwd->loop, &fwd->stop_handle, tcp_stop_cb) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->stop_handle.data = fwd;
 
     fwd->target_address = strdup(target_address);
+    if (!fwd->target_address)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->target_port = target_port;
     fwd->family = family;
+    fwd->listen_port = listen_port;
     fwd->running = 0;
     fwd->enable_stats = enable_stats;
     // Initialize atomic counters
@@ -627,6 +703,8 @@ tcp_forwarder_t *tcp_forwarder_create(
         {
             if (out_error)
                 *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+            uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
             free(fwd->loop);
             free(fwd->target_address);
@@ -643,6 +721,8 @@ tcp_forwarder_t *tcp_forwarder_create(
         {
             if (out_error)
                 *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+            uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
             free(fwd->loop);
             free(fwd->target_address);
@@ -679,6 +759,8 @@ tcp_forwarder_t *tcp_forwarder_create(
         }
         if (out_error)
             *out_error = error_code;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
         free(fwd->loop);
         free(fwd->target_address);
@@ -703,8 +785,12 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     // fprintf(stderr, "[tcp_forwarder_start]  loop down %d %s\n", res, uv_strerror(res));
     if (res == 1) // 1 stands for still active handles
     {
-        uv_run(forwarder->loop, UV_RUN_ONCE);
         int lr = uv_loop_close(forwarder->loop);
+        while (lr == UV_EBUSY)
+        {
+            uv_run(forwarder->loop, UV_RUN_NOWAIT);
+            lr = uv_loop_close(forwarder->loop);
+        }
         // fprintf(stderr, "[tcp_forwarder_start]  loop close result %d %s\n", lr, uv_strerror(lr));
         return lr;
     }
@@ -740,25 +826,7 @@ traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
     if (forwarder)
     {
         stats.active_sessions = __atomic_load_n(&forwarder->active_sessions, __ATOMIC_RELAXED);
-    }
-    // Get listen port from cached server socket address
-    if (forwarder)
-    {
-        struct sockaddr_storage addr;
-        int addr_len = sizeof(addr);
-        if (uv_tcp_getsockname(&forwarder->server, (struct sockaddr *)&addr, &addr_len) == 0)
-        {
-            if (addr.ss_family == AF_INET)
-            {
-                struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
-                stats.listen_port = ntohs(addr4->sin_port);
-            }
-            else if (addr.ss_family == AF_INET6)
-            {
-                struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
-                stats.listen_port = ntohs(addr6->sin6_port);
-            }
-        }
+        stats.listen_port = forwarder->listen_port;
     }
     return stats;
 }
@@ -1183,16 +1251,46 @@ udp_forwarder_t *udp_forwarder_create(
         return NULL;
     }
 
-    uv_udp_init(fwd->loop, &fwd->server);
+    if (uv_udp_init(fwd->loop, &fwd->server) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->server.data = fwd;
 
     // Initialize async stop handle for thread-safe stopping
-    uv_async_init(fwd->loop, &fwd->stop_handle, udp_stop_cb);
+    if (uv_async_init(fwd->loop, &fwd->stop_handle, udp_stop_cb) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->stop_handle.data = fwd;
 
     fwd->target_address = strdup(target_address);
+    if (!fwd->target_address)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
+        uv_loop_close(fwd->loop);
+        free(fwd->loop);
+        free(fwd);
+        return NULL;
+    }
     fwd->target_port = target_port;
     fwd->family = family;
+    fwd->listen_port = listen_port;
     fwd->running = 0;
     fwd->sessions = NULL;
     fwd->enable_stats = enable_stats;
@@ -1209,6 +1307,8 @@ udp_forwarder_t *udp_forwarder_create(
         {
             if (out_error)
                 *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+            uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
             free(fwd->loop);
             free(fwd->target_address);
@@ -1225,6 +1325,8 @@ udp_forwarder_t *udp_forwarder_create(
         {
             if (out_error)
                 *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+            uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
             free(fwd->loop);
             free(fwd->target_address);
@@ -1260,6 +1362,8 @@ udp_forwarder_t *udp_forwarder_create(
         }
         if (out_error)
             *out_error = error_code;
+        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
+        uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
         free(fwd->loop);
         free(fwd->target_address);
@@ -1287,8 +1391,12 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     forwarder->running = 0;
     if (res == 1) // 1 stands for still active handles
     {
-        uv_run(forwarder->loop, UV_RUN_ONCE);
         int lr = uv_loop_close(forwarder->loop);
+        while (lr == UV_EBUSY)
+        {
+            uv_run(forwarder->loop, UV_RUN_NOWAIT);
+            lr = uv_loop_close(forwarder->loop);
+        }
         return lr;
     }
     return 0;
@@ -1324,25 +1432,7 @@ traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)
     if (fwd)
     {
         stats.active_sessions = __atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED);
-    }
-    // Get listen port from cached server socket address
-    if (fwd)
-    {
-        struct sockaddr_storage addr;
-        int addr_len = sizeof(addr);
-        if (uv_udp_getsockname(&fwd->server, (struct sockaddr *)&addr, &addr_len) == 0)
-        {
-            if (addr.ss_family == AF_INET)
-            {
-                struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
-                stats.listen_port = ntohs(addr4->sin_port);
-            }
-            else if (addr.ss_family == AF_INET6)
-            {
-                struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
-                stats.listen_port = ntohs(addr6->sin6_port);
-            }
-        }
+        stats.listen_port = fwd->listen_port;
     }
     return stats;
 }
