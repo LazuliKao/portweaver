@@ -217,7 +217,6 @@ struct tcp_forwarder
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions; /* active TCP client sessions */
-    int stopping;
 };
 // Full UDP forwarder definition (kept here so C code can access members)
 struct udp_forwarder
@@ -236,11 +235,7 @@ struct udp_forwarder
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions; /* active UDP client sessions */
-    int stopping;
 };
-
-#define MAX_TCP_CONNECTIONS 10000U
-#define MAX_UDP_SESSIONS 10000U
 
 // --- TCP Forwarder Implementation ---
 typedef struct tcp_conn_ctx
@@ -253,6 +248,7 @@ typedef struct tcp_conn_ctx
     struct tcp_forwarder *forwarder;
     int closed;
     int close_count;
+    int active_counted;
 } tcp_conn_ctx_t;
 
 // Forward declarations for C callbacks
@@ -265,8 +261,6 @@ static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
 static void tcp_conn_close_cb(uv_handle_t *handle);
 static int sockaddr_equal(const struct sockaddr *a, const struct sockaddr *b);
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
-static void tcp_close_walk_cb(uv_handle_t *handle, void *arg);
-static void udp_close_walk_cb(uv_handle_t *handle, void *arg);
 
 /* Wrapper for write/send requests that carry a pointer back to the forwarder
  * so we can free memory with the right allocator in the completion callbacks.
@@ -328,7 +322,6 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
         if (!fw)
         {
             DATA_FREE(ctx->forwarder, buf->base);
-            tcp_terminate_connection(ctx);
             return;
         }
         fw->fwd = ctx->forwarder;
@@ -382,7 +375,6 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
         if (!fw)
         {
             DATA_FREE(ctx->forwarder, buf->base);
-            tcp_terminate_connection(ctx);
             return;
         }
         fw->fwd = ctx->forwarder;
@@ -518,8 +510,11 @@ static void tcp_stop_cb(uv_async_t *handle)
     struct tcp_forwarder *fwd = (struct tcp_forwarder *)handle->data;
     if (!fwd)
         return;
-    fwd->stopping = 1;
-    uv_walk(fwd->loop, tcp_close_walk_cb, fwd);
+    if (!uv_is_closing((uv_handle_t *)&fwd->server))
+        uv_close((uv_handle_t *)&fwd->server, NULL);
+    if (!uv_is_closing((uv_handle_t *)&fwd->stop_handle))
+        uv_close((uv_handle_t *)&fwd->stop_handle, NULL);
+    uv_stop(fwd->loop);
 }
 
 static void udp_stop_cb(uv_async_t *handle)
@@ -527,15 +522,11 @@ static void udp_stop_cb(uv_async_t *handle)
     udp_forwarder_t *fwd = (udp_forwarder_t *)handle->data;
     if (!fwd)
         return;
-    fwd->stopping = 1;
-    uv_walk(fwd->loop, udp_close_walk_cb, fwd);
-}
-
-static void tcp_reject_close_cb(uv_handle_t *handle)
-{
-    if (!handle)
-        return;
-    free(handle);
+    if (!uv_is_closing((uv_handle_t *)&fwd->server))
+        uv_close((uv_handle_t *)&fwd->server, NULL);
+    if (!uv_is_closing((uv_handle_t *)&fwd->stop_handle))
+        uv_close((uv_handle_t *)&fwd->stop_handle, NULL);
+    uv_stop(fwd->loop);
 }
 
 static void tcp_on_new_connection(uv_stream_t *server, int status)
@@ -548,28 +539,6 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
         fprintf(stderr, "[tcp_on_new_connection] fwd is NULL!\n");
         return;
     }
-
-    if (__atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED) >= MAX_TCP_CONNECTIONS)
-    {
-        uv_tcp_t *reject_client = (uv_tcp_t *)malloc(sizeof(uv_tcp_t));
-        if (!reject_client)
-            return;
-        if (uv_tcp_init(fwd->loop, reject_client) != 0)
-        {
-            free(reject_client);
-            return;
-        }
-        if (uv_accept(server, (uv_stream_t *)reject_client) == 0)
-        {
-            uv_close((uv_handle_t *)reject_client, tcp_reject_close_cb);
-        }
-        else
-        {
-            uv_close((uv_handle_t *)reject_client, tcp_reject_close_cb);
-        }
-        return;
-    }
-
     // Allocate per-connection context using forwarder's data allocator
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)DATA_ALLOC(fwd, sizeof(tcp_conn_ctx_t));
     if (!ctx)
@@ -581,16 +550,23 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     ctx->forwarder = fwd;
     ctx->closed = 0;
     ctx->close_count = 0;
+    ctx->active_counted = 0;
     uv_tcp_init(fwd->loop, &ctx->client);
     uv_tcp_init(fwd->loop, &ctx->target);
     ctx->client.data = ctx;
     ctx->target.data = ctx;
     if (uv_accept(server, (uv_stream_t *)&ctx->client) == 0)
     {
-        __atomic_add_fetch(&fwd->active_sessions, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+        ctx->active_counted = 1;
         ctx->connect_req.data = ctx;
         // Use cached target address (avoid per-connection uv_ip*_addr)
-        uv_tcp_connect(&ctx->connect_req, &ctx->target, (const struct sockaddr *)&fwd->cached_dest_addr, tcp_on_connect);
+        int connect_rc = uv_tcp_connect(&ctx->connect_req, &ctx->target, (const struct sockaddr *)&fwd->cached_dest_addr, tcp_on_connect);
+        if (connect_rc != 0)
+        {
+            uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
+            uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
+        }
     }
     else
     {
@@ -646,13 +622,33 @@ tcp_forwarder_t *tcp_forwarder_create(
     if (family == ADDR_FAMILY_IPV6)
     {
         struct sockaddr_in6 addr6;
-        uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
+        int rc = uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
+        if (rc != 0)
+        {
+            if (out_error)
+                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_loop_close(fwd->loop);
+            free(fwd->loop);
+            free(fwd->target_address);
+            free(fwd);
+            return NULL;
+        }
         memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
     }
     else
     {
         struct sockaddr_in addr4;
-        uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
+        int rc = uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
+        if (rc != 0)
+        {
+            if (out_error)
+                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_loop_close(fwd->loop);
+            free(fwd->loop);
+            free(fwd->target_address);
+            free(fwd);
+            return NULL;
+        }
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
     }
     struct sockaddr_storage addr;
@@ -702,13 +698,17 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
         return r;
     forwarder->running = 1;
     // fprintf(stderr, "[tcp_forwarder_start]  loop up\n");
-    (void)uv_run(forwarder->loop, UV_RUN_DEFAULT);
+    int res = uv_run(forwarder->loop, UV_RUN_DEFAULT);
     forwarder->running = 0;
-
-    uv_walk(forwarder->loop, tcp_close_walk_cb, forwarder);
-    (void)uv_run(forwarder->loop, UV_RUN_DEFAULT);
-
-    return uv_loop_close(forwarder->loop);
+    // fprintf(stderr, "[tcp_forwarder_start]  loop down %d %s\n", res, uv_strerror(res));
+    if (res == 1) // 1 stands for still active handles
+    {
+        uv_run(forwarder->loop, UV_RUN_ONCE);
+        int lr = uv_loop_close(forwarder->loop);
+        // fprintf(stderr, "[tcp_forwarder_start]  loop close result %d %s\n", lr, uv_strerror(lr));
+        return lr;
+    }
+    return 0;
 }
 
 void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
@@ -772,12 +772,13 @@ typedef struct udp_client_session
     struct sockaddr_storage client_addr;
     int client_addr_len;
     struct udp_forwarder *fwd;
-    struct udp_client_session *next;
+    struct udp_client_session *list_next;
     struct udp_client_session *hash_next;
     uv_timer_t timeout_timer; // timer for session timeout
     uint64_t last_activity;   // timestamp of last activity (milliseconds)
     int close_count;          // count of closed handles (timer + sock = 2)
-    int closing;
+    int expected_close_count; // number of handles expected to close before free
+    int tracked_in_forwarder; // whether session has been added to list/hash + active_sessions
 } udp_client_session_t;
 
 #ifdef DEBUG
@@ -788,9 +789,11 @@ typedef struct udp_client_session
 #define UDP_SESSION_TIMEOUT_MS 300000
 #endif // DEBUG
 
+// Hard cap to prevent complete FD exhaustion under UDP floods/scans.
+#define UDP_MAX_SESSIONS 4000
+
 static void udp_session_close_cb(uv_handle_t *handle);
 static void udp_session_timeout_cb(uv_timer_t *timer);
-static void udp_session_begin_close(udp_client_session_t *session);
 
 // Hash function for sockaddr (for fast session lookup)
 static inline uint32_t sockaddr_hash(const struct sockaddr *addr)
@@ -835,10 +838,10 @@ static void udp_session_remove(udp_forwarder_t *fwd, udp_client_session_t *sessi
     {
         if (*pp == session)
         {
-            *pp = session->next;
+            *pp = session->list_next;
             break;
         }
-        pp = &(*pp)->next;
+        pp = &(*pp)->list_next;
     }
 
     // Remove from hash table
@@ -855,21 +858,6 @@ static void udp_session_remove(udp_forwarder_t *fwd, udp_client_session_t *sessi
     }
 }
 
-static void udp_session_begin_close(udp_client_session_t *session)
-{
-    if (!session || session->closing)
-        return;
-    session->closing = 1;
-
-    uv_udp_recv_stop(&session->sock);
-
-    if (!uv_is_closing((uv_handle_t *)&session->timeout_timer))
-        uv_close((uv_handle_t *)&session->timeout_timer, udp_session_close_cb);
-
-    if (!uv_is_closing((uv_handle_t *)&session->sock))
-        uv_close((uv_handle_t *)&session->sock, udp_session_close_cb);
-}
-
 // Close callback for UDP session (called after each handle closes)
 static void udp_session_close_cb(uv_handle_t *handle)
 {
@@ -880,14 +868,14 @@ static void udp_session_close_cb(uv_handle_t *handle)
     // Increment close count
     session->close_count++;
 
-    // Only free when both handles (timer + sock) are closed
-    if (session->close_count >= 2)
+    // Only free when all expected handles are closed
+    if (session->close_count >= session->expected_close_count)
     {
-        // Remove from session list and free
-        udp_session_remove((udp_forwarder_t *)session->fwd, session);
-        if (session->fwd)
+        // Remove from session list/hash + active counter only for registered sessions
+        if (session->tracked_in_forwarder)
         {
-            __atomic_sub_fetch(&session->fwd->active_sessions, 1, __ATOMIC_RELAXED);
+            udp_session_remove((udp_forwarder_t *)session->fwd, session);
+            __atomic_fetch_sub(&session->fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         }
         DATA_FREE(session->fwd, session);
     }
@@ -906,7 +894,16 @@ static void udp_session_timeout_cb(uv_timer_t *timer)
     if (elapsed >= UDP_SESSION_TIMEOUT_MS)
     {
         fprintf(stderr, "[udp_session_timeout] closing inactive session (elapsed=%llu ms)\n", (unsigned long long)elapsed);
-        udp_session_begin_close(session);
+
+        // Stop receiving on the socket
+        uv_udp_recv_stop(&session->sock);
+
+        // Close both handles with the same callback
+        if (!uv_is_closing((uv_handle_t *)&session->timeout_timer))
+            uv_close((uv_handle_t *)&session->timeout_timer, udp_session_close_cb);
+
+        if (!uv_is_closing((uv_handle_t *)&session->sock))
+            uv_close((uv_handle_t *)&session->sock, udp_session_close_cb);
     }
     else
     {
@@ -927,57 +924,11 @@ static void tcp_conn_close_cb(uv_handle_t *handle)
     ctx->close_count++;
     if (ctx->close_count >= 2)
     {
-        if (ctx->forwarder)
-        {
-            __atomic_sub_fetch(&ctx->forwarder->active_sessions, 1, __ATOMIC_RELAXED);
-        }
         // free connection context using forwarder's allocator
+        if (ctx->active_counted)
+            __atomic_fetch_sub(&ctx->forwarder->active_sessions, 1u, __ATOMIC_RELAXED);
         DATA_FREE(ctx->forwarder, ctx);
     }
-}
-
-static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
-{
-    tcp_forwarder_t *fwd = (tcp_forwarder_t *)arg;
-    if (!handle || uv_is_closing(handle) || !fwd)
-        return;
-
-    if (handle == (uv_handle_t *)&fwd->server || handle == (uv_handle_t *)&fwd->stop_handle)
-    {
-        uv_close(handle, NULL);
-        return;
-    }
-
-    if (handle->type == UV_TCP)
-    {
-        uv_read_stop((uv_stream_t *)handle);
-        uv_close(handle, tcp_conn_close_cb);
-        return;
-    }
-
-    uv_close(handle, NULL);
-}
-
-static void udp_close_walk_cb(uv_handle_t *handle, void *arg)
-{
-    udp_forwarder_t *fwd = (udp_forwarder_t *)arg;
-    if (!handle || uv_is_closing(handle) || !fwd)
-        return;
-
-    if (handle == (uv_handle_t *)&fwd->server || handle == (uv_handle_t *)&fwd->stop_handle)
-    {
-        uv_close(handle, NULL);
-        return;
-    }
-
-    if ((handle->type == UV_UDP || handle->type == UV_TIMER) && handle->data)
-    {
-        udp_client_session_t *session = (udp_client_session_t *)handle->data;
-        udp_session_begin_close(session);
-        return;
-    }
-
-    uv_close(handle, NULL);
 }
 
 static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
@@ -1005,6 +956,12 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
         // Zero-copy optimization: pass ownership of buf->base to send request
         uv_buf_t wbuf = uv_buf_init(buf->base, nread);
         fw->req.data = buf->base;
+        if (uv_is_closing((uv_handle_t *)&session->fwd->server))
+        {
+            DATA_FREE(fw->fwd, fw->req.data);
+            DATA_FREE(fw->fwd, fw);
+            return;
+        }
         int r = uv_udp_send(&fw->req, &session->fwd->server, &wbuf, 1, (const struct sockaddr *)&session->client_addr, udp_on_send);
         if (r != 0)
         {
@@ -1022,50 +979,103 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
 // create a session (ephemeral socket) for a client address
 static udp_client_session_t *udp_session_create(udp_forwarder_t *fwd, const struct sockaddr *client_addr, int addr_len)
 {
+    if (fwd->active_sessions >= UDP_MAX_SESSIONS)
+    {
+        fprintf(stderr, "[udp_session_create] session limit reached (%u), dropping packet\n", UDP_MAX_SESSIONS);
+        return NULL;
+    }
+
     udp_client_session_t *s = (udp_client_session_t *)DATA_ALLOC((struct udp_forwarder *)fwd, sizeof(udp_client_session_t));
     if (!s)
         return NULL;
     memset(s, 0, sizeof(*s));
+
     s->fwd = (struct udp_forwarder *)fwd;
     s->client_addr_len = addr_len;
     s->close_count = 0;
-    s->closing = 0;
+    s->expected_close_count = 0;
+    s->tracked_in_forwarder = 0;
     memcpy(&s->client_addr, client_addr, addr_len);
-    uv_udp_init(fwd->loop, &s->sock);
+
+    int r = uv_udp_init(fwd->loop, &s->sock);
+    if (r < 0)
+    {
+        fprintf(stderr, "[udp_session_create] uv_udp_init failed: %s\n", uv_strerror(r));
+        DATA_FREE((struct udp_forwarder *)fwd, s);
+        return NULL;
+    }
+    s->expected_close_count = 1;
     s->sock.data = s;
 
     // Initialize timeout timer
-    uv_timer_init(fwd->loop, &s->timeout_timer);
+    r = uv_timer_init(fwd->loop, &s->timeout_timer);
+    if (r < 0)
+    {
+        fprintf(stderr, "[udp_session_create] uv_timer_init failed: %s\n", uv_strerror(r));
+        if (!uv_is_closing((uv_handle_t *)&s->sock))
+            uv_close((uv_handle_t *)&s->sock, udp_session_close_cb);
+        return NULL;
+    }
+    s->expected_close_count = 2;
     s->timeout_timer.data = s;
     s->last_activity = uv_now(fwd->loop);
 
     // Start timeout timer
-    uv_timer_start(&s->timeout_timer, udp_session_timeout_cb, UDP_SESSION_TIMEOUT_MS, 0);
+    r = uv_timer_start(&s->timeout_timer, udp_session_timeout_cb, UDP_SESSION_TIMEOUT_MS, 0);
+    if (r < 0)
+    {
+        fprintf(stderr, "[udp_session_create] uv_timer_start failed: %s\n", uv_strerror(r));
+        if (!uv_is_closing((uv_handle_t *)&s->timeout_timer))
+            uv_close((uv_handle_t *)&s->timeout_timer, udp_session_close_cb);
+        if (!uv_is_closing((uv_handle_t *)&s->sock))
+            uv_close((uv_handle_t *)&s->sock, udp_session_close_cb);
+        return NULL;
+    }
 
     // bind ephemeral port (0)
     if (fwd->family == ADDR_FAMILY_IPV6)
     {
         struct sockaddr_in6 bind6;
         uv_ip6_addr("::", 0, &bind6);
-        uv_udp_bind(&s->sock, (const struct sockaddr *)&bind6, 0);
+        r = uv_udp_bind(&s->sock, (const struct sockaddr *)&bind6, 0);
     }
     else
     {
         struct sockaddr_in bind4;
         uv_ip4_addr("0.0.0.0", 0, &bind4);
-        uv_udp_bind(&s->sock, (const struct sockaddr *)&bind4, 0);
+        r = uv_udp_bind(&s->sock, (const struct sockaddr *)&bind4, 0);
     }
-    uv_udp_recv_start(&s->sock, udp_alloc_cb, udp_session_on_recv);
+    if (r < 0)
+    {
+        fprintf(stderr, "[udp_session_create] uv_udp_bind failed: %s\n", uv_strerror(r));
+        if (!uv_is_closing((uv_handle_t *)&s->timeout_timer))
+            uv_close((uv_handle_t *)&s->timeout_timer, udp_session_close_cb);
+        if (!uv_is_closing((uv_handle_t *)&s->sock))
+            uv_close((uv_handle_t *)&s->sock, udp_session_close_cb);
+        return NULL;
+    }
+
+    r = uv_udp_recv_start(&s->sock, udp_alloc_cb, udp_session_on_recv);
+    if (r < 0)
+    {
+        fprintf(stderr, "[udp_session_create] uv_udp_recv_start failed: %s\n", uv_strerror(r));
+        if (!uv_is_closing((uv_handle_t *)&s->timeout_timer))
+            uv_close((uv_handle_t *)&s->timeout_timer, udp_session_close_cb);
+        if (!uv_is_closing((uv_handle_t *)&s->sock))
+            uv_close((uv_handle_t *)&s->sock, udp_session_close_cb);
+        return NULL;
+    }
+
     // prepend to session list
-    s->next = fwd->sessions;
+    s->list_next = fwd->sessions;
     fwd->sessions = s;
 
     // Add to hash table for fast lookup
     uint32_t hash = sockaddr_hash((const struct sockaddr *)&s->client_addr);
     s->hash_next = fwd->session_hash[hash];
     fwd->session_hash[hash] = s;
-
-    __atomic_add_fetch(&fwd->active_sessions, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+    s->tracked_in_forwarder = 1;
 
     return s;
 }
@@ -1077,7 +1087,8 @@ static udp_client_session_t *udp_find_session(udp_forwarder_t *fwd, const struct
     udp_client_session_t *it = fwd->session_hash[hash];
     while (it)
     {
-        if (sockaddr_equal((const struct sockaddr *)&it->client_addr, client_addr))
+        if (sockaddr_equal((const struct sockaddr *)&it->client_addr, client_addr) &&
+            !uv_is_closing((uv_handle_t *)&it->sock))
             return it;
         it = it->hash_next;
     }
@@ -1099,11 +1110,6 @@ static void udp_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
         udp_client_session_t *session = udp_find_session(fwd, addr);
         if (!session)
         {
-            if (__atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED) >= MAX_UDP_SESSIONS)
-            {
-                DATA_FREE((struct udp_forwarder *)fwd, buf->base);
-                return;
-            }
             session = udp_session_create(fwd, addr, (addr->sa_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
             if (!session)
             {
@@ -1127,6 +1133,12 @@ static void udp_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
         // Zero-copy optimization: pass ownership of buf->base to send request
         uv_buf_t wbuf = uv_buf_init(buf->base, nread);
         fw->req.data = buf->base;
+        if (uv_is_closing((uv_handle_t *)&session->sock))
+        {
+            DATA_FREE(fw->fwd, fw->req.data);
+            DATA_FREE(fw->fwd, fw);
+            return;
+        }
         // send from session socket to cached target addr
         int r = uv_udp_send(&fw->req, &session->sock, &wbuf, 1, (const struct sockaddr *)&fwd->cached_dest_addr, udp_on_send);
         if (r != 0)
@@ -1192,13 +1204,33 @@ udp_forwarder_t *udp_forwarder_create(
     if (family == ADDR_FAMILY_IPV6)
     {
         struct sockaddr_in6 addr6;
-        uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
+        int rc = uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
+        if (rc != 0)
+        {
+            if (out_error)
+                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_loop_close(fwd->loop);
+            free(fwd->loop);
+            free(fwd->target_address);
+            free(fwd);
+            return NULL;
+        }
         memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
     }
     else
     {
         struct sockaddr_in addr4;
-        uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
+        int rc = uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
+        if (rc != 0)
+        {
+            if (out_error)
+                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
+            uv_loop_close(fwd->loop);
+            free(fwd->loop);
+            free(fwd->target_address);
+            free(fwd);
+            return NULL;
+        }
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
     }
     struct sockaddr_storage addr;
@@ -1249,15 +1281,17 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     if (r != 0)
         return r;
     fwd->running = 1;
-    (void)uv_run(fwd->loop, UV_RUN_DEFAULT);
+    int res = uv_run(fwd->loop, UV_RUN_DEFAULT);
     uv_udp_recv_stop(&fwd->server);
     fwd->running = 0;
     forwarder->running = 0;
-
-    uv_walk(forwarder->loop, udp_close_walk_cb, forwarder);
-    (void)uv_run(forwarder->loop, UV_RUN_DEFAULT);
-
-    return uv_loop_close(forwarder->loop);
+    if (res == 1) // 1 stands for still active handles
+    {
+        uv_run(forwarder->loop, UV_RUN_ONCE);
+        int lr = uv_loop_close(forwarder->loop);
+        return lr;
+    }
+    return 0;
 }
 
 void udp_forwarder_stop(udp_forwarder_t *forwarder)
