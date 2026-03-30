@@ -640,11 +640,20 @@ tcp_forwarder_t *tcp_forwarder_create(
     }
     memset(fwd, 0, sizeof(*fwd));
 
-    fwd->loop = uv_loop_new();
+    fwd->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t));
     if (!fwd->loop)
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
+        free(fwd);
+        return NULL;
+    }
+
+    if (uv_loop_init(fwd->loop) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        free(fwd->loop);
         free(fwd);
         return NULL;
     }
@@ -811,6 +820,22 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
 {
     if (!forwarder)
         return;
+    if (forwarder->loop)
+    {
+        int lr = uv_loop_close(forwarder->loop);
+        if (lr == UV_EBUSY)
+        {
+            uv_walk(forwarder->loop, close_handle_walk_cb, NULL);
+            uv_run(forwarder->loop, UV_RUN_DEFAULT);
+            lr = uv_loop_close(forwarder->loop);
+            while (lr == UV_EBUSY)
+            {
+                uv_run(forwarder->loop, UV_RUN_NOWAIT);
+                lr = uv_loop_close(forwarder->loop);
+            }
+        }
+        free(forwarder->loop);
+    }
     free(forwarder->target_address);
     free(forwarder);
 }
@@ -1242,11 +1267,20 @@ udp_forwarder_t *udp_forwarder_create(
     }
     memset(fwd, 0, sizeof(*fwd));
 
-    fwd->loop = uv_loop_new();
+    fwd->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t));
     if (!fwd->loop)
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
+        free(fwd);
+        return NULL;
+    }
+
+    if (uv_loop_init(fwd->loop) != 0)
+    {
+        if (out_error)
+            *out_error = FORWARDER_ERROR_MALLOC;
+        free(fwd->loop);
         free(fwd);
         return NULL;
     }
@@ -1416,6 +1450,22 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
 {
     if (!forwarder)
         return;
+    if (forwarder->loop)
+    {
+        int lr = uv_loop_close(forwarder->loop);
+        if (lr == UV_EBUSY)
+        {
+            uv_walk(forwarder->loop, close_handle_walk_cb, NULL);
+            uv_run(forwarder->loop, UV_RUN_DEFAULT);
+            lr = uv_loop_close(forwarder->loop);
+            while (lr == UV_EBUSY)
+            {
+                uv_run(forwarder->loop, UV_RUN_NOWAIT);
+                lr = uv_loop_close(forwarder->loop);
+            }
+        }
+        free(forwarder->loop);
+    }
     free(forwarder->target_address);
     free(forwarder);
 }
