@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #if defined(_MSC_VER)
 #define strdup _strdup
 #endif
@@ -209,6 +213,7 @@ struct udp_forwarder
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions; /* active UDP client sessions */
+    unsigned int max_sessions;    /* runtime cap derived from fd limit */
     uint16_t listen_port;
 };
 
@@ -892,6 +897,30 @@ typedef struct udp_client_session
 // Hard cap to prevent complete FD exhaustion under UDP floods/scans.
 #define UDP_MAX_SESSIONS 4000
 
+// Keep some file descriptors available for listener sockets, logs, and other runtime needs.
+#define UDP_SESSION_FD_RESERVE 128
+
+static unsigned int udp_compute_session_limit(void)
+{
+    unsigned int max_sessions = UDP_MAX_SESSIONS;
+
+#if !defined(_WIN32)
+    long fd_limit = sysconf(_SC_OPEN_MAX);
+    if (fd_limit > 0)
+    {
+        long derived = fd_limit - UDP_SESSION_FD_RESERVE;
+        if (derived < 1)
+            derived = fd_limit / 2;
+        if (derived < 1)
+            derived = 1;
+        if (derived < (long)max_sessions)
+            max_sessions = (unsigned int)derived;
+    }
+#endif
+
+    return max_sessions;
+}
+
 static void udp_session_close_cb(uv_handle_t *handle);
 static void udp_session_timeout_cb(uv_timer_t *timer);
 
@@ -1089,10 +1118,11 @@ static void udp_session_on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t 
 // create a session (ephemeral socket) for a client address
 static udp_client_session_t *udp_session_create(udp_forwarder_t *fwd, const struct sockaddr *client_addr, int addr_len)
 {
+    unsigned int session_limit = fwd->max_sessions > 0 ? fwd->max_sessions : UDP_MAX_SESSIONS;
     unsigned int active_sessions = __atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED);
-    if (active_sessions >= UDP_MAX_SESSIONS)
+    if (active_sessions >= session_limit)
     {
-        fprintf(stderr, "[udp_session_create] session limit reached (%u), dropping packet\n", UDP_MAX_SESSIONS);
+        fprintf(stderr, "[udp_session_create] session limit reached (%u), dropping packet\n", session_limit);
         return NULL;
     }
 
@@ -1111,7 +1141,18 @@ static udp_client_session_t *udp_session_create(udp_forwarder_t *fwd, const stru
     int r = uv_udp_init(fwd->loop, &s->sock);
     if (r < 0)
     {
-        fprintf(stderr, "[udp_session_create] uv_udp_init failed: %s\n", uv_strerror(r));
+        if (r == UV_EMFILE || r == UV_ENFILE)
+        {
+            fprintf(stderr,
+                    "[udp_session_create] uv_udp_init failed: %s (active_sessions=%u, session_limit=%u)\n",
+                    uv_strerror(r),
+                    active_sessions,
+                    session_limit);
+        }
+        else
+        {
+            fprintf(stderr, "[udp_session_create] uv_udp_init failed: %s\n", uv_strerror(r));
+        }
         DATA_FREE((struct udp_forwarder *)fwd, s);
         return NULL;
     }
@@ -1158,7 +1199,19 @@ static udp_client_session_t *udp_session_create(udp_forwarder_t *fwd, const stru
     }
     if (r < 0)
     {
-        fprintf(stderr, "[udp_session_create] uv_udp_bind failed: %s\n", uv_strerror(r));
+        if (r == UV_EMFILE || r == UV_ENFILE)
+        {
+            unsigned int current_sessions = __atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED);
+            fprintf(stderr,
+                    "[udp_session_create] uv_udp_bind failed: %s (active_sessions=%u, session_limit=%u)\n",
+                    uv_strerror(r),
+                    current_sessions,
+                    session_limit);
+        }
+        else
+        {
+            fprintf(stderr, "[udp_session_create] uv_udp_bind failed: %s\n", uv_strerror(r));
+        }
         if (!uv_is_closing((uv_handle_t *)&s->timeout_timer))
             uv_close((uv_handle_t *)&s->timeout_timer, udp_session_close_cb);
         if (!uv_is_closing((uv_handle_t *)&s->sock))
@@ -1358,6 +1411,7 @@ udp_forwarder_t *udp_forwarder_create(
     // Initialize atomic counters
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
+    fwd->max_sessions = udp_compute_session_limit();
     memset(fwd->session_hash, 0, sizeof(fwd->session_hash));
     // cache target addr
     if (family == ADDR_FAMILY_IPV6)
