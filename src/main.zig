@@ -14,6 +14,29 @@ const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") el
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
 pub const event_log = @import("event_log.zig");
 const process_lock = @import("process_lock.zig");
+const file_log = @import("file_log.zig");
+
+var global_log_level: std.log.Level = .info;
+
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = myLogFn,
+};
+
+fn myLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (@intFromEnum(level) > @intFromEnum(global_log_level)) return;
+
+    std.debug.print("[" ++ level.asText() ++ "] " ++ format ++ "\n", args);
+
+    if (file_log.getGlobalFileLogger()) |logger| {
+        logger.log(level, scope, format, args);
+    }
+}
 
 pub fn main() !void {
     // 设置分配器：Debug 模式使用 GPA 检测内存泄漏，Release 模式使用 c_allocator
@@ -47,8 +70,15 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // 加载配置
-    var cfg = try loadConfig(allocator, args);
-    defer cfg.deinit(allocator);
+    var result = try loadConfig(allocator, args);
+    defer result.deinit(allocator);
+
+    if (result.log_config.enabled) {
+        file_log.initGlobalFileLogger(allocator, result.log_config);
+    }
+    defer file_log.deinitGlobalFileLogger();
+
+    const cfg = &result;
 
     @import("impl/app_forward/uv.zig").printVersion();
     std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
@@ -76,7 +106,7 @@ pub fn main() !void {
     }
 
     // 应用配置并启动服务
-    const has_app_forward = try applyConfig(allocator, &handles, &cfg);
+    const has_app_forward = try applyConfig(allocator, &handles, cfg);
 
     if (build_options.ubus_mode) {
         ubus_server.start(allocator, handles) catch |err| {

@@ -1204,14 +1204,23 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
                 for (items) |item| {
                     const node_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
                     if (node_item == null) continue;
-                    const nz = state.allocator.dupeZ(u8, item.name) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const nz = state.allocator.dupeZ(u8, item.name) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(nz);
                     addString(&buf, field_names.name, nz) catch {};
-                    const sz = state.allocator.dupeZ(u8, item.status) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const sz = state.allocator.dupeZ(u8, item.status) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(sz);
                     addString(&buf, field_names.status, sz) catch {};
                     addU32(&buf, field_names.client_count, @intCast(item.client_count)) catch {};
-                    const ez = state.allocator.dupeZ(u8, item.last_error) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const ez = state.allocator.dupeZ(u8, item.last_error) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(ez);
                     addString(&buf, field_names.last_error, ez) catch {};
                     ubox.blobNestEnd(&buf, node_item) catch {};
@@ -1230,16 +1239,25 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
                 for (items) |item| {
                     const node_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
                     if (node_item == null) continue;
-                    const nz = state.allocator.dupeZ(u8, item.name) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const nz = state.allocator.dupeZ(u8, item.name) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(nz);
                     addString(&buf, field_names.name, nz) catch {};
-                    const sz = state.allocator.dupeZ(u8, item.status) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const sz = state.allocator.dupeZ(u8, item.status) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(sz);
                     addString(&buf, field_names.status, sz) catch {};
                     addU32(&buf, field_names.client_count, @intCast(item.client_count)) catch {};
                     addU32(&buf, field_names.proxy_count, @intCast(item.proxy_count)) catch {};
                     addU32(&buf, field_names.server_count, @intCast(item.server_count)) catch {};
-                    const ez = state.allocator.dupeZ(u8, item.last_error) catch { ubox.blobNestEnd(&buf, node_item) catch {}; continue; };
+                    const ez = state.allocator.dupeZ(u8, item.last_error) catch {
+                        ubox.blobNestEnd(&buf, node_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(ez);
                     addString(&buf, field_names.last_error, ez) catch {};
                     ubox.blobNestEnd(&buf, node_item) catch {};
@@ -1273,26 +1291,44 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
             const statuses = ddns_manager.getStatus(state.allocator) catch null;
             if (statuses) |stats| {
                 defer {
-                    for (stats) |*s| { var sc = s.*; sc.deinit(state.allocator); }
+                    for (stats) |*s| {
+                        var sc = s.*;
+                        sc.deinit(state.allocator);
+                    }
                     state.allocator.free(stats);
                 }
                 for (stats) |stat| {
                     const inst_item = ubox.blobmsgOpenNested(&buf, null, false) catch continue;
                     if (inst_item == null) continue;
-                    const nz = state.allocator.dupeZ(u8, stat.name) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    const nz = state.allocator.dupeZ(u8, stat.name) catch {
+                        ubox.blobNestEnd(&buf, inst_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(nz);
                     addString(&buf, field_names.name, nz) catch {};
-                    const pz = state.allocator.dupeZ(u8, stat.provider) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    const pz = state.allocator.dupeZ(u8, stat.provider) catch {
+                        ubox.blobNestEnd(&buf, inst_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(pz);
                     addString(&buf, field_names.provider, pz) catch {};
-                    const stz = state.allocator.dupeZ(u8, stat.status) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    const stz = state.allocator.dupeZ(u8, stat.status) catch {
+                        ubox.blobNestEnd(&buf, inst_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(stz);
                     addString(&buf, field_names.status, stz) catch {};
                     addI64(&buf, field_names.last_update, stat.last_update) catch {};
-                    const ipz = state.allocator.dupeZ(u8, stat.last_ip) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    const ipz = state.allocator.dupeZ(u8, stat.last_ip) catch {
+                        ubox.blobNestEnd(&buf, inst_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(ipz);
                     addString(&buf, field_names.last_ip, ipz) catch {};
-                    const mz = state.allocator.dupeZ(u8, stat.message) catch { ubox.blobNestEnd(&buf, inst_item) catch {}; continue; };
+                    const mz = state.allocator.dupeZ(u8, stat.message) catch {
+                        ubox.blobNestEnd(&buf, inst_item) catch {};
+                        continue;
+                    };
                     defer state.allocator.free(mz);
                     addString(&buf, field_names.message, mz) catch {};
                     ubox.blobNestEnd(&buf, inst_item) catch {};
@@ -1315,7 +1351,10 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
                 if (item == null) continue;
                 addI64(&buf, field_names.timestamp, event.timestamp) catch {};
                 addString(&buf, field_names.event_type, event.event_type.toString()) catch {};
-                const mz = state.allocator.dupeZ(u8, event.message) catch { ubox.blobNestEnd(&buf, item) catch {}; continue; };
+                const mz = state.allocator.dupeZ(u8, event.message) catch {
+                    ubox.blobNestEnd(&buf, item) catch {};
+                    continue;
+                };
                 defer state.allocator.free(mz);
                 addString(&buf, field_names.message, mz) catch {};
                 addI32(&buf, field_names.project_id, event.project_id) catch {};

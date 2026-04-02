@@ -1,4 +1,5 @@
 const std = @import("std");
+const file_log = @import("../file_log.zig");
 
 pub const ConfigError = error{
     MissingField,
@@ -402,6 +403,7 @@ pub const DdnsConfig = struct {
 };
 
 pub const Config = struct {
+    log_config: file_log.LogConfig,
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
     frpc_nodes: std.StringHashMap(FrpcNode),
@@ -411,6 +413,8 @@ pub const Config = struct {
     ddns_configs: []DdnsConfig,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        self.log_config.deinit(allocator);
+
         for (self.projects) |*p| p.deinit(allocator);
         allocator.free(self.projects);
 

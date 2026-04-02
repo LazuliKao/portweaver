@@ -14,6 +14,10 @@
           },
           "type": "array"
         },
+        "flush_interval_ms": {
+          "description": "Flush interval in milliseconds",
+          "type": "number"
+        },
         "frpc_nodes": {
           "additionalProperties": {
             "$ref": "#/definitions/FrpcNode"
@@ -27,6 +31,22 @@
           },
           "description": "FRP server nodes (key is node name)",
           "type": "object"
+        },
+        "log_enabled": {
+          "description": "Enable file logging",
+          "type": "boolean"
+        },
+        "log_file": {
+          "description": "Log file path",
+          "type": "string"
+        },
+        "max_log_files": {
+          "description": "Maximum rotated log files",
+          "type": "number"
+        },
+        "max_log_size": {
+          "description": "Maximum log file size in KiB",
+          "type": "number"
         },
         "projects": {
           "description": "Port forwarding projects",

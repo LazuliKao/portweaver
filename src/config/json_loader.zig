@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const helper = @import("helper.zig");
+const file_log = @import("../file_log.zig");
 
 // ── JSON value helpers ──────────────────────────────────────────────────
 
@@ -93,6 +94,30 @@ fn parseJsonPortString(v: std.json.Value, arena: std.mem.Allocator, field: []con
             return null;
         },
     }
+}
+
+fn parseJsonUnsigned(v: std.json.Value, field: []const u8, ec: *types.ErrorCollector) ?usize {
+    return switch (v) {
+        .integer => |i| std.math.cast(usize, i) orelse blk: {
+            ec.addFmt(field, .out_of_range, "0..usize.max", "{d}", .{i}, "value out of range");
+            break :blk null;
+        },
+        .string => |s| {
+            const trimmed = std.mem.trim(u8, s, " \t\r\n");
+            if (trimmed.len == 0) {
+                ec.add(field, .empty_value, "unsigned integer", "", "value cannot be empty");
+                return null;
+            }
+            return std.fmt.parseUnsigned(usize, trimmed, 10) catch blk: {
+                ec.addFmt(field, .invalid_format, "unsigned integer", "{s}", .{trimmed}, "invalid unsigned integer string");
+                break :blk null;
+            };
+        },
+        else => {
+            ec.add(field, .wrong_type, "integer or string", jsonValueTypeName(v), "cannot parse as unsigned integer");
+            return null;
+        },
+    };
 }
 
 fn appendZoneString(list: *std.ArrayList([]const u8), arena: std.mem.Allocator, s: []const u8) !void {
@@ -216,6 +241,8 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     // child allocator forwards to the parent allocator.
     // We use the caller's allocator directly so that Config.deinit works.
     const a = allocator;
+    var log_config = try file_log.defaultLogConfig(a);
+    errdefer log_config.deinit(a);
 
     std.fs.cwd().access(path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
@@ -229,6 +256,39 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
     // ── Projects ────────────────────────────────────────────────────────
     const root = parsed.value;
+
+    if (root == .object) {
+        const obj = root.object;
+
+        if (obj.get("log_enabled")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("log_enabled", .{}), ec)) |b| log_config.enabled = b;
+        }
+        if (obj.get("log_file")) |v| {
+            if (parseJsonString(v, ec.fieldPath("log_file", .{}), ec)) |s| {
+                const new_path = try types.dupeIfNonEmpty(a, s);
+                if (new_path.len != 0) {
+                    a.free(log_config.file_path);
+                    log_config.file_path = new_path;
+                }
+            }
+        }
+        if (obj.get("max_log_size")) |v| {
+            if (parseJsonUnsigned(v, ec.fieldPath("max_log_size", .{}), ec)) |size| {
+                log_config.max_size = size * 1024;
+            }
+        }
+        if (obj.get("max_log_files")) |v| {
+            if (parseJsonUnsigned(v, ec.fieldPath("max_log_files", .{}), ec)) |files| {
+                log_config.max_files = files;
+            }
+        }
+        if (obj.get("flush_interval_ms")) |v| {
+            if (parseJsonUnsigned(v, ec.fieldPath("flush_interval_ms", .{}), ec)) |interval| {
+                log_config.flush_interval_ms = @intCast(interval);
+            }
+        }
+    }
+
     const projects_value: std.json.Value = switch (root) {
         .array => root,
         .object => |o| o.get("projects") orelse {
@@ -817,6 +877,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     }
 
     return .{
+        .log_config = log_config,
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,

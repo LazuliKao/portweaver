@@ -201,6 +201,11 @@ export interface Project {
  * JSON can also be just Project[] array (shorthand)
  */
 export interface PortWeaverConfigObject {
+  log_enabled?: boolean;
+  log_file?: string;
+  max_log_size?: number;
+  max_log_files?: number;
+  flush_interval_ms?: number;
   /** Port forwarding projects */
   projects: Project[];
   /** FRP client nodes (key is node name) */

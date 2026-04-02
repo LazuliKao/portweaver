@@ -31,7 +31,7 @@ const uci_loader = if (build_options.uci_mode)
 else
     struct {
         pub fn loadFromUci(_: std.mem.Allocator, _: *@import("../uci/mod.zig").UciContext, _: []const u8) !Config {
-            return ConfigError.UnsupportedFeature;
+            return error.UnsupportedFeature;
         }
     };
 pub const loadFromUci = uci_loader.loadFromUci;

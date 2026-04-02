@@ -85,7 +85,7 @@ fn writePidFile(allocator: std.mem.Allocator) !void {
 
     const pid = std.c.getpid();
 
-    const pid_str = try std.fmt.allocPrint(allocator, "{d}\n", .{pid});
+    const pid_str = try std.fmt.allocPrint(allocator, "{}\n", .{pid});
     defer allocator.free(pid_str);
 
     try file.writeAll(pid_str);

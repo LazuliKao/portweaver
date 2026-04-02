@@ -34,7 +34,7 @@ extern "C"
     typedef struct tcp_forwarder tcp_forwarder_t;
     typedef struct udp_forwarder udp_forwarder_t;
 
-// Traffic statistics structure
+    // Traffic statistics structure
     typedef struct
     {
         uint64_t bytes_in;

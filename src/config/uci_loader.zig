@@ -2,6 +2,7 @@ const std = @import("std");
 const uci = @import("../uci/mod.zig");
 const types = @import("types.zig");
 const helper = @import("helper.zig");
+const file_log = @import("../file_log.zig");
 fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return;
@@ -161,6 +162,39 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     var pkg = try ctx.load(package_name);
     if (pkg.isNull()) return types.ConfigError.MissingField;
     defer pkg.unload() catch {};
+
+    var log_config = try file_log.defaultLogConfig(allocator);
+    errdefer log_config.deinit(allocator);
+
+    var global_sec_it = uci.sections(pkg);
+    while (global_sec_it.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+
+        if (!std.mem.eql(u8, sec_type, "global")) continue;
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            if (!opt.isString()) continue;
+            const opt_name = uci.cStr(opt.name());
+            const opt_val = uci.cStr(opt.getString());
+
+            if (std.mem.eql(u8, opt_name, "log_enabled")) {
+                log_config.enabled = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "log_file")) {
+                const new_path = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (new_path.len != 0) {
+                    allocator.free(log_config.file_path);
+                    log_config.file_path = new_path;
+                }
+            } else if (std.mem.eql(u8, opt_name, "max_log_size")) {
+                const size_kb = std.fmt.parseUnsigned(usize, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 1024;
+                log_config.max_size = size_kb * 1024;
+            } else if (std.mem.eql(u8, opt_name, "max_log_files")) {
+                log_config.max_files = std.fmt.parseUnsigned(usize, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 3;
+            }
+        }
+        break;
+    }
 
     var list = std.array_list.Managed(types.Project).init(allocator);
     errdefer {
@@ -533,5 +567,11 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try ddns_list.append(ddns_cfg);
     }
 
-    return .{ .projects = try list.toOwnedSlice(), .frpc_nodes = frpc_nodes, .frps_nodes = frps_nodes, .ddns_configs = try ddns_list.toOwnedSlice() };
+    return .{
+        .log_config = log_config,
+        .projects = try list.toOwnedSlice(),
+        .frpc_nodes = frpc_nodes,
+        .frps_nodes = frps_nodes,
+        .ddns_configs = try ddns_list.toOwnedSlice(),
+    };
 }
