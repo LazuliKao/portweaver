@@ -890,8 +890,8 @@ typedef struct udp_client_session
 // 5s
 #define UDP_SESSION_TIMEOUT_MS 5000
 #else
-// Session timeout in milliseconds (5 minutes of inactivity)
-#define UDP_SESSION_TIMEOUT_MS 300000
+// Session timeout in milliseconds (1 minutes of inactivity)
+#define UDP_SESSION_TIMEOUT_MS 60000
 #endif // DEBUG
 
 // Hard cap to prevent complete FD exhaustion under UDP floods/scans.
@@ -1023,7 +1023,7 @@ static void udp_session_timeout_cb(uv_timer_t *timer)
 
     if (elapsed >= UDP_SESSION_TIMEOUT_MS)
     {
-        fprintf(stderr, "[udp_session_timeout] closing inactive session (elapsed=%llu ms)\n", (unsigned long long)elapsed);
+        // fprintf(stderr, "[udp_session_timeout] closing inactive session (elapsed=%llu ms)\n", (unsigned long long)elapsed);
 
         // Stop receiving on the socket
         uv_udp_recv_stop(&session->sock);
