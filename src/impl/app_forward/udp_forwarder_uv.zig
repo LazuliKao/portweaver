@@ -14,7 +14,9 @@ pub const UdpForwarder = struct {
     pub fn init(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, listen_port: u16, target_port: u16) !*UdpForwarder {
         var error_code: i32 = 0;
         const fwd = try allocator.create(UdpForwarder);
-        fwd.* = UdpForwarder.setup(allocator, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
+        fwd.allocator = allocator;
+        fwd.forwarder = null;
+        fwd.setup(listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;
@@ -22,25 +24,24 @@ pub const UdpForwarder = struct {
         return fwd;
     }
     fn setup(
-        allocator: std.mem.Allocator,
+        self: *UdpForwarder,
         listen_port: u16,
         target_address: []const u8,
         target_port: u16,
         family: common.AddressFamily,
         enable_stats: bool,
         out_error_code: *i32,
-    ) !UdpForwarder {
-        var self: UdpForwarder = undefined;
-        self.allocator = allocator;
-
+    ) !void {
         const addr_family: c.addr_family_t = switch (family) {
             .ipv4 => c.ADDR_FAMILY_IPV4,
             .ipv6 => c.ADDR_FAMILY_IPV6,
             .any => c.ADDR_FAMILY_ANY,
         };
 
-        const target_host_z = allocator.dupeZ(u8, target_address) catch unreachable;
-        defer allocator.free(target_host_z);
+        const target_host_z = self.allocator.dupeZ(u8, target_address) catch unreachable;
+        defer self.allocator.free(target_host_z);
+
+        const fwd_allocator = uv.buildAllocator(&self.allocator);
 
         const forwarder = c.udp_forwarder_create(
             listen_port,
@@ -48,6 +49,7 @@ pub const UdpForwarder = struct {
             target_port,
             addr_family,
             if (enable_stats) 1 else 0,
+            fwd_allocator,
             out_error_code,
         );
         if (forwarder == null) {
@@ -56,8 +58,6 @@ pub const UdpForwarder = struct {
         }
         self.forwarder = forwarder;
         out_error_code.* = 0;
-
-        return self;
     }
 
     pub fn deinit(self: *UdpForwarder) void {

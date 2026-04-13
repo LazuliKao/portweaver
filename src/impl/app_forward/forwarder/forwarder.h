@@ -48,6 +48,17 @@ extern "C"
 
 #define UDP_SESSION_HASH_SIZE 256
 
+    // Allocator interface
+    typedef void *(*forwarder_malloc_cb)(void *ctx, size_t size);
+    typedef void (*forwarder_free_cb)(void *ctx, void *ptr);
+
+    typedef struct
+    {
+        void *ctx;
+        forwarder_malloc_cb malloc_cb;
+        forwarder_free_cb free_cb;
+    } forwarder_allocator_t;
+
     // TCP Forwarder API
     // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).
     // Returns forwarder pointer on success, NULL on failure. Error code written to out_error if provided.
@@ -57,6 +68,7 @@ extern "C"
         uint16_t target_port,
         addr_family_t family,
         int enable_stats,
+        forwarder_allocator_t allocator,
         int *out_error);
 
     int tcp_forwarder_start(tcp_forwarder_t *forwarder);
@@ -75,6 +87,7 @@ extern "C"
         uint16_t target_port,
         addr_family_t family,
         int enable_stats,
+        forwarder_allocator_t allocator,
         int *out_error);
 
     int udp_forwarder_start(udp_forwarder_t *forwarder);

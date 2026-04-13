@@ -9,179 +9,19 @@
 #include <unistd.h>
 #endif
 
-#if defined(_MSC_VER)
-#define strdup _strdup
-#endif
-
-#ifdef DEBUG
-// --- Memory Allocator Helpers ---
-
-/* Data buffer allocator helpers (add magic header to detect/avoid double frees)
- * and a lightweight allocation map to verify ownership before freeing.
- */
-static const uint32_t DATA_MAGIC = 0xF00DBEEF;
-
-typedef union data_alloc_header
-{
-    struct
-    {
-        uint32_t magic;
-        uint32_t reserved;
-    } fields;
-    max_align_t _align;
-} data_alloc_header_t;
-
-typedef struct alloc_entry
-{
-    void *ptr; /* user-facing pointer (after header) */
-    void *raw_ptr;
-    size_t size;
-    const char *file; /* allocation site file */
-    int line;         /* allocation site line */
-    struct alloc_entry *next;
-} alloc_entry_t;
-
-static alloc_entry_t *alloc_map_head = NULL;
-static uv_mutex_t alloc_map_lock;
-static uv_once_t alloc_map_once = UV_ONCE_INIT;
-
-static void alloc_map_init_once(void)
-{
-    uv_mutex_init(&alloc_map_lock);
-}
-
-static void ensure_alloc_map_init(void)
-{
-    uv_once(&alloc_map_once, alloc_map_init_once);
-}
-
-static void alloc_map_add(void *user_ptr, void *raw_ptr, size_t size, const char *file, int line)
-{
-    ensure_alloc_map_init();
-    alloc_entry_t *e = (alloc_entry_t *)malloc(sizeof(alloc_entry_t));
-    if (!e)
-    {
-        fprintf(stderr, "[alloc_map_add] OOM when tracking %p\n", user_ptr);
-        return;
-    }
-    e->ptr = user_ptr;
-    e->raw_ptr = raw_ptr;
-    e->size = size;
-    e->file = file;
-    e->line = line;
-
-    uv_mutex_lock(&alloc_map_lock);
-    e->next = alloc_map_head;
-    alloc_map_head = e;
-    uv_mutex_unlock(&alloc_map_lock);
-
-    // fprintf(stderr, "[alloc_map_add] tracked user=%p size=%zu (%s:%d)\n", user_ptr, size, file, line);
-}
-
-static int alloc_map_remove(void *user_ptr, void **raw_out, size_t *size_out, const char **file_out, int *line_out)
-{
-    ensure_alloc_map_init();
-    uv_mutex_lock(&alloc_map_lock);
-    alloc_entry_t *prev = NULL;
-    alloc_entry_t *cur = alloc_map_head;
-    while (cur)
-    {
-        if (cur->ptr == user_ptr)
-        {
-            if (raw_out)
-                *raw_out = cur->raw_ptr;
-            if (size_out)
-                *size_out = cur->size;
-            if (file_out)
-                *file_out = cur->file;
-            if (line_out)
-                *line_out = cur->line;
-            if (prev)
-                prev->next = cur->next;
-            else
-                alloc_map_head = cur->next;
-            uv_mutex_unlock(&alloc_map_lock);
-            // fprintf(stderr, "[alloc_map_remove] removing user=%p size=%zu current_size=%d (%s:%d)\n", user_ptr, cur->size, link_list_len(alloc_map_head), cur->file, cur->line);
-            free(cur);
-            return 1;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    uv_mutex_unlock(&alloc_map_lock);
-    // fprintf(stderr, "[alloc_map_remove] user=%p not found\n", user_ptr);
-    return 0;
-}
-
-static void *data_alloc(size_t size, const char *file, int line)
-{
-    size_t total = sizeof(data_alloc_header_t) + size;
-    data_alloc_header_t *hdr = (data_alloc_header_t *)malloc(total);
-    if (!hdr)
-        return NULL;
-    hdr->fields.magic = DATA_MAGIC;
-    hdr->fields.reserved = 0;
-
-    void *user_ptr = (void *)(hdr + 1);
-
-    /* Track ownership */
-    alloc_map_add(user_ptr, (void *)hdr, size, file, line);
-
-    // fprintf(stderr, "[data_alloc] alloc user=%p header=%p size=%zu (%s:%d) (malloc)\n", user_ptr, (void *)hdr, size, file, line);
-
-    return user_ptr;
-}
-
-static void data_free(void *ptr, const char *file, int line)
-{
-    if (!ptr)
-        return;
-
-    void *raw_ptr = NULL;
-    size_t tracked_size = 0;
-    const char *tracked_file = NULL;
-    int tracked_line = 0;
-
-    if (!alloc_map_remove(ptr, &raw_ptr, &tracked_size, &tracked_file, &tracked_line))
-    {
-        fprintf(stderr, "[data_free] ptr %p was not tracked by alloc_map (%s:%d)\n", ptr, file, line);
-        abort();
-        return;
-    }
-
-    data_alloc_header_t *hdr = (data_alloc_header_t *)raw_ptr;
-    if (!hdr || hdr->fields.magic != DATA_MAGIC)
-    {
-        uint32_t magic = hdr ? hdr->fields.magic : 0u;
-        fprintf(stderr,
-                "[data_free] detected corrupted header: ptr=%p raw=%p magic=0x%08x alloc=(%s:%d) free=(%s:%d)\n",
-                ptr,
-                raw_ptr,
-                (unsigned int)magic,
-                tracked_file ? tracked_file : "?",
-                tracked_line,
-                file,
-                line);
-        abort();
-        return;
-    }
-
-    hdr->fields.magic = 0;
-
-    /* Use free() to avoid panics while debugging */
-    free(raw_ptr);
-    // fprintf(stderr, "[data_free] freed user=%p header=%p (free)\n", ptr, raw_ptr);
-}
-
-#define DATA_ALLOC(ctx, sz) data_alloc((sz), __FILE__, __LINE__)
-#define DATA_FREE(ctx, sz) data_free((sz), __FILE__, __LINE__)
-#else
-#define DATA_ALLOC(ctx, sz) malloc(sz)
-#define DATA_FREE(ctx, sz) free(sz)
-#endif // DEBUG
+#define DATA_ALLOC(fwd, sz) ((fwd)->allocator.malloc_cb((fwd)->allocator.ctx, (sz)))
+#define DATA_FREE(fwd, ptr)                                        \
+    do                                                             \
+    {                                                              \
+        if (ptr)                                                   \
+        {                                                          \
+            (fwd)->allocator.free_cb((fwd)->allocator.ctx, (ptr)); \
+        }                                                          \
+    } while (0)
 
 struct tcp_forwarder
 {
+    forwarder_allocator_t allocator;
     uv_loop_t *loop;
     uv_tcp_t server;
     uv_async_t stop_handle;
@@ -189,6 +29,8 @@ struct tcp_forwarder
     uint16_t target_port;
     addr_family_t family;
     int running;
+    int started;
+    int loop_finalized;
     struct sockaddr_storage cached_dest_addr; // added: cache destination addr
     int enable_stats;
     unsigned long long bytes_in;
@@ -199,6 +41,7 @@ struct tcp_forwarder
 // Full UDP forwarder definition (kept here so C code can access members)
 struct udp_forwarder
 {
+    forwarder_allocator_t allocator;
     uv_loop_t *loop;
     uv_udp_t server;
     uv_async_t stop_handle;
@@ -206,6 +49,8 @@ struct udp_forwarder
     uint16_t target_port;
     addr_family_t family;
     int running;
+    int started;
+    int loop_finalized;
     udp_client_session_t *sessions;
     udp_client_session_t *session_hash[UDP_SESSION_HASH_SIZE];
     struct sockaddr_storage cached_dest_addr;
@@ -471,25 +316,14 @@ static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
             return;
         }
     }
-    buf->base = (char *)malloc(suggested_size);
-    buf->len = (unsigned int)suggested_size;
+    buf->base = NULL;
+    buf->len = 0;
 }
 
 // UDP buffer allocation callback (optimized for typical UDP packet size)
 // #define UDP_BUFFER_SIZE 65536 // Max UDP datagram size
 static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
 {
-    // (void)suggested_size; // Ignore libuv suggestion, use optimized size
-    // if (handle && handle->data)
-    // {
-    //     struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
-    //     buf->base = (char *)DATA_ALLOC(fwd, UDP_BUFFER_SIZE);
-    //     buf->len = UDP_BUFFER_SIZE;
-    //     return;
-    // }
-    // buf->base = (char *)malloc(UDP_BUFFER_SIZE);
-    // buf->len = UDP_BUFFER_SIZE;
-
     if (handle && handle->data)
     {
         struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
@@ -497,8 +331,8 @@ static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
         buf->len = suggested_size;
         return;
     }
-    buf->base = (char *)malloc(suggested_size);
-    buf->len = suggested_size;
+    buf->base = NULL;
+    buf->len = 0;
 }
 
 // Compare two sockaddr structures for equality (supports IPv4 and IPv6)
@@ -639,11 +473,11 @@ tcp_forwarder_t *tcp_forwarder_create(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    forwarder_allocator_t allocator,
     int *out_error)
 {
-    // Allocate forwarder directly (no external allocator support)
     struct tcp_forwarder *fwd = NULL;
-    fwd = (struct tcp_forwarder *)malloc(sizeof(struct tcp_forwarder));
+    fwd = (struct tcp_forwarder *)allocator.malloc_cb(allocator.ctx, sizeof(struct tcp_forwarder));
     if (!fwd)
     {
         if (out_error)
@@ -651,13 +485,14 @@ tcp_forwarder_t *tcp_forwarder_create(
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
+    fwd->allocator = allocator;
 
-    fwd->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t));
+    fwd->loop = (uv_loop_t *)DATA_ALLOC(fwd, sizeof(uv_loop_t));
     if (!fwd->loop)
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
-        free(fwd);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -665,8 +500,8 @@ tcp_forwarder_t *tcp_forwarder_create(
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -675,13 +510,12 @@ tcp_forwarder_t *tcp_forwarder_create(
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
     fwd->server.data = fwd;
 
-    // Initialize async stop handle for thread-safe stopping
     if (uv_async_init(fwd->loop, &fwd->stop_handle, tcp_stop_cb) != 0)
     {
         if (out_error)
@@ -689,13 +523,14 @@ tcp_forwarder_t *tcp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
     fwd->stop_handle.data = fwd;
 
-    fwd->target_address = strdup(target_address);
+    size_t target_len = strlen(target_address);
+    fwd->target_address = (char *)DATA_ALLOC(fwd, target_len + 1);
     if (!fwd->target_address)
     {
         if (out_error)
@@ -703,14 +538,17 @@ tcp_forwarder_t *tcp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
+    memcpy(fwd->target_address, target_address, target_len + 1);
     fwd->target_port = target_port;
     fwd->family = family;
     fwd->listen_port = listen_port;
     fwd->running = 0;
+    fwd->started = 0;
+    fwd->loop_finalized = 0;
     fwd->enable_stats = enable_stats;
     // Initialize atomic counters
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
@@ -727,9 +565,9 @@ tcp_forwarder_t *tcp_forwarder_create(
             uv_walk(fwd->loop, close_handle_walk_cb, NULL);
             uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
-            free(fwd->loop);
-            free(fwd->target_address);
-            free(fwd);
+            DATA_FREE(fwd, fwd->loop);
+            DATA_FREE(fwd, fwd->target_address);
+            DATA_FREE(fwd, fwd);
             return NULL;
         }
         memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
@@ -745,9 +583,9 @@ tcp_forwarder_t *tcp_forwarder_create(
             uv_walk(fwd->loop, close_handle_walk_cb, NULL);
             uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
-            free(fwd->loop);
-            free(fwd->target_address);
-            free(fwd);
+            DATA_FREE(fwd, fwd->loop);
+            DATA_FREE(fwd, fwd->target_address);
+            DATA_FREE(fwd, fwd);
             return NULL;
         }
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
@@ -783,9 +621,9 @@ tcp_forwarder_t *tcp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd->target_address);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd->target_address);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -799,23 +637,24 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     int r = uv_listen((uv_stream_t *)&forwarder->server, 128, tcp_on_new_connection);
     if (r != 0)
         return r;
+    forwarder->started = 1;
     forwarder->running = 1;
     // fprintf(stderr, "[tcp_forwarder_start]  loop up\n");
     int res = uv_run(forwarder->loop, UV_RUN_DEFAULT);
     forwarder->running = 0;
     // fprintf(stderr, "[tcp_forwarder_start]  loop down %d %s\n", res, uv_strerror(res));
-    if (res == 1) // 1 stands for still active handles
+    int lr = uv_loop_close(forwarder->loop);
+    while (lr == UV_EBUSY)
     {
-        int lr = uv_loop_close(forwarder->loop);
-        while (lr == UV_EBUSY)
-        {
-            uv_run(forwarder->loop, UV_RUN_NOWAIT);
-            lr = uv_loop_close(forwarder->loop);
-        }
-        // fprintf(stderr, "[tcp_forwarder_start]  loop close result %d %s\n", lr, uv_strerror(lr));
-        return lr;
+        uv_walk(forwarder->loop, tcp_close_walk_cb, forwarder);
+        uv_run(forwarder->loop, UV_RUN_NOWAIT);
+        lr = uv_loop_close(forwarder->loop);
     }
-    return 0;
+    if (lr == 0)
+        forwarder->loop_finalized = 1;
+    if (res != 0 && res != 1)
+        return res;
+    return lr;
 }
 
 void tcp_forwarder_stop(tcp_forwarder_t *forwarder)
@@ -834,22 +673,16 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
         return;
     if (forwarder->loop)
     {
-        int lr = uv_loop_close(forwarder->loop);
-        if (lr == UV_EBUSY)
+        if (!forwarder->started)
         {
-            uv_walk(forwarder->loop, close_handle_walk_cb, NULL);
-            uv_run(forwarder->loop, UV_RUN_DEFAULT);
-            lr = uv_loop_close(forwarder->loop);
-            while (lr == UV_EBUSY)
-            {
-                uv_run(forwarder->loop, UV_RUN_NOWAIT);
-                lr = uv_loop_close(forwarder->loop);
-            }
+            forwarder->loop_finalized = 1;
         }
-        free(forwarder->loop);
+        DATA_FREE(forwarder, forwarder->loop);
+        forwarder->loop = NULL;
     }
-    free(forwarder->target_address);
-    free(forwarder);
+    DATA_FREE(forwarder, forwarder->target_address);
+    forwarder->target_address = NULL;
+    DATA_FREE(forwarder, forwarder);
 }
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
@@ -1334,11 +1167,12 @@ udp_forwarder_t *udp_forwarder_create(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    forwarder_allocator_t allocator,
     int *out_error)
 {
     udp_forwarder_t *fwd = NULL;
 
-    fwd = (udp_forwarder_t *)malloc(sizeof(udp_forwarder_t));
+    fwd = (udp_forwarder_t *)allocator.malloc_cb(allocator.ctx, sizeof(udp_forwarder_t));
     if (!fwd)
     {
         if (out_error)
@@ -1346,13 +1180,14 @@ udp_forwarder_t *udp_forwarder_create(
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
+    fwd->allocator = allocator;
 
-    fwd->loop = (uv_loop_t *)malloc(sizeof(uv_loop_t));
+    fwd->loop = (uv_loop_t *)DATA_ALLOC(fwd, sizeof(uv_loop_t));
     if (!fwd->loop)
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
-        free(fwd);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -1360,8 +1195,8 @@ udp_forwarder_t *udp_forwarder_create(
     {
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -1370,8 +1205,8 @@ udp_forwarder_t *udp_forwarder_create(
         if (out_error)
             *out_error = FORWARDER_ERROR_MALLOC;
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
     fwd->server.data = fwd;
@@ -1384,13 +1219,14 @@ udp_forwarder_t *udp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
     fwd->stop_handle.data = fwd;
 
-    fwd->target_address = strdup(target_address);
+    size_t target_len = strlen(target_address);
+    fwd->target_address = (char *)DATA_ALLOC(fwd, target_len + 1);
     if (!fwd->target_address)
     {
         if (out_error)
@@ -1398,14 +1234,17 @@ udp_forwarder_t *udp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
+    memcpy(fwd->target_address, target_address, target_len + 1);
     fwd->target_port = target_port;
     fwd->family = family;
     fwd->listen_port = listen_port;
     fwd->running = 0;
+    fwd->started = 0;
+    fwd->loop_finalized = 0;
     fwd->sessions = NULL;
     fwd->enable_stats = enable_stats;
     // Initialize atomic counters
@@ -1425,9 +1264,9 @@ udp_forwarder_t *udp_forwarder_create(
             uv_walk(fwd->loop, close_handle_walk_cb, NULL);
             uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
-            free(fwd->loop);
-            free(fwd->target_address);
-            free(fwd);
+            DATA_FREE(fwd, fwd->loop);
+            DATA_FREE(fwd, fwd->target_address);
+            DATA_FREE(fwd, fwd);
             return NULL;
         }
         memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
@@ -1443,9 +1282,9 @@ udp_forwarder_t *udp_forwarder_create(
             uv_walk(fwd->loop, close_handle_walk_cb, NULL);
             uv_run(fwd->loop, UV_RUN_DEFAULT);
             uv_loop_close(fwd->loop);
-            free(fwd->loop);
-            free(fwd->target_address);
-            free(fwd);
+            DATA_FREE(fwd, fwd->loop);
+            DATA_FREE(fwd, fwd->target_address);
+            DATA_FREE(fwd, fwd);
             return NULL;
         }
         memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
@@ -1480,9 +1319,9 @@ udp_forwarder_t *udp_forwarder_create(
         uv_walk(fwd->loop, close_handle_walk_cb, NULL);
         uv_run(fwd->loop, UV_RUN_DEFAULT);
         uv_loop_close(fwd->loop);
-        free(fwd->loop);
-        free(fwd->target_address);
-        free(fwd);
+        DATA_FREE(fwd, fwd->loop);
+        DATA_FREE(fwd, fwd->target_address);
+        DATA_FREE(fwd, fwd);
         return NULL;
     }
 
@@ -1499,22 +1338,24 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     int r = uv_udp_recv_start(&fwd->server, udp_alloc_cb, udp_on_recv);
     if (r != 0)
         return r;
+    fwd->started = 1;
     fwd->running = 1;
     int res = uv_run(fwd->loop, UV_RUN_DEFAULT);
     uv_udp_recv_stop(&fwd->server);
     fwd->running = 0;
     forwarder->running = 0;
-    if (res == 1) // 1 stands for still active handles
+    int lr = uv_loop_close(forwarder->loop);
+    while (lr == UV_EBUSY)
     {
-        int lr = uv_loop_close(forwarder->loop);
-        while (lr == UV_EBUSY)
-        {
-            uv_run(forwarder->loop, UV_RUN_NOWAIT);
-            lr = uv_loop_close(forwarder->loop);
-        }
-        return lr;
+        uv_walk(forwarder->loop, udp_close_walk_cb, forwarder);
+        uv_run(forwarder->loop, UV_RUN_NOWAIT);
+        lr = uv_loop_close(forwarder->loop);
     }
-    return 0;
+    if (lr == 0)
+        forwarder->loop_finalized = 1;
+    if (res != 0 && res != 1)
+        return res;
+    return lr;
 }
 
 void udp_forwarder_stop(udp_forwarder_t *forwarder)
@@ -1533,22 +1374,16 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
         return;
     if (forwarder->loop)
     {
-        int lr = uv_loop_close(forwarder->loop);
-        if (lr == UV_EBUSY)
+        if (!forwarder->started)
         {
-            uv_walk(forwarder->loop, close_handle_walk_cb, NULL);
-            uv_run(forwarder->loop, UV_RUN_DEFAULT);
-            lr = uv_loop_close(forwarder->loop);
-            while (lr == UV_EBUSY)
-            {
-                uv_run(forwarder->loop, UV_RUN_NOWAIT);
-                lr = uv_loop_close(forwarder->loop);
-            }
+            forwarder->loop_finalized = 1;
         }
-        free(forwarder->loop);
+        DATA_FREE(forwarder, forwarder->loop);
+        forwarder->loop = NULL;
     }
-    free(forwarder->target_address);
-    free(forwarder);
+    DATA_FREE(forwarder, forwarder->target_address);
+    forwarder->target_address = NULL;
+    DATA_FREE(forwarder, forwarder);
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)

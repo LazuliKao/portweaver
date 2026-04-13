@@ -13,7 +13,9 @@ pub const TcpForwarder = struct {
     pub fn init(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, listen_port: u16, target_port: u16) !*TcpForwarder {
         var error_code: i32 = 0;
         const fwd = try allocator.create(TcpForwarder);
-        fwd.* = TcpForwarder.setup(allocator, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
+        fwd.allocator = allocator;
+        fwd.forwarder = null;
+        fwd.setup(listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;
@@ -21,19 +23,16 @@ pub const TcpForwarder = struct {
         return fwd;
     }
     pub fn setup(
-        allocator: std.mem.Allocator,
+        self: *TcpForwarder,
         listen_port: u16,
         target_address: []const u8,
         target_port: u16,
         family: common.AddressFamily,
         enable_stats: bool,
         out_error_code: *i32,
-    ) !TcpForwarder {
-        var self: TcpForwarder = undefined;
-        self.allocator = allocator;
-
-        const target_z = allocator.dupeZ(u8, target_address) catch unreachable;
-        defer allocator.free(target_z);
+    ) !void {
+        const target_z = self.allocator.dupeZ(u8, target_address) catch unreachable;
+        defer self.allocator.free(target_z);
 
         const c_family: c.addr_family_t = switch (family) {
             .ipv4 => c.ADDR_FAMILY_IPV4,
@@ -41,12 +40,15 @@ pub const TcpForwarder = struct {
             .any => c.ADDR_FAMILY_ANY,
         };
 
+        const fwd_allocator = uv.buildAllocator(&self.allocator);
+
         const forwarder_ptr = c.tcp_forwarder_create(
             listen_port,
             target_z.ptr,
             target_port,
             c_family,
             if (enable_stats) 1 else 0,
+            fwd_allocator,
             out_error_code,
         );
 
@@ -57,8 +59,6 @@ pub const TcpForwarder = struct {
 
         self.forwarder = forwarder_ptr.?;
         out_error_code.* = 0;
-
-        return self;
     }
     pub fn start(self: *TcpForwarder, projectHandle: *project_status.ProjectHandle) !void {
         if (self.forwarder == null) {

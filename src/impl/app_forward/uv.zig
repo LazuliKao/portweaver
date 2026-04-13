@@ -4,9 +4,49 @@ pub const c = @cImport({
     @cInclude("forwarder.h");
 });
 
+const AllocationHeader = extern struct {
+    len: usize,
+};
+
 pub fn versionString() [:0]const u8 {
     return std.mem.span(c.uv_get_version_string());
 }
 pub inline fn printVersion() void {
     std.log.debug("libuv version: {s}", .{versionString()});
+}
+
+export fn forwarder_c_malloc(ctx: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
+    const allocator_ptr: *std.mem.Allocator = @ptrCast(@alignCast(ctx orelse return null));
+    const header_size = @sizeOf(AllocationHeader);
+    const total_size = std.math.add(usize, header_size, size) catch {
+        return null;
+    };
+    const buf = allocator_ptr.alignedAlloc(u8, std.mem.Alignment.@"8", total_size) catch {
+        return null;
+    };
+
+    const header: *AllocationHeader = @ptrCast(buf.ptr);
+    header.* = .{ .len = total_size };
+
+    return buf.ptr + header_size;
+}
+
+export fn forwarder_c_free(ctx: ?*anyopaque, ptr: ?*anyopaque) callconv(.c) void {
+    if (ptr) |p| {
+        const allocator_ptr: *std.mem.Allocator = @ptrCast(@alignCast(ctx orelse return));
+        const header_size = @sizeOf(AllocationHeader);
+        const data_ptr: [*]u8 = @ptrCast(@alignCast(p));
+        const base_ptr = data_ptr - header_size;
+        const header: *const AllocationHeader = @ptrCast(@alignCast(base_ptr));
+        const buf: []align(@alignOf(AllocationHeader)) u8 = @alignCast(base_ptr[0..header.len]);
+        allocator_ptr.free(buf);
+    }
+}
+
+pub fn buildAllocator(allocator: *std.mem.Allocator) c.forwarder_allocator_t {
+    return .{
+        .ctx = allocator,
+        .malloc_cb = forwarder_c_malloc,
+        .free_cb = forwarder_c_free,
+    };
 }

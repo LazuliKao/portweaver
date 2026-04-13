@@ -896,7 +896,8 @@ pub fn build(b: *std.Build) void {
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
-        .root_module = b.addModule("PortWeaver", .{
+        .root_module = b.createModule(.{
+            .link_libc = true,
             // The root source file is the "entry point" of this module. Users of
             // this module will only be able to access public declarations contained
             // in this file, which means that if you have declarations that you
@@ -907,8 +908,43 @@ pub fn build(b: *std.Build) void {
             // Later on we'll use this module as the root module of a test executable
             // which requires us to specify a target.
             .target = target,
+            .optimize = optimize,
         }),
     });
+
+    mod_tests.linkLibrary(uv);
+    mod_tests.addIncludePath(b.path("deps/libuv/include"));
+    mod_tests.addIncludePath(b.path("deps/libuv/src"));
+    mod_tests.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    mod_tests.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+
+    if (target.result.os.tag == .windows) {
+        mod_tests.root_module.linkSystemLibrary("ws2_32", .{});
+        mod_tests.root_module.linkSystemLibrary("advapi32", .{});
+        mod_tests.root_module.linkSystemLibrary("user32", .{});
+        mod_tests.root_module.linkSystemLibrary("shell32", .{});
+        mod_tests.root_module.linkSystemLibrary("iphlpapi", .{});
+        mod_tests.root_module.linkSystemLibrary("dbghelp", .{});
+        mod_tests.root_module.linkSystemLibrary("ole32", .{});
+        mod_tests.root_module.linkSystemLibrary("userenv", .{});
+        mod_tests.root_module.linkSystemLibrary("psapi", .{});
+    }
+
+    if (target.result.os.tag == .macos) {
+        if (b.sysroot) |sysroot| {
+            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
+            mod_tests.addFrameworkPath(.{ .cwd_relative = framework_path });
+            mod_tests.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+        }
+
+        mod_tests.root_module.linkFramework("CoreFoundation", .{});
+        mod_tests.root_module.linkFramework("Security", .{});
+        mod_tests.root_module.linkFramework("IOKit", .{});
+        mod_tests.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
+    }
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
