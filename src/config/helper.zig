@@ -154,7 +154,7 @@ pub fn parseFrpcForwardString(allocator: std.mem.Allocator, s: []const u8) !type
 }
 
 test "parsePortMapping tests" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -166,14 +166,8 @@ test "parsePortMapping tests" {
         "[2]:80/tcp",
     };
 
-    std.debug.print("测试 FRPC 格式解析:\n", .{});
     for (test_cases) |test_str| {
-        var result = parsePortMapping(allocator, test_str) catch |err| {
-            std.debug.print("输入: {s}\n  -> 解析失败：{any}\n", .{ test_str, err });
-            continue;
-        };
+        var result = try parsePortMapping(allocator, test_str);
         defer result.deinit(allocator);
-        std.debug.print("\n输入: {s}\n", .{test_str});
-        std.debug.print("  -> 解析成功：{any}\n", .{result});
     }
 }

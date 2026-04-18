@@ -32,7 +32,7 @@ const RuntimeState = struct {
     projects: std.array_list.Managed(project_status.ProjectHandle),
     enabled: []bool,
     last_changed: []u64,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.atomic.Mutex = .unlocked,
 
     pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);

@@ -1,9 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const fs = std.fs;
 const mem = std.mem;
 const time = std.time;
 const Thread = std.Thread;
+const compat = @import("compat.zig");
 
 pub const LogConfig = struct {
     enabled: bool = true,
@@ -31,10 +31,10 @@ pub fn defaultLogConfig(allocator: std.mem.Allocator) !LogConfig {
 pub const FileLogger = struct {
     allocator: std.mem.Allocator,
     config: LogConfig,
-    file: ?fs.File,
+    file: ?std.Io.File,
     file_path: []const u8,
     current_size: usize,
-    lock: Thread.Mutex,
+    lock: std.Io.Mutex,
     stop_thread: bool,
     thread: ?Thread,
     write_count: usize,
@@ -54,7 +54,7 @@ pub const FileLogger = struct {
             .file = null,
             .file_path = file_path,
             .current_size = 0,
-            .lock = .{},
+            .lock = .init,
             .stop_thread = false,
             .thread = null,
             .write_count = 0,
@@ -77,16 +77,16 @@ pub const FileLogger = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.lock.lock();
+        self.lock.lockUncancelable(compat.io());
         self.stop_thread = true;
-        self.lock.unlock();
+        self.lock.unlock(compat.io());
 
         if (self.thread) |t| {
             t.join();
         }
 
         if (self.file) |f| {
-            f.close();
+            f.close(compat.io());
             self.file = null;
         }
 
@@ -95,7 +95,8 @@ pub const FileLogger = struct {
     }
 
     fn openFile(self: *Self) !void {
-        const file = fs.cwd().createFile(
+        const file = std.Io.Dir.cwd().createFile(
+            compat.io(),
             self.file_path,
             .{
                 .truncate = false,
@@ -108,28 +109,29 @@ pub const FileLogger = struct {
                 if (path_len > 0) {
                     const dir = self.file_path[0..path_len];
                     @memcpy(dir_path[0..dir.len], dir);
-                    try fs.cwd().makePath(dir);
+                    try std.Io.Dir.cwd().createDirPath(compat.io(), dir);
                 }
-                _ = try fs.cwd().createFile(self.file_path, .{});
-                break :blk try fs.cwd().openFile(self.file_path, .{ .mode = .write_only });
+                _ = try std.Io.Dir.cwd().createFile(compat.io(), self.file_path, .{});
+                break :blk try std.Io.Dir.cwd().openFile(compat.io(), self.file_path, .{ .mode = .write_only });
             } else {
                 return err;
             }
         };
         self.file = file;
 
-        const stat = self.file.?.stat() catch {
+        const stat = self.file.?.stat(compat.io()) catch {
             self.current_size = 0;
             return;
         };
         self.current_size = stat.size;
 
-        try self.file.?.seekTo(self.current_size);
+        var writer = self.file.?.writer(compat.io(), &.{});
+        try writer.seekTo(self.current_size);
     }
 
     fn rotate(self: *Self) void {
         if (self.file) |f| {
-            f.close();
+            f.close(compat.io());
             self.file = null;
         }
 
@@ -141,17 +143,17 @@ pub const FileLogger = struct {
             const new_path = std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, i + 1 }) catch continue;
             defer self.allocator.free(new_path);
 
-            _ = fs.cwd().rename(old_path, new_path) catch {};
+            std.Io.Dir.rename(std.Io.Dir.cwd(), old_path, std.Io.Dir.cwd(), new_path, compat.io()) catch {};
         }
 
         const rotated_path = std.fmt.allocPrint(self.allocator, "{s}.1", .{self.file_path}) catch return;
         defer self.allocator.free(rotated_path);
 
-        _ = fs.cwd().rename(self.file_path, rotated_path) catch {};
+        std.Io.Dir.rename(std.Io.Dir.cwd(), self.file_path, std.Io.Dir.cwd(), rotated_path, compat.io()) catch {};
 
         const excess_path = std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, self.config.max_files + 1 }) catch return;
         defer self.allocator.free(excess_path);
-        _ = fs.cwd().deleteFile(excess_path) catch {};
+        std.Io.Dir.cwd().deleteFile(compat.io(), excess_path) catch {};
 
         self.openFile() catch |err| {
             std.log.warn("Failed to reopen log file after rotation: {any}", .{err});
@@ -159,11 +161,11 @@ pub const FileLogger = struct {
         self.current_size = 0;
     }
 
-    pub fn log(self: *Self, level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime format: []const u8, args: anytype) void {
+    pub fn log(self: *Self, level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
         if (!self.config.enabled) return;
 
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         if (self.file == null) return;
 
@@ -171,7 +173,7 @@ pub const FileLogger = struct {
         var fba = std.heap.FixedBufferAllocator.init(&buf);
         const allocator = fba.allocator();
 
-        const timestamp = time.timestamp();
+        const timestamp = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
         const epoch_days = @divFloor(timestamp, 86400);
         const secs_of_day = @mod(timestamp, 86400);
         const hours = @divFloor(secs_of_day, 3600);
@@ -213,8 +215,8 @@ pub const FileLogger = struct {
             self.rotate();
         }
 
-        self.file.?.writeAll(message) catch {
-            self.file.?.close();
+        self.file.?.writeStreamingAll(compat.io(), message) catch {
+            self.file.?.close(compat.io());
             self.file = null;
             return;
         };
@@ -225,42 +227,42 @@ pub const FileLogger = struct {
 
     fn flushThread(self: *Self) void {
         while (true) {
-            self.lock.lock();
+            self.lock.lockUncancelable(compat.io());
             const should_stop = self.stop_thread;
             const should_flush = self.file != null and self.write_count > 0;
-            self.lock.unlock();
+            self.lock.unlock(compat.io());
 
             if (should_stop) break;
 
             if (should_flush) {
-                self.lock.lock();
+                self.lock.lockUncancelable(compat.io());
                 if (self.file) |f| {
-                    f.sync() catch {};
+                    f.sync(compat.io()) catch {};
                     self.write_count = 0;
                 }
-                self.lock.unlock();
+                self.lock.unlock(compat.io());
             }
 
-            std.Thread.sleep(self.config.flush_interval_ms * time.ns_per_ms);
+            compat.sleepNanos(self.config.flush_interval_ms * time.ns_per_ms);
         }
     }
 
     pub fn flush(self: *Self) void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         if (self.file) |f| {
-            f.sync() catch {};
+            f.sync(compat.io()) catch {};
         }
     }
 };
 
 var global_file_logger: ?*FileLogger = null;
-var global_logger_lock: Thread.Mutex = .{};
+var global_logger_lock: std.Io.Mutex = .init;
 
 pub fn initGlobalFileLogger(allocator: std.mem.Allocator, config: LogConfig) void {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
 
     if (global_file_logger == null) {
         global_file_logger = FileLogger.init(allocator, config) catch |err| {
@@ -271,8 +273,8 @@ pub fn initGlobalFileLogger(allocator: std.mem.Allocator, config: LogConfig) voi
 }
 
 pub fn deinitGlobalFileLogger() void {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
 
     if (global_file_logger) |logger| {
         logger.deinit();
@@ -281,12 +283,12 @@ pub fn deinitGlobalFileLogger() void {
 }
 
 pub fn getGlobalFileLogger() ?*FileLogger {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
     return global_file_logger;
 }
 
-pub fn logToFile(level: std.log.Level, comptime scope: @TypeOf(.enum_literal), comptime format: []const u8, args: anytype) void {
+pub fn logToFile(level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
     if (getGlobalFileLogger()) |logger| {
         logger.log(level, scope, format, args);
     }
@@ -302,12 +304,12 @@ test "FileLogger basic operations" {
         .max_files = 2,
     };
 
-    _ = fs.cwd().deleteFile(config.file_path) catch {};
+    std.Io.Dir.cwd().deleteFile(compat.io(), config.file_path) catch {};
     var i: usize = 1;
     while (i <= config.max_files + 1) : (i += 1) {
         const path = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ config.file_path, i });
         defer allocator.free(path);
-        _ = fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(compat.io(), path) catch {};
     }
 
     var logger = try FileLogger.init(allocator, config);
@@ -329,12 +331,12 @@ test "FileLogger rotation" {
         .max_files = 2,
     };
 
-    _ = fs.cwd().deleteFile(config.file_path) catch {};
+    std.Io.Dir.cwd().deleteFile(compat.io(), config.file_path) catch {};
     var i: usize = 1;
     while (i <= config.max_files + 2) : (i += 1) {
         const path = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ config.file_path, i });
         defer allocator.free(path);
-        _ = fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(compat.io(), path) catch {};
     }
 
     var logger = try FileLogger.init(allocator, config);
@@ -345,7 +347,7 @@ test "FileLogger rotation" {
         logger.log(.info, .default, "Test message number {} with some padding", .{j});
     }
 
-    const file1_exists = if (fs.cwd().access(config.file_path, .{})) |_| true else |err| switch (err) {
+    const file1_exists = if (std.Io.Dir.cwd().access(compat.io(), config.file_path, .{})) |_| true else |err| switch (err) {
         error.FileNotFound => false,
         else => return err,
     };

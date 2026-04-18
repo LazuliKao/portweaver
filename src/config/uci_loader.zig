@@ -480,8 +480,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
 
         var ddns_cfg = types.DdnsConfig{
             .enabled = true,
-            .name = undefined,
-            .dns_provider = undefined,
         };
         var have_name = false;
         var have_provider = false;

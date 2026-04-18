@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const c = @cImport({
     @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
 });
@@ -20,11 +21,11 @@ pub const ProxyType = enum {
 };
 
 var frpc_initialized: bool = false;
-var frpc_init_lock: std.Thread.Mutex = .{};
+var frpc_init_lock: std.Io.Mutex = .init;
 
 fn ensureFrpcInit() !void {
-    frpc_init_lock.lock();
-    defer frpc_init_lock.unlock();
+    frpc_init_lock.lockUncancelable(compat.io());
+    defer frpc_init_lock.unlock(compat.io());
 
     if (frpc_initialized) return;
 

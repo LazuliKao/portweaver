@@ -9,10 +9,8 @@ pub const ForwardError = error{
     InvalidAddress,
 };
 
-pub const THREAD_STACK_SIZE = 64 * 1024; // 64KB - reasonable for network I/O threads
-
 pub inline fn getThreadConfig() std.Thread.SpawnConfig {
-    return .{ .stack_size = THREAD_STACK_SIZE };
+    return .{};
 }
 
 pub const AddressFamily = types.AddressFamily;
@@ -31,6 +29,8 @@ pub fn parsePortRange(port_str: []const u8) !PortRange {
         const start_port = try types.parsePort(start_str);
         const end_port = try types.parsePort(end_str);
 
+        if (start_port >= end_port) return types.ConfigError.InvalidValue;
+
         return .{ .start = start_port, .end = end_port };
     }
 
@@ -40,4 +40,28 @@ pub fn parsePortRange(port_str: []const u8) !PortRange {
 
 pub fn portToString(port: u16, allocator: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{}", .{port});
+}
+
+test "app forward common: parsePortRange handles single and ranged ports" {
+    const single = try parsePortRange(" 8080 ");
+    try std.testing.expectEqual(@as(u16, 8080), single.start);
+    try std.testing.expectEqual(@as(u16, 8080), single.end);
+
+    const ranged = try parsePortRange(" 1000-1005 ");
+    try std.testing.expectEqual(@as(u16, 1000), ranged.start);
+    try std.testing.expectEqual(@as(u16, 1005), ranged.end);
+}
+
+test "app forward common: parsePortRange rejects invalid ranges" {
+    try std.testing.expectError(types.ConfigError.InvalidValue, parsePortRange("1005-1000"));
+    try std.testing.expectError(types.ConfigError.InvalidValue, parsePortRange("8080-8080"));
+    try std.testing.expectError(types.ConfigError.InvalidValue, parsePortRange("0-10"));
+}
+
+test "app forward common: portToString formats port" {
+    const allocator = std.testing.allocator;
+    const port = try portToString(65535, allocator);
+    defer allocator.free(port);
+
+    try std.testing.expectEqualStrings("65535", port);
 }

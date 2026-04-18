@@ -7,7 +7,6 @@ const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig
 const frps_forward = if (build_options.frps_mode) @import("impl/frps_forward.zig") else struct {};
 const libfrps = if (build_options.frps_mode) @import("impl/frps/libfrps.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
-const builtin = @import("builtin");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
 // 仅在 UCI 模式下导入 UCI 相关模块
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
@@ -15,6 +14,7 @@ const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
 pub const event_log = @import("event_log.zig");
 const process_lock = @import("process_lock.zig");
 const file_log = @import("file_log.zig");
+const compat = @import("compat.zig");
 
 var global_log_level: std.log.Level = .info;
 
@@ -25,7 +25,7 @@ pub const std_options: std.Options = .{
 
 fn myLogFn(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -38,22 +38,12 @@ fn myLogFn(
     }
 }
 
-pub fn main() !void {
-    // 设置分配器：Debug 模式使用 GPA 检测内存泄漏，Release 模式使用 c_allocator
-    const GPAType = std.heap.GeneralPurposeAllocator(.{});
-    var gpa: ?GPAType = if (builtin.mode == .Debug) GPAType{} else null;
-    defer if (gpa) |*g| {
-        if (g.deinit() == .leak) {
-            std.log.err("Memory leak detected!", .{});
-            @panic("Memory leak detected!");
-        }
-    };
-    const allocator = if (gpa) |*g| g.allocator() else std.heap.c_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     errdefer {
-        if (builtin.mode == .Debug) {
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
-            }
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpErrorReturnTrace(trace);
         }
     }
 
@@ -64,10 +54,6 @@ pub fn main() !void {
     // Initialize event logger
     event_log.initGlobal(allocator);
     defer event_log.deinitGlobal();
-
-    // 解析命令行参数
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
 
     // 加载配置
     var result = try loadConfig(allocator, args);
@@ -122,7 +108,7 @@ pub fn main() !void {
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
         // Keep program running with periodic sleep
         while (true) {
-            std.Thread.sleep(100 * std.time.ns_per_ms); // Sleep for 100ms instead of 1 second to be more responsive
+            compat.sleepNanos(100 * std.time.ns_per_ms); // Sleep for 100ms instead of 1 second to be more responsive
         }
     }
 }
@@ -301,9 +287,9 @@ fn startForwarding(
     if (handle.cfg.enable_app_forward) {
         app_forward.startForwarding(allocator, handle) catch |err| {
             std.log.err("Failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-            if (builtin.mode == .Debug) {
+            if (compat.isDebugBuild()) {
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    std.debug.dumpErrorReturnTrace(trace);
                 }
             }
         };
@@ -312,9 +298,9 @@ fn startForwarding(
     if (build_options.frpc_mode) {
         frpc_forward.startForwarding(allocator, handle, frpc_nodes) catch |err| {
             std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-            if (builtin.mode == .Debug) {
+            if (compat.isDebugBuild()) {
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    std.debug.dumpErrorReturnTrace(trace);
                 }
             }
         };

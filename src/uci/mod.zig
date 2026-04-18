@@ -49,3 +49,22 @@ pub fn sections(package: t.UciPackage) t.UciSectionIterator {
 pub fn validateText(str: [*c]const u8) !bool {
     return try libuci.uci_validate_text(str);
 }
+
+test "uci mod: cStr returns empty for null" {
+    try std.testing.expectEqualStrings("", cStr(null));
+}
+
+test "uci mod: cStr converts sentinel string" {
+    const raw: [*:0]const u8 = "portweaver";
+    try std.testing.expectEqualStrings("portweaver", cStr(raw));
+}
+
+test "uci mod: sections returns empty iterator for null package" {
+    var it = sections(.{ .ctx = null, .pkg = null });
+    try std.testing.expect(it.next() == null);
+}
+
+test "uci mod: toUciError maps success and unknown codes" {
+    try toUciError(c.UCI_OK);
+    try std.testing.expectError(t.UciError.UciErrUnknown, toUciError(-12345));
+}

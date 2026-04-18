@@ -6,20 +6,21 @@ const common = @import("app_forward/common.zig");
 const main = @import("../main.zig");
 const event_log = main.event_log;
 const build_options = @import("build_options");
+const compat = @import("../compat.zig");
 
 const ClientHolder = struct {
     client: libfrp.FrpcClient,
     started: bool = false,
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
 };
 
 var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
-var clients_lock: std.Thread.Mutex = .{};
+var clients_lock: std.Io.Mutex = .init;
 pub fn flushAllClients() void {
     if (clients == null) return;
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     var map = clients.?;
     var it = map.iterator();
@@ -27,8 +28,8 @@ pub fn flushAllClients() void {
         const node_name = entry.key_ptr.*;
         const holder = entry.value_ptr.*;
 
-        holder.lock.lock();
-        defer holder.lock.unlock();
+        holder.lock.lockUncancelable(compat.io());
+        defer holder.lock.unlock(compat.io());
 
         flushFrpcClient(holder, node_name);
     }
@@ -62,13 +63,13 @@ fn getOrCreateClient(
     node_name: []const u8,
     node: types.FrpcNode,
 ) !*ClientHolder {
-    clients_lock.lock();
+    clients_lock.lockUncancelable(compat.io());
     var map = try getClientMap(allocator);
     if (map.get(node_name)) |holder_ptr| {
-        clients_lock.unlock();
+        clients_lock.unlock(compat.io());
         return holder_ptr;
     }
-    clients_lock.unlock();
+    clients_lock.unlock(compat.io());
 
     const token_opt: ?[]const u8 = if (node.token.len == 0) null else node.token;
     const log_level_opt: ?[]const u8 = if (node.log_level.len == 0) null else node.log_level;
@@ -78,11 +79,11 @@ fn getOrCreateClient(
     holder.* = .{
         .client = try libfrp.FrpcClient.init(allocator, node.server, node.port, token_opt, log_level_opt, node_name, node.use_encryption, node.use_compression),
         .started = false,
-        .lock = .{},
+        .lock = .init,
     };
 
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
     map = try getClientMap(allocator);
     if (map.get(node_name)) |existing| {
         holder.client.deinit();
@@ -170,8 +171,8 @@ fn applyFrpcForMapping(
 
         const holder = try getOrCreateClient(allocator, fwd.node_name, node);
 
-        holder.lock.lock();
-        defer holder.lock.unlock();
+        holder.lock.lockUncancelable(compat.io());
+        defer holder.lock.unlock(compat.io());
 
         var idx: u32 = 0;
         while (idx < listen_count) : (idx += 1) {
@@ -205,8 +206,8 @@ pub fn startForwarding(
 
 pub fn stopAll() void {
     if (clients == null) return;
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     var map = clients.?;
     const allocator = clients_allocator orelse std.heap.c_allocator;
@@ -239,8 +240,8 @@ pub fn getAggregatedStatus(allocator: std.mem.Allocator) !struct {
     last_error: []const u8,
     client_count: usize,
 } {
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     if (clients == null) {
         return .{
@@ -321,8 +322,8 @@ pub fn getClientStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
     last_error: []const u8,
     logs: []const u8,
 } {
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     // No clients initialized
     if (clients == null) {
@@ -371,8 +372,8 @@ pub fn getClientStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
 /// Clear the logs of a specific FRP client by node name
 /// This is idempotent - returns success if node not found or not started
 pub fn clearClientLogs(node_name: []const u8) void {
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     if (clients == null) return;
 
@@ -387,8 +388,8 @@ pub fn clearClientLogs(node_name: []const u8) void {
 /// Get all proxy statistics for an FRPC client
 /// Returns JSON string: [{"name":"...","type":"...","status":"...",...}]
 pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]const u8 {
-    clients_lock.lock();
-    defer clients_lock.unlock();
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
 
     // No clients initialized
     if (clients == null) {
@@ -444,6 +445,40 @@ fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
     };
 }
 
+test "frpc forward: parseStatusJson extracts status and last error" {
+    const allocator = std.testing.allocator;
+
+    const parsed = try parseStatusJson(allocator, "{\"status\":\"error\",\"last_error\":\"boom\"}");
+    defer allocator.free(parsed.status);
+    defer allocator.free(parsed.last_error);
+
+    try std.testing.expectEqualStrings("error", parsed.status);
+    try std.testing.expectEqualStrings("boom", parsed.last_error);
+}
+
+test "frpc forward: parseStatusJson falls back for missing fields" {
+    const allocator = std.testing.allocator;
+
+    const parsed = try parseStatusJson(allocator, "{}");
+    defer allocator.free(parsed.status);
+    defer allocator.free(parsed.last_error);
+
+    try std.testing.expectEqualStrings("unknown", parsed.status);
+    try std.testing.expectEqualStrings("", parsed.last_error);
+}
+
+test "frpc forward: aggregated status is stopped when no clients exist" {
+    const allocator = std.testing.allocator;
+
+    const result = try getAggregatedStatus(allocator);
+    defer allocator.free(result.status);
+    defer allocator.free(result.last_error);
+
+    try std.testing.expectEqualStrings("stopped", result.status);
+    try std.testing.expectEqualStrings("", result.last_error);
+    try std.testing.expectEqual(@as(usize, 0), result.client_count);
+}
+
 pub const ClientSummary = struct {
     name: []const u8,
     status: []const u8,
@@ -468,8 +503,8 @@ pub fn getAllClientSummaries(allocator: std.mem.Allocator) ![]ClientSummary {
         node_names.deinit();
     }
     {
-        clients_lock.lock();
-        defer clients_lock.unlock();
+        clients_lock.lockUncancelable(compat.io());
+        defer clients_lock.unlock(compat.io());
         if (clients) |map| {
             var it = map.iterator();
             while (it.next()) |entry| {

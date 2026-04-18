@@ -121,3 +121,58 @@ fn getFrpsStatus(allocator: std.mem.Allocator) !FrpsStatus {
         .server_count = stats.server_count,
     };
 }
+
+test "frp status: feature flags shape disabled sections consistently" {
+    const status = try getFrpStatus(std.testing.allocator);
+    defer {
+        if (status.frp_version) |v| std.testing.allocator.free(v);
+        if (status.frpc.status) |s| std.testing.allocator.free(s);
+        if (status.frpc.last_error) |e| std.testing.allocator.free(e);
+        if (status.frps.status) |s| std.testing.allocator.free(s);
+        if (status.frps.last_error) |e| std.testing.allocator.free(e);
+    }
+
+    try std.testing.expectEqual(build_options.frpc_mode or build_options.frps_mode, status.frp_enabled);
+
+    if (!build_options.frpc_mode) {
+        try std.testing.expect(!status.frpc.enabled);
+        try std.testing.expectEqual(@as(?[]const u8, null), status.frpc.status);
+        try std.testing.expectEqual(@as(?[]const u8, null), status.frpc.last_error);
+        try std.testing.expectEqual(@as(usize, 0), status.frpc.client_count);
+    }
+
+    if (!build_options.frps_mode) {
+        try std.testing.expect(!status.frps.enabled);
+        try std.testing.expectEqual(@as(?[]const u8, null), status.frps.status);
+        try std.testing.expectEqual(@as(?[]const u8, null), status.frps.last_error);
+        try std.testing.expectEqual(@as(usize, 0), status.frps.client_count);
+        try std.testing.expectEqual(@as(usize, 0), status.frps.proxy_count);
+        try std.testing.expectEqual(@as(usize, 0), status.frps.server_count);
+    }
+
+    if (!status.frp_enabled) {
+        try std.testing.expectEqual(@as(?[]const u8, null), status.frp_version);
+    }
+}
+
+test "frp status: enabled sections expose owned status strings when present" {
+    const status = try getFrpStatus(std.testing.allocator);
+    defer {
+        if (status.frp_version) |v| std.testing.allocator.free(v);
+        if (status.frpc.status) |s| std.testing.allocator.free(s);
+        if (status.frpc.last_error) |e| std.testing.allocator.free(e);
+        if (status.frps.status) |s| std.testing.allocator.free(s);
+        if (status.frps.last_error) |e| std.testing.allocator.free(e);
+    }
+
+    if (build_options.frpc_mode) {
+        if (status.frpc.status) |s| {
+            try std.testing.expect(s.len > 0);
+        }
+    }
+    if (build_options.frps_mode) {
+        if (status.frps.status) |s| {
+            try std.testing.expect(s.len > 0);
+        }
+    }
+}

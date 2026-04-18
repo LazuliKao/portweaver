@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const compat = @import("compat.zig");
 
 /// Returns PID file path (platform-specific)
 /// Windows: current working directory
@@ -9,8 +10,8 @@ pub fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8) []const u8 {
         return "portweaver.pid";
     }
 
-    if (std.posix.getenv("XDG_RUNTIME_DIR")) |runtime_dir| {
-        return std.fmt.bufPrint(buf, "{s}/portweaver.pid", .{std.mem.sliceTo(runtime_dir, 0)}) catch "/tmp/portweaver.pid";
+    if (compat.getenv("XDG_RUNTIME_DIR")) |runtime_dir| {
+        return std.fmt.bufPrint(buf, "{s}/portweaver.pid", .{runtime_dir}) catch "/tmp/portweaver.pid";
     }
 
     return "/tmp/portweaver.pid";
@@ -36,7 +37,7 @@ pub fn ensureSingleInstance(allocator: std.mem.Allocator) !void {
             std.log.info("Old process terminated successfully", .{});
 
             // Wait a moment for the process to fully terminate
-            std.Thread.sleep(500 * std.time.ns_per_ms);
+            compat.sleepNanos(500 * std.time.ns_per_ms);
         } else {
             std.log.info("Stale PID file found (process not running), removing...", .{});
         }
@@ -55,7 +56,7 @@ pub fn cleanup() void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_file_path = getPidFilePath(&path_buf);
 
-    std.fs.cwd().deleteFile(pid_file_path) catch |err| {
+    std.Io.Dir.cwd().deleteFile(compat.io(), pid_file_path) catch |err| {
         std.log.warn("Failed to remove PID file: {any}", .{err});
     };
 }
@@ -65,10 +66,12 @@ fn readPidFile(allocator: std.mem.Allocator) ![]const u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_file_path = getPidFilePath(&path_buf);
 
-    const file = try std.fs.cwd().openFile(pid_file_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
+    defer file.close(compat.io());
 
-    const content = try file.readToEndAlloc(allocator, 1024);
+    var buf: [1024]u8 = undefined;
+    var reader = file.reader(compat.io(), &buf);
+    const content = try reader.interface.allocRemaining(allocator, .limited(1024));
     defer allocator.free(content);
 
     const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
@@ -80,15 +83,15 @@ fn writePidFile(allocator: std.mem.Allocator) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_file_path = getPidFilePath(&path_buf);
 
-    const file = try std.fs.cwd().createFile(pid_file_path, .{ .truncate = true });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().createFile(compat.io(), pid_file_path, .{ .truncate = true });
+    defer file.close(compat.io());
 
     const pid = std.c.getpid();
 
     const pid_str = try std.fmt.allocPrint(allocator, "{}\n", .{pid});
     defer allocator.free(pid_str);
 
-    try file.writeAll(pid_str);
+    try file.writeStreamingAll(compat.io(), pid_str);
 }
 
 /// Checks if a process with given PID is running
@@ -105,7 +108,7 @@ fn isProcessRunningUnix(pid_str: []const u8) bool {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{s}", .{pid_str}) catch return false;
 
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(compat.io(), path, .{}) catch return false;
     return true;
 }
 

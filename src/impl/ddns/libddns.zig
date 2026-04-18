@@ -379,3 +379,16 @@ pub fn getVersion(allocator: std.mem.Allocator) !?[]const u8 {
 pub fn cleanup() void {
     c.DdnsCleanup();
 }
+
+test "ddns provider: known provider round-trips through strings" {
+    const cases = [_]DnsProvider{ .alidns, .cloudflare, .dynv6, .name_com };
+
+    for (cases) |provider| {
+        const str = provider.toString();
+        try std.testing.expectEqual(provider, try DnsProvider.fromString(str));
+    }
+}
+
+test "ddns provider: unknown provider string is rejected" {
+    try std.testing.expectError(DdnsError.UnsupportedProvider, DnsProvider.fromString("not-a-provider"));
+}

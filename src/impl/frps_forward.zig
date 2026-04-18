@@ -3,6 +3,7 @@ const types = @import("../config/types.zig");
 const project_status = @import("project_status.zig");
 const libfrps = @import("frps/libfrps.zig");
 const common = @import("app_forward/common.zig");
+const compat = @import("../compat.zig");
 const main = @import("../main.zig");
 const event_log = main.event_log;
 const build_options = @import("build_options");
@@ -10,12 +11,12 @@ const build_options = @import("build_options");
 const ServerHolder = struct {
     server: libfrps.FrpsServer,
     started: bool = false,
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
 };
 
 var servers: ?std.StringHashMap(*ServerHolder) = null;
 var servers_allocator: ?std.mem.Allocator = null;
-var servers_lock: std.Thread.Mutex = .{};
+var servers_lock: std.Io.Mutex = .init;
 
 fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) void {
     if (holder.started) {
@@ -46,14 +47,14 @@ fn getOrCreateServer(
     node_name: []const u8,
     node: types.FrpsNode,
 ) !*ServerHolder {
-    servers_lock.lock();
+    servers_lock.lockUncancelable(compat.io());
     var map = try getServerMap(allocator);
     if (map.get(node_name)) |holder_ptr| {
-        servers_lock.unlock();
+        servers_lock.unlock(compat.io());
         std.log.debug("[FRPS] Server {s} already exists in map", .{node_name});
         return holder_ptr;
     }
-    servers_lock.unlock();
+    servers_lock.unlock(compat.io());
 
     std.log.debug("[FRPS] Creating new server instance for {s}", .{node_name});
     const holder = try allocator.create(ServerHolder);
@@ -81,11 +82,11 @@ fn getOrCreateServer(
             node_name,
         ),
         .started = false,
-        .lock = .{},
+        .lock = .init,
     };
 
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
     map = try getServerMap(allocator);
     if (map.get(node_name)) |existing| {
         std.log.debug("[FRPS] Server {s} was created by another thread, using existing instance", .{node_name});
@@ -114,21 +115,21 @@ pub fn startServer(
 
     const holder = try getOrCreateServer(allocator, node_name, node);
 
-    holder.lock.lock();
-    defer holder.lock.unlock();
+    holder.lock.lockUncancelable(compat.io());
+    defer holder.lock.unlock(compat.io());
 
     startFrpsServer(holder, node_name);
 }
 
 pub fn stopServer(node_name: []const u8) void {
     std.log.info("[FRPS] Stopping server {s}...", .{node_name});
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
 
     if (servers) |*map| {
         if (map.get(node_name)) |holder| {
-            holder.lock.lock();
-            defer holder.lock.unlock();
+            holder.lock.lockUncancelable(compat.io());
+            defer holder.lock.unlock(compat.io());
 
             if (holder.started) {
                 holder.server.stop() catch |err| {
@@ -143,8 +144,8 @@ pub fn stopServer(node_name: []const u8) void {
 
 pub fn stopAll() void {
     if (servers == null) return;
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
 
     var map = servers.?;
     const allocator = servers_allocator orelse std.heap.c_allocator;
@@ -180,8 +181,8 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
     last_error: []const u8,
     logs: []const u8,
 } {
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
 
     // No servers initialized
     if (servers == null) {
@@ -233,8 +234,8 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
 /// Get all proxy statistics for an FRPS server
 /// Returns JSON string: [{"name":"...","type":"...","status":"...",...}]
 pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]const u8 {
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
 
     // No servers initialized
     if (servers == null) {

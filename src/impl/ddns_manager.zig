@@ -3,6 +3,7 @@ const types = @import("../config/types.zig");
 const libddns = @import("ddns/libddns.zig");
 const main = @import("../main.zig");
 const event_log = main.event_log;
+const compat = @import("../compat.zig");
 
 pub const DdnsStatus = struct {
     name: []const u8,
@@ -43,7 +44,7 @@ const InstanceHolder = struct {
     config: types.DdnsConfig,
     thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
     last_status: []const u8 = "starting",
     last_update: i64 = 0,
     last_ip: []const u8 = "",
@@ -64,7 +65,7 @@ const InstanceHolder = struct {
 
 var instances: ?std.StringHashMap(*InstanceHolder) = null;
 var instances_allocator: ?std.mem.Allocator = null;
-var instances_lock: std.Thread.Mutex = .{};
+var instances_lock: std.Io.Mutex = .init;
 
 fn ddnsUpdateThread(holder: *InstanceHolder) void {
     std.log.debug("[DDNS] Update thread started for {s}", .{holder.config.name});
@@ -72,22 +73,22 @@ fn ddnsUpdateThread(holder: *InstanceHolder) void {
     // Use TTL as update interval (convert to seconds, default 300 if TTL is too small)
     const interval_seconds: u32 = if (holder.config.ttl >= 60) holder.config.ttl else 300;
 
-    holder.lock.lock();
+    holder.lock.lockUncancelable(compat.io());
     holder.last_status = "success";
-    holder.lock.unlock();
+    holder.lock.unlock(compat.io());
 
     holder.instance.startAutoUpdate(interval_seconds) catch |err| {
         std.log.warn("[DDNS] Auto-update failed for {s}: {any}", .{ holder.config.name, err });
-        holder.lock.lock();
+        holder.lock.lockUncancelable(compat.io());
         holder.last_status = "error";
         holder.last_message = "Failed to start auto-update";
-        holder.lock.unlock();
+        holder.lock.unlock(compat.io());
         return;
     };
 
     // Wait until stop signal
     while (!holder.should_stop.load(.seq_cst)) {
-        std.Thread.sleep(1 * std.time.ns_per_s); // Check every second
+        compat.sleepNanos(1 * std.time.ns_per_s); // Check every second
     }
 
     // Stop auto-update when thread is stopping
@@ -124,6 +125,30 @@ fn parseDomains(allocator: std.mem.Allocator, domains_str: []const u8) ![][]cons
     }
 
     return try list.toOwnedSlice();
+}
+
+test "ddns manager: parseDomains trims and skips empty entries" {
+    const allocator = std.testing.allocator;
+
+    const domains = try parseDomains(allocator, " example.com , , api@test.com,sub.example.org ,, ");
+    defer {
+        for (domains) |d| allocator.free(d);
+        allocator.free(domains);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), domains.len);
+    try std.testing.expectEqualStrings("example.com", domains[0]);
+    try std.testing.expectEqualStrings("api@test.com", domains[1]);
+    try std.testing.expectEqualStrings("sub.example.org", domains[2]);
+}
+
+test "ddns manager: parseDomains returns empty slice for blank input" {
+    const allocator = std.testing.allocator;
+
+    const domains = try parseDomains(allocator, "   ");
+    defer allocator.free(domains);
+
+    try std.testing.expectEqual(@as(usize, 0), domains.len);
 }
 
 fn createInstance(
@@ -258,8 +283,8 @@ fn createInstance(
 }
 
 pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !void {
-    instances_lock.lock();
-    defer instances_lock.unlock();
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
 
     var map = try getInstanceMap(allocator);
 
@@ -326,8 +351,8 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !v
 }
 
 pub fn getStatus(allocator: std.mem.Allocator) ![]DdnsStatus {
-    instances_lock.lock();
-    defer instances_lock.unlock();
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
 
     if (instances == null) {
         return &[_]DdnsStatus{};
@@ -342,8 +367,8 @@ pub fn getStatus(allocator: std.mem.Allocator) ![]DdnsStatus {
     var it = instances.?.iterator();
     while (it.next()) |entry| {
         const holder = entry.value_ptr.*;
-        holder.lock.lock();
-        defer holder.lock.unlock();
+        holder.lock.lockUncancelable(compat.io());
+        defer holder.lock.unlock(compat.io());
 
         try list.append(.{
             .name = try allocator.dupe(u8, holder.config.name),
@@ -359,8 +384,8 @@ pub fn getStatus(allocator: std.mem.Allocator) ![]DdnsStatus {
 }
 
 pub fn getInstanceStatus(allocator: std.mem.Allocator, name: []const u8) !DdnsInfo {
-    instances_lock.lock();
-    defer instances_lock.unlock();
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
 
     if (instances == null) {
         return error.NoInstances;
@@ -393,8 +418,8 @@ pub fn getInstanceStatus(allocator: std.mem.Allocator, name: []const u8) !DdnsIn
 }
 
 pub fn clearInstanceLogs(name: []const u8) !void {
-    instances_lock.lock();
-    defer instances_lock.unlock();
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
 
     if (instances == null) {
         return error.NoInstances;
@@ -405,8 +430,8 @@ pub fn clearInstanceLogs(name: []const u8) !void {
 }
 
 pub fn deinit(allocator: std.mem.Allocator) void {
-    instances_lock.lock();
-    defer instances_lock.unlock();
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
 
     if (instances) |*map| {
         var it = map.iterator();

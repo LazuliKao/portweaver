@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const c = @cImport({
     @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
 });
@@ -13,11 +14,11 @@ pub const FrpsError = error{
 };
 
 var frps_initialized: bool = false;
-var frps_init_lock: std.Thread.Mutex = .{};
+var frps_init_lock: std.Io.Mutex = .init;
 
 fn ensureFrpsInit() !void {
-    frps_init_lock.lock();
-    defer frps_init_lock.unlock();
+    frps_init_lock.lockUncancelable(compat.io());
+    defer frps_init_lock.unlock(compat.io());
 
     if (frps_initialized) return;
 
@@ -297,4 +298,40 @@ fn parseServerStatsJson(allocator: std.mem.Allocator, json: []const u8) !ServerS
 
 pub fn cleanup() void {
     c.FrpsCleanup();
+}
+
+test "frps stats: parseServerStatsJson extracts all fields" {
+    const allocator = std.testing.allocator;
+    const stats = try parseServerStatsJson(
+        allocator,
+        "{\"status\":\"running\",\"last_error\":\"\",\"client_count\":12,\"proxy_count\":34,\"server_count\":2}",
+    );
+    defer {
+        allocator.free(stats.status);
+        allocator.free(stats.last_error);
+    }
+
+    try std.testing.expectEqualStrings("running", stats.status);
+    try std.testing.expectEqualStrings("", stats.last_error);
+    try std.testing.expectEqual(@as(usize, 12), stats.client_count);
+    try std.testing.expectEqual(@as(usize, 34), stats.proxy_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.server_count);
+}
+
+test "frps stats: parseServerStatsJson falls back on missing and invalid fields" {
+    const allocator = std.testing.allocator;
+    const stats = try parseServerStatsJson(
+        allocator,
+        "{\"status\":\"degraded\",\"client_count\":bad,\"proxy_count\":7}",
+    );
+    defer {
+        allocator.free(stats.status);
+        allocator.free(stats.last_error);
+    }
+
+    try std.testing.expectEqualStrings("degraded", stats.status);
+    try std.testing.expectEqualStrings("", stats.last_error);
+    try std.testing.expectEqual(@as(usize, 0), stats.client_count);
+    try std.testing.expectEqual(@as(usize, 7), stats.proxy_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.server_count);
 }

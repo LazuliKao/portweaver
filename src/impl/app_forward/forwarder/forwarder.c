@@ -90,6 +90,14 @@ static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
 static void close_handle_walk_cb(uv_handle_t *handle, void *arg);
 static void tcp_close_walk_cb(uv_handle_t *handle, void *arg);
 static void udp_close_walk_cb(uv_handle_t *handle, void *arg);
+static void set_forwarder_error(int *out_error, int error_code);
+static void allocator_free_raw(forwarder_allocator_t allocator, void *ptr);
+static int map_libuv_init_error(int status);
+static int map_bind_error(int status);
+static void destroy_create_state(forwarder_allocator_t allocator, uv_loop_t *loop, int loop_initialized, char *target_address, void *forwarder);
+static int cache_destination_addr(struct sockaddr_storage *dest, addr_family_t family, const char *target_address, uint16_t target_port);
+static void build_listen_addr(struct sockaddr_storage *addr, addr_family_t family, uint16_t listen_port);
+static int finalize_forwarder_loop(uv_loop_t *loop, uv_walk_cb walk_cb, void *arg);
 
 /* Wrapper for write/send requests that carry a pointer back to the forwarder
  * so we can free memory with the right allocator in the completion callbacks.
@@ -245,6 +253,102 @@ static void close_handle_walk_cb(uv_handle_t *handle, void *arg)
     if (!handle || uv_is_closing(handle))
         return;
     uv_close(handle, NULL);
+}
+
+static void set_forwarder_error(int *out_error, int error_code)
+{
+    if (out_error)
+        *out_error = error_code;
+}
+
+static void allocator_free_raw(forwarder_allocator_t allocator, void *ptr)
+{
+    if (ptr)
+        allocator.free_cb(allocator.ctx, ptr);
+}
+
+static int map_libuv_init_error(int status)
+{
+    if (status == UV_ENOMEM)
+        return FORWARDER_ERROR_MALLOC;
+    return FORWARDER_ERROR_UNKNOWN;
+}
+
+static int map_bind_error(int status)
+{
+    if (status == UV_EADDRINUSE)
+        return FORWARDER_ERROR_ADDRESS_IN_USE;
+    if (status == UV_EACCES)
+        return FORWARDER_ERROR_PERMISSION_DENIED;
+    return FORWARDER_ERROR_BIND;
+}
+
+static void destroy_create_state(forwarder_allocator_t allocator, uv_loop_t *loop, int loop_initialized, char *target_address, void *forwarder)
+{
+    if (loop)
+    {
+        if (loop_initialized)
+        {
+            uv_walk(loop, close_handle_walk_cb, NULL);
+            uv_run(loop, UV_RUN_DEFAULT);
+            (void)uv_loop_close(loop);
+        }
+        allocator_free_raw(allocator, loop);
+    }
+
+    allocator_free_raw(allocator, target_address);
+    allocator_free_raw(allocator, forwarder);
+}
+
+static int cache_destination_addr(struct sockaddr_storage *dest, addr_family_t family, const char *target_address, uint16_t target_port)
+{
+    if (family == ADDR_FAMILY_IPV6)
+    {
+        struct sockaddr_in6 addr6;
+        int rc = uv_ip6_addr(target_address, target_port, &addr6);
+        if (rc != 0)
+            return rc;
+        memcpy(dest, &addr6, sizeof(addr6));
+        return 0;
+    }
+
+    {
+        struct sockaddr_in addr4;
+        int rc = uv_ip4_addr(target_address, target_port, &addr4);
+        if (rc != 0)
+            return rc;
+        memcpy(dest, &addr4, sizeof(addr4));
+        return 0;
+    }
+}
+
+static void build_listen_addr(struct sockaddr_storage *addr, addr_family_t family, uint16_t listen_port)
+{
+    if (family == ADDR_FAMILY_IPV4)
+    {
+        struct sockaddr_in addr4;
+        uv_ip4_addr("0.0.0.0", listen_port, &addr4);
+        memcpy(addr, &addr4, sizeof(addr4));
+        return;
+    }
+
+    {
+        struct sockaddr_in6 addr6;
+        uv_ip6_addr("::", listen_port, &addr6);
+        memcpy(addr, &addr6, sizeof(addr6));
+    }
+}
+
+static int finalize_forwarder_loop(uv_loop_t *loop, uv_walk_cb walk_cb, void *arg)
+{
+    int lr = uv_loop_close(loop);
+    while (lr == UV_EBUSY)
+    {
+        uv_walk(loop, walk_cb, arg);
+        uv_run(loop, UV_RUN_NOWAIT);
+        lr = uv_loop_close(loop);
+    }
+    return lr;
 }
 
 static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
@@ -477,11 +581,11 @@ tcp_forwarder_t *tcp_forwarder_create(
     int *out_error)
 {
     struct tcp_forwarder *fwd = NULL;
+    int loop_initialized = 0;
     fwd = (struct tcp_forwarder *)allocator.malloc_cb(allocator.ctx, sizeof(struct tcp_forwarder));
     if (!fwd)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
@@ -490,41 +594,34 @@ tcp_forwarder_t *tcp_forwarder_create(
     fwd->loop = (uv_loop_t *)DATA_ALLOC(fwd, sizeof(uv_loop_t));
     if (!fwd->loop)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
         DATA_FREE(fwd, fwd);
         return NULL;
     }
 
-    if (uv_loop_init(fwd->loop) != 0)
+    int rc = uv_loop_init(fwd->loop);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
+    loop_initialized = 1;
 
-    if (uv_tcp_init(fwd->loop, &fwd->server) != 0)
+    rc = uv_tcp_init(fwd->loop, &fwd->server);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     fwd->server.data = fwd;
 
-    if (uv_async_init(fwd->loop, &fwd->stop_handle, tcp_stop_cb) != 0)
+    rc = uv_async_init(fwd->loop, &fwd->stop_handle, tcp_stop_cb);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     fwd->stop_handle.data = fwd;
@@ -533,13 +630,8 @@ tcp_forwarder_t *tcp_forwarder_create(
     fwd->target_address = (char *)DATA_ALLOC(fwd, target_len + 1);
     if (!fwd->target_address)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     memcpy(fwd->target_address, target_address, target_len + 1);
@@ -554,81 +646,25 @@ tcp_forwarder_t *tcp_forwarder_create(
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
     // cache parsed destination sockaddr to avoid repeated parsing
-    if (family == ADDR_FAMILY_IPV6)
+    rc = cache_destination_addr(&fwd->cached_dest_addr, family, fwd->target_address, fwd->target_port);
+    if (rc != 0)
     {
-        struct sockaddr_in6 addr6;
-        int rc = uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
-        if (rc != 0)
-        {
-            if (out_error)
-                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
-            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-            uv_run(fwd->loop, UV_RUN_DEFAULT);
-            uv_loop_close(fwd->loop);
-            DATA_FREE(fwd, fwd->loop);
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-            return NULL;
-        }
-        memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
-    }
-    else
-    {
-        struct sockaddr_in addr4;
-        int rc = uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
-        if (rc != 0)
-        {
-            if (out_error)
-                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
-            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-            uv_run(fwd->loop, UV_RUN_DEFAULT);
-            uv_loop_close(fwd->loop);
-            DATA_FREE(fwd, fwd->loop);
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-            return NULL;
-        }
-        memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
-    }
-    struct sockaddr_storage addr;
-    if (family == ADDR_FAMILY_IPV4)
-    {
-        struct sockaddr_in addr4;
-        uv_ip4_addr("0.0.0.0", listen_port, &addr4);
-        memcpy(&addr, &addr4, sizeof(addr4));
-    }
-    else // For IPV6 and ANY
-    {
-        struct sockaddr_in6 addr6;
-        uv_ip6_addr("::", listen_port, &addr6);
-        memcpy(&addr, &addr6, sizeof(addr6));
-    }
-    int bind_result = uv_tcp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
-    if (bind_result != 0)
-    {
-        // Determine specific error
-        int error_code = FORWARDER_ERROR_BIND;
-        if (bind_result == UV_EADDRINUSE)
-        {
-            error_code = FORWARDER_ERROR_ADDRESS_IN_USE;
-        }
-        else if (bind_result == UV_EACCES)
-        {
-            error_code = FORWARDER_ERROR_PERMISSION_DENIED;
-        }
-        if (out_error)
-            *out_error = error_code;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd->target_address);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, FORWARDER_ERROR_INVALID_ADDRESS);
+        destroy_create_state(allocator, fwd->loop, loop_initialized, fwd->target_address, fwd);
         return NULL;
     }
 
-    if (out_error)
-        *out_error = FORWARDER_OK;
+    struct sockaddr_storage addr;
+    build_listen_addr(&addr, family, listen_port);
+    int bind_result = uv_tcp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
+    if (bind_result != 0)
+    {
+        set_forwarder_error(out_error, map_bind_error(bind_result));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, fwd->target_address, fwd);
+        return NULL;
+    }
+
+    set_forwarder_error(out_error, FORWARDER_OK);
     return fwd;
 }
 
@@ -643,13 +679,7 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     int res = uv_run(forwarder->loop, UV_RUN_DEFAULT);
     forwarder->running = 0;
     // fprintf(stderr, "[tcp_forwarder_start]  loop down %d %s\n", res, uv_strerror(res));
-    int lr = uv_loop_close(forwarder->loop);
-    while (lr == UV_EBUSY)
-    {
-        uv_walk(forwarder->loop, tcp_close_walk_cb, forwarder);
-        uv_run(forwarder->loop, UV_RUN_NOWAIT);
-        lr = uv_loop_close(forwarder->loop);
-    }
+    int lr = finalize_forwarder_loop(forwarder->loop, tcp_close_walk_cb, forwarder);
     if (lr == 0)
         forwarder->loop_finalized = 1;
     if (res != 0 && res != 1)
@@ -1171,12 +1201,12 @@ udp_forwarder_t *udp_forwarder_create(
     int *out_error)
 {
     udp_forwarder_t *fwd = NULL;
+    int loop_initialized = 0;
 
     fwd = (udp_forwarder_t *)allocator.malloc_cb(allocator.ctx, sizeof(udp_forwarder_t));
     if (!fwd)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
         return NULL;
     }
     memset(fwd, 0, sizeof(*fwd));
@@ -1185,42 +1215,35 @@ udp_forwarder_t *udp_forwarder_create(
     fwd->loop = (uv_loop_t *)DATA_ALLOC(fwd, sizeof(uv_loop_t));
     if (!fwd->loop)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
         DATA_FREE(fwd, fwd);
         return NULL;
     }
 
-    if (uv_loop_init(fwd->loop) != 0)
+    int rc = uv_loop_init(fwd->loop);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
+    loop_initialized = 1;
 
-    if (uv_udp_init(fwd->loop, &fwd->server) != 0)
+    rc = uv_udp_init(fwd->loop, &fwd->server);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     fwd->server.data = fwd;
 
     // Initialize async stop handle for thread-safe stopping
-    if (uv_async_init(fwd->loop, &fwd->stop_handle, udp_stop_cb) != 0)
+    rc = uv_async_init(fwd->loop, &fwd->stop_handle, udp_stop_cb);
+    if (rc != 0)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, map_libuv_init_error(rc));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     fwd->stop_handle.data = fwd;
@@ -1229,13 +1252,8 @@ udp_forwarder_t *udp_forwarder_create(
     fwd->target_address = (char *)DATA_ALLOC(fwd, target_len + 1);
     if (!fwd->target_address)
     {
-        if (out_error)
-            *out_error = FORWARDER_ERROR_MALLOC;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, FORWARDER_ERROR_MALLOC);
+        destroy_create_state(allocator, fwd->loop, loop_initialized, NULL, fwd);
         return NULL;
     }
     memcpy(fwd->target_address, target_address, target_len + 1);
@@ -1253,80 +1271,25 @@ udp_forwarder_t *udp_forwarder_create(
     fwd->max_sessions = udp_compute_session_limit();
     memset(fwd->session_hash, 0, sizeof(fwd->session_hash));
     // cache target addr
-    if (family == ADDR_FAMILY_IPV6)
+    rc = cache_destination_addr(&fwd->cached_dest_addr, family, fwd->target_address, fwd->target_port);
+    if (rc != 0)
     {
-        struct sockaddr_in6 addr6;
-        int rc = uv_ip6_addr(fwd->target_address, fwd->target_port, &addr6);
-        if (rc != 0)
-        {
-            if (out_error)
-                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
-            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-            uv_run(fwd->loop, UV_RUN_DEFAULT);
-            uv_loop_close(fwd->loop);
-            DATA_FREE(fwd, fwd->loop);
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-            return NULL;
-        }
-        memcpy(&fwd->cached_dest_addr, &addr6, sizeof(addr6));
-    }
-    else
-    {
-        struct sockaddr_in addr4;
-        int rc = uv_ip4_addr(fwd->target_address, fwd->target_port, &addr4);
-        if (rc != 0)
-        {
-            if (out_error)
-                *out_error = FORWARDER_ERROR_INVALID_ADDRESS;
-            uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-            uv_run(fwd->loop, UV_RUN_DEFAULT);
-            uv_loop_close(fwd->loop);
-            DATA_FREE(fwd, fwd->loop);
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-            return NULL;
-        }
-        memcpy(&fwd->cached_dest_addr, &addr4, sizeof(addr4));
-    }
-    struct sockaddr_storage addr;
-    if (family == ADDR_FAMILY_IPV4)
-    {
-        struct sockaddr_in addr4;
-        uv_ip4_addr("0.0.0.0", listen_port, &addr4);
-        memcpy(&addr, &addr4, sizeof(addr4));
-    }
-    else // For IPV6 and ANY
-    {
-        struct sockaddr_in6 addr6;
-        uv_ip6_addr("::", listen_port, &addr6);
-        memcpy(&addr, &addr6, sizeof(addr6));
-    }
-    int bind_result = uv_udp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
-    if (bind_result != 0)
-    {
-        int error_code = FORWARDER_ERROR_BIND;
-        if (bind_result == UV_EADDRINUSE)
-        {
-            error_code = FORWARDER_ERROR_ADDRESS_IN_USE;
-        }
-        else if (bind_result == UV_EACCES)
-        {
-            error_code = FORWARDER_ERROR_PERMISSION_DENIED;
-        }
-        if (out_error)
-            *out_error = error_code;
-        uv_walk(fwd->loop, close_handle_walk_cb, NULL);
-        uv_run(fwd->loop, UV_RUN_DEFAULT);
-        uv_loop_close(fwd->loop);
-        DATA_FREE(fwd, fwd->loop);
-        DATA_FREE(fwd, fwd->target_address);
-        DATA_FREE(fwd, fwd);
+        set_forwarder_error(out_error, FORWARDER_ERROR_INVALID_ADDRESS);
+        destroy_create_state(allocator, fwd->loop, loop_initialized, fwd->target_address, fwd);
         return NULL;
     }
 
-    if (out_error)
-        *out_error = FORWARDER_OK;
+    struct sockaddr_storage addr;
+    build_listen_addr(&addr, family, listen_port);
+    int bind_result = uv_udp_bind(&fwd->server, (const struct sockaddr *)&addr, 0);
+    if (bind_result != 0)
+    {
+        set_forwarder_error(out_error, map_bind_error(bind_result));
+        destroy_create_state(allocator, fwd->loop, loop_initialized, fwd->target_address, fwd);
+        return NULL;
+    }
+
+    set_forwarder_error(out_error, FORWARDER_OK);
     return (udp_forwarder_t *)fwd;
 }
 
@@ -1344,13 +1307,7 @@ int udp_forwarder_start(udp_forwarder_t *forwarder)
     uv_udp_recv_stop(&fwd->server);
     fwd->running = 0;
     forwarder->running = 0;
-    int lr = uv_loop_close(forwarder->loop);
-    while (lr == UV_EBUSY)
-    {
-        uv_walk(forwarder->loop, udp_close_walk_cb, forwarder);
-        uv_run(forwarder->loop, UV_RUN_NOWAIT);
-        lr = uv_loop_close(forwarder->loop);
-    }
+    int lr = finalize_forwarder_loop(forwarder->loop, udp_close_walk_cb, forwarder);
     if (lr == 0)
         forwarder->loop_finalized = 1;
     if (res != 0 && res != 1)

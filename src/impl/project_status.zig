@@ -3,6 +3,7 @@ const types = @import("../config/types.zig");
 const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
 const app_forward = @import("app_forward.zig");
+const compat = @import("../compat.zig");
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
 
@@ -50,13 +51,13 @@ pub const ProjectHandle = struct {
     startup_status: StartupStatus = .disabled,
     tcp_forwarders: std.array_list.Managed(*TcpForwarder),
     udp_forwarders: std.array_list.Managed(*UdpForwarder),
-    lock: std.Thread.Mutex = .{},
+    lock: std.Io.Mutex = .init,
     cfg: types.Project,
     error_code: i32 = 0,
     active_ports: u32 = 0,
     id: usize,
     runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    runtime_enabled_lock: std.Thread.Mutex = .{},
+    runtime_enabled_lock: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandle {
         return ProjectHandle{
@@ -83,7 +84,7 @@ pub const ProjectHandle = struct {
             if (self.tcp_forwarders.items.len == 0 and self.udp_forwarders.items.len == 0) {
                 break;
             }
-            std.Thread.sleep(std.time.ns_per_s / rate);
+            compat.sleepNanos(std.time.ns_per_s / rate);
         }
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
@@ -126,31 +127,31 @@ pub const ProjectHandle = struct {
         return error.NotFound;
     }
     pub inline fn deregisterTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
         self.active_ports -= 1;
         const index = try self.findIndexOfTcpForwarder(fwd);
         _ = self.tcp_forwarders.swapRemove(index);
     }
     pub inline fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
         self.active_ports += 1;
         try self.tcp_forwarders.append(fwd);
     }
     pub inline fn deregisterUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
         self.active_ports -= 1;
         const index = try self.findIndexOfUdpForwarder(fwd);
         _ = self.udp_forwarders.swapRemove(index);
     }
     pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
         self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
@@ -187,8 +188,8 @@ pub const ProjectHandle = struct {
     /// Get statistics for each individual forwarder (port)
     /// Note: Since forwarders don't store port info, we use the project config
     pub fn getForwarderStats(self: *ProjectHandle, allocator: std.mem.Allocator) ![]ForwarderStats {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         const total_count = self.tcp_forwarders.items.len + self.udp_forwarders.items.len;
         if (total_count == 0) {
@@ -229,8 +230,8 @@ pub const ProjectHandle = struct {
 
     /// Set runtime enabled state (controls forwarding without restarting threads)
     pub fn setRuntimeEnabled(self: *ProjectHandle, enabled: bool) void {
-        self.runtime_enabled_lock.lock();
-        defer self.runtime_enabled_lock.unlock();
+        self.runtime_enabled_lock.lockUncancelable(compat.io());
+        defer self.runtime_enabled_lock.unlock(compat.io());
         const old = self.isRuntimeEnabled();
         // const old = self.runtime_enabled.swap(enabled, .seq_cst);
         std.log.debug("Project {d} ({s}) runtime enabled set to {} (was {})", .{ self.id, self.cfg.remark, enabled, old });
@@ -264,4 +265,51 @@ pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {
         handle.deinit();
     }
     handles.clearAndFree();
+}
+
+test "project status: init yields empty runtime info" {
+    const allocator = std.testing.allocator;
+
+    var cfg = types.Project{
+        .listen_port = 8080,
+        .target_address = try allocator.dupe(u8, "127.0.0.1"),
+        .target_port = 80,
+    };
+    defer cfg.deinit(allocator);
+
+    var handle = ProjectHandle.init(allocator, 7, cfg);
+    defer handle.deinit();
+
+    const runtime = handle.getProjectRuntimeInfo();
+    try std.testing.expectEqual(@as(u32, 0), runtime.active_ports);
+    try std.testing.expectEqual(@as(u64, 0), runtime.bytes_in);
+    try std.testing.expectEqual(@as(u64, 0), runtime.bytes_out);
+    try std.testing.expectEqual(StartupStatus.disabled, runtime.startup_status);
+    try std.testing.expectEqual(@as(i32, 0), runtime.error_code);
+    try std.testing.expect(!handle.isRuntimeEnabled());
+}
+
+test "project status: startup status transitions update error code" {
+    const allocator = std.testing.allocator;
+
+    var cfg = types.Project{
+        .listen_port = 8080,
+        .target_address = try allocator.dupe(u8, "127.0.0.1"),
+        .target_port = 80,
+    };
+    defer cfg.deinit(allocator);
+
+    var handle = ProjectHandle.init(allocator, 0, cfg);
+    defer handle.deinit();
+
+    handle.setStartupFailedCode(-5);
+    try std.testing.expectEqual(StartupStatus.failed, handle.startup_status);
+    try std.testing.expectEqual(@as(i32, -5), handle.error_code);
+
+    handle.setStartupSuccess();
+    try std.testing.expectEqual(StartupStatus.success, handle.startup_status);
+    try std.testing.expectEqual(@as(i32, 0), handle.error_code);
+
+    handle.setDisabled();
+    try std.testing.expectEqual(StartupStatus.disabled, handle.startup_status);
 }

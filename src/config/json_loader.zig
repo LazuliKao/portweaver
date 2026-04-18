@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const helper = @import("helper.zig");
 const file_log = @import("../file_log.zig");
+const compat = @import("../compat.zig");
 
 // ── JSON value helpers ──────────────────────────────────────────────────
 
@@ -244,11 +245,15 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     var log_config = try file_log.defaultLogConfig(a);
     errdefer log_config.deinit(a);
 
-    std.fs.cwd().access(path, .{}) catch |err| {
+    std.Io.Dir.cwd().access(compat.io(), path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
         return err;
     };
-    const json_text = std.fs.cwd().readFileAlloc(a, path, 1 << 20) catch return types.ConfigError.JsonParseError;
+    const file = std.Io.Dir.cwd().openFile(compat.io(), path, .{}) catch return types.ConfigError.JsonParseError;
+    defer file.close(compat.io());
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(compat.io(), &read_buffer);
+    const json_text = reader.interface.allocRemaining(a, .limited(1 << 20)) catch return types.ConfigError.JsonParseError;
     defer a.free(json_text);
 
     const parsed = std.json.parseFromSlice(std.json.Value, a, json_text, .{}) catch return types.ConfigError.JsonParseError;
@@ -727,8 +732,6 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
                     var ddns_cfg = types.DdnsConfig{
                         .enabled = true,
-                        .name = undefined,
-                        .dns_provider = undefined,
                     };
                     var have_name = false;
                     var have_provider = false;
@@ -893,10 +896,13 @@ const testing = std.testing;
 
 /// Write `content` to a temporary file and return its absolute path.
 fn writeTmpJson(alloc: std.mem.Allocator, content: []const u8) ![]const u8 {
+    const io = testing.io;
     const tmp = testing.tmpDir(.{});
     const dir = tmp.dir;
-    dir.writeFile(.{ .sub_path = "test.json", .data = content }) catch return error.TestFailed;
-    return dir.realpathAlloc(alloc, "test.json");
+    var file = dir.createFile(io, "test.json", .{}) catch return error.TestFailed;
+    defer file.close(io);
+    file.writeStreamingAll(io, content) catch return error.TestFailed;
+    return std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/test.json", .{tmp.sub_path});
 }
 
 // ── Normal-case tests ───────────────────────────────────────────────────

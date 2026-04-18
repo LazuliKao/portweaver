@@ -102,10 +102,13 @@ pub const ErrorCollector = struct {
     pub fn formatReport(self: *const ErrorCollector, allocator: std.mem.Allocator) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(allocator);
-        const w = buf.writer(allocator);
-        try w.print("Configuration has {d} error(s):\n", .{self.errors.items.len});
+        const header = try std.fmt.allocPrint(allocator, "Configuration has {d} error(s):\n", .{self.errors.items.len});
+        defer allocator.free(header);
+        try buf.appendSlice(allocator, header);
         for (self.errors.items) |e| {
-            try w.print("{f}\n", .{e});
+            const line = try std.fmt.allocPrint(allocator, "{f}\n", .{e});
+            defer allocator.free(line);
+            try buf.appendSlice(allocator, line);
         }
         return buf.toOwnedSlice(allocator);
     }
@@ -357,9 +360,9 @@ pub const DdnsConfig = struct {
     /// 是否启用此规则
     enabled: bool = true,
     /// 配置名称（用于显示和标识）
-    name: []const u8,
+    name: []const u8 = "",
     /// DNS 提供商
-    dns_provider: []const u8,
+    dns_provider: []const u8 = "",
     /// DNS ID（某些提供商需要）
     dns_id: []const u8 = "",
     /// DNS Secret/Token
@@ -386,8 +389,8 @@ pub const DdnsConfig = struct {
     webhook_headers: []const u8 = "",
 
     pub fn deinit(self: *DdnsConfig, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.dns_provider);
+        if (self.name.len != 0) allocator.free(self.name);
+        if (self.dns_provider.len != 0) allocator.free(self.dns_provider);
         if (self.dns_id.len != 0) allocator.free(self.dns_id);
         if (self.dns_secret.len != 0) allocator.free(self.dns_secret);
         if (self.dns_ext_param.len != 0) allocator.free(self.dns_ext_param);

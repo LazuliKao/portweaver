@@ -3,6 +3,7 @@ const uci = @import("../uci/mod.zig");
 const build_options = @import("build_options");
 const types = @import("types.zig");
 const uci_loader = @import("uci_loader.zig");
+const file_log = @import("../file_log.zig");
 
 /// Compile-time generic config loader.
 ///
@@ -40,3 +41,43 @@ pub const JsonProvider = if (build_options.uci_mode) struct {
         return @import("json_loader.zig").loadFromJsonFile(allocator, self.path);
     }
 };
+
+test "config provider: loadFrom delegates to source load" {
+    const TestSource = struct {
+        fn load(_: @This(), allocator: std.mem.Allocator) !types.Config {
+            const projects = try allocator.alloc(types.Project, 0);
+            errdefer allocator.free(projects);
+
+            const ddns_configs = try allocator.alloc(types.DdnsConfig, 0);
+            errdefer allocator.free(ddns_configs);
+
+            const log_config = try file_log.defaultLogConfig(allocator);
+
+            return .{
+                .log_config = log_config,
+                .projects = projects,
+                .frpc_nodes = std.StringHashMap(types.FrpcNode).init(allocator),
+                .frps_nodes = std.StringHashMap(types.FrpsNode).init(allocator),
+                .ddns_configs = ddns_configs,
+            };
+        }
+    };
+
+    var cfg = try loadFrom(std.testing.allocator, TestSource{});
+    defer cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cfg.projects.len);
+    try std.testing.expectEqual(@as(usize, 0), cfg.ddns_configs.len);
+    try std.testing.expectEqual(@as(usize, 0), cfg.frpc_nodes.count());
+    try std.testing.expectEqual(@as(usize, 0), cfg.frps_nodes.count());
+}
+
+test "config provider: json provider matches feature gate" {
+    const provider = JsonProvider{ .path = "/tmp/nonexistent-portweaver-config.json" };
+
+    if (build_options.uci_mode) {
+        try std.testing.expectError(types.ConfigError.UnsupportedFeature, provider.load(std.testing.allocator));
+    } else {
+        try std.testing.expectError(error.FileNotFound, provider.load(std.testing.allocator));
+    }
+}

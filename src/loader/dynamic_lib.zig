@@ -137,3 +137,25 @@ pub fn CachedFunctionLoader(comptime T: type) type {
         }
     };
 }
+
+test "dynamic lib loader: init starts unloaded and deinit is safe" {
+    var loader = DynamicLibLoader.init();
+    try std.testing.expect(!loader.isLoaded());
+
+    loader.deinit();
+    try std.testing.expect(!loader.isLoaded());
+}
+
+test "dynamic lib loader: lookup fails before load" {
+    var loader = DynamicLibLoader.init();
+    try std.testing.expectError(error.LibraryNotLoaded, loader.lookup(*const fn () void, "missing_symbol"));
+}
+
+test "cached function loader: init preserves empty cache" {
+    var loader = DynamicLibLoader.init();
+    const cached = CachedFunctionLoader(*const fn () void).init(&loader, "missing_symbol");
+
+    try std.testing.expect(cached.loader == &loader);
+    try std.testing.expect(cached.cache == null);
+    try std.testing.expectEqualStrings("missing_symbol", cached.name);
+}

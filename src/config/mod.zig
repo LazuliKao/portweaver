@@ -46,3 +46,35 @@ else
     @import("json_loader.zig");
 
 pub const loadFromJsonFile = json_loader.loadFromJsonFile;
+
+test "config mod: type and function re-exports match source modules" {
+    try std.testing.expect(ConfigError == types.ConfigError);
+    try std.testing.expect(AddressFamily == types.AddressFamily);
+    try std.testing.expect(Protocol == types.Protocol);
+    try std.testing.expect(FrpcNode == types.FrpcNode);
+    try std.testing.expect(FrpcForward == types.FrpcForward);
+    try std.testing.expect(PortMapping == types.PortMapping);
+    try std.testing.expect(Project == types.Project);
+    try std.testing.expect(Config == types.Config);
+    try std.testing.expect(ErrorType == types.ErrorType);
+    try std.testing.expect(ValidationError == types.ValidationError);
+    try std.testing.expect(ErrorCollector == types.ErrorCollector);
+
+    try std.testing.expect(parseBool == types.parseBool);
+    try std.testing.expect(parsePort == types.parsePort);
+    try std.testing.expect(parseFamily == types.parseFamily);
+    try std.testing.expect(parseProtocol == types.parseProtocol);
+    try std.testing.expect(dupeIfNonEmpty == types.dupeIfNonEmpty);
+
+    try std.testing.expect(UciProvider == provider.UciProvider);
+    try std.testing.expect(JsonProvider == provider.JsonProvider);
+    try std.testing.expect(loadFrom == provider.loadFrom);
+}
+
+test "config mod: top-level json loader follows feature gate" {
+    if (build_options.uci_mode) {
+        try std.testing.expectError(ConfigError.UnsupportedFeature, loadFromJsonFile(std.testing.allocator, "/tmp/nonexistent-portweaver-config.json"));
+    } else {
+        try std.testing.expectError(error.FileNotFound, loadFromJsonFile(std.testing.allocator, "/tmp/nonexistent-portweaver-config.json"));
+    }
+}

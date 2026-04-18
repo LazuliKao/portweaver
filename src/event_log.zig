@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 
 /// Event types for the activity log
 pub const EventType = enum(u8) {
@@ -65,7 +66,7 @@ pub const Event = struct {
 pub const EventLogger = struct {
     allocator: std.mem.Allocator,
     events: std.array_list.Managed(Event),
-    lock: std.Thread.Mutex,
+    lock: std.Io.Mutex,
     capacity: usize,
 
     const Self = @This();
@@ -75,15 +76,15 @@ pub const EventLogger = struct {
         return Self{
             .allocator = allocator,
             .events = try std.array_list.Managed(Event).initCapacity(allocator, capacity),
-            .lock = .{},
+            .lock = .init,
             .capacity = capacity,
         };
     }
 
     /// Deinitialize the event logger and free all events
     pub fn deinit(self: *Self) void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         for (self.events.items) |*event| {
             event.deinit(self.allocator);
@@ -94,8 +95,8 @@ pub const EventLogger = struct {
     /// Add an event to the log
     /// If the log is at capacity, the oldest event is removed
     pub fn addEvent(self: *Self, event_type: EventType, message: []const u8, project_id: i32) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         // Trim oldest events if at capacity
         while (self.events.items.len >= self.capacity) {
@@ -108,7 +109,7 @@ pub const EventLogger = struct {
         errdefer self.allocator.free(owned_message);
 
         const event = Event{
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = std.Io.Timestamp.now(compat.io(), .real).toMilliseconds(),
             .event_type = event_type,
             .message = owned_message,
             .project_id = project_id,
@@ -132,8 +133,8 @@ pub const EventLogger = struct {
     /// Get a copy of all events (caller must free the returned slice and its contents)
     /// Returns events in chronological order (oldest first)
     pub fn getEvents(self: *Self, allocator: std.mem.Allocator) ![]Event {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         const result = try allocator.alloc(Event, self.events.items.len);
         errdefer allocator.free(result);
@@ -160,15 +161,15 @@ pub const EventLogger = struct {
 
     /// Get the current number of events in the log
     pub fn count(self: *Self) usize {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         return self.events.items.len;
     }
 
     /// Clear all events from the log
     pub fn clear(self: *Self) void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
 
         for (self.events.items) |*event| {
             event.deinit(self.allocator);
@@ -182,13 +183,13 @@ pub const DEFAULT_CAPACITY: usize = 20;
 
 /// Global event logger instance (initialized lazily)
 var global_logger: ?EventLogger = null;
-var global_logger_lock: std.Thread.Mutex = .{};
+var global_logger_lock: std.Io.Mutex = .init;
 
 /// Initialize the global event logger
 /// This should be called once at startup
 pub fn initGlobal(allocator: std.mem.Allocator) void {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
 
     if (global_logger == null) {
         global_logger = EventLogger.init(allocator, DEFAULT_CAPACITY) catch |err| {
@@ -201,8 +202,8 @@ pub fn initGlobal(allocator: std.mem.Allocator) void {
 
 /// Deinitialize the global event logger
 pub fn deinitGlobal() void {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
 
     if (global_logger) |*logger| {
         logger.deinit();
@@ -213,8 +214,8 @@ pub fn deinitGlobal() void {
 /// Get the global event logger
 /// Returns null if not initialized
 pub fn getGlobal() ?*EventLogger {
-    global_logger_lock.lock();
-    defer global_logger_lock.unlock();
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
     return if (global_logger) |*logger| logger else null;
 }
 
@@ -278,4 +279,23 @@ test "EventLogger capacity limit" {
     try std.testing.expectEqualStrings("Event 3", events[0].message);
     try std.testing.expectEqualStrings("Event 4", events[1].message);
     try std.testing.expectEqualStrings("Event 5", events[2].message);
+}
+
+test "EventLogger global lifecycle and clear" {
+    const allocator = std.testing.allocator;
+
+    deinitGlobal();
+    try std.testing.expect(getGlobal() == null);
+
+    initGlobal(allocator);
+    defer deinitGlobal();
+
+    const logger = getGlobal() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), logger.count());
+
+    logEvent(.info, "global event", 42);
+    try std.testing.expectEqual(@as(usize, 1), logger.count());
+
+    logger.clear();
+    try std.testing.expectEqual(@as(usize, 0), logger.count());
 }

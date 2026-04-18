@@ -1,5 +1,6 @@
 const std = @import("std");
 const process_lock = @import("process_lock.zig");
+const compat = @import("compat.zig");
 
 test "single instance enforcement" {
     const allocator = std.testing.allocator;
@@ -11,8 +12,8 @@ test "single instance enforcement" {
     defer process_lock.cleanup();
 
     // Verify PID file exists
-    const file = try std.fs.cwd().openFile(pid_file_path, .{});
-    file.close();
+    const file = try std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
+    file.close(compat.io());
 }
 
 test "cleanup removes PID file" {
@@ -27,7 +28,7 @@ test "cleanup removes PID file" {
     process_lock.cleanup();
 
     // Verify PID file is removed
-    const result = std.fs.cwd().openFile(pid_file_path, .{});
+    const result = std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
 
     try std.testing.expectError(error.FileNotFound, result);
 }

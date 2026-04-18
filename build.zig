@@ -64,18 +64,18 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             .mips, .mipsel => "mips-linux-musl",
             else => unreachable,
         };
-        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, arch_tag }) });
-        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "generic-musl" }) });
-        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "mips-linux-any" }) });
-        uv.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "any-linux-any" }) });
+        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, arch_tag }) });
+        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "generic-musl" }) });
+        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "mips-linux-any" }) });
+        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "any-linux-any" }) });
     }
 
-    uv.addIncludePath(b.path("deps/libuv/include"));
+    uv.root_module.addIncludePath(b.path("deps/libuv/include"));
     // libuv has internal headers included from its own C sources.
-    uv.addIncludePath(b.path("deps/libuv/src"));
+    uv.root_module.addIncludePath(b.path("deps/libuv/src"));
 
     // Base sources from deps/libuv/CMakeLists.txt (uv_sources)
-    uv.addCSourceFiles(.{
+    uv.root_module.addCSourceFiles(.{
         .files = &.{
             "deps/libuv/src/fs-poll.c",
             "deps/libuv/src/idna.c",
@@ -110,7 +110,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         uv.root_module.addCMacro("_WIN32_WINNT", "0x0A00");
         uv.root_module.addCMacro("_CRT_DECLARE_NONSTDC_NAMES", "0");
 
-        uv.addCSourceFiles(.{
+        uv.root_module.addCSourceFiles(.{
             .files = &.{
                 "deps/libuv/src/win/async.c",
                 "deps/libuv/src/win/core.c",
@@ -145,7 +145,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         // uv.root_module.addCMacro("_FILE_OFFSET_BITS", "64");
         // uv.root_module.addCMacro("_LARGEFILE_SOURCE", "1");
 
-        uv.addCSourceFiles(.{
+        uv.root_module.addCSourceFiles(.{
             .files = &.{
                 "deps/libuv/src/unix/async.c",
                 "deps/libuv/src/unix/core.c",
@@ -177,7 +177,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             // Linux specifics from deps/libuv/CMakeLists.txt
             uv.root_module.addCMacro("_GNU_SOURCE", "1");
             uv.root_module.addCMacro("_POSIX_C_SOURCE", "200112");
-            uv.addCSourceFiles(.{
+            uv.root_module.addCSourceFiles(.{
                 .files = &.{
                     "deps/libuv/src/unix/proctitle.c",
                     "deps/libuv/src/unix/linux.c",
@@ -192,7 +192,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             uv.root_module.addCMacro("_DARWIN_USE_64_BIT_INODE", "1");
             uv.root_module.addCMacro("_DARWIN_UNLIMITED_SELECT", "1");
 
-            uv.addCSourceFiles(.{
+            uv.root_module.addCSourceFiles(.{
                 .files = &.{
                     "deps/libuv/src/unix/proctitle.c",
                     "deps/libuv/src/unix/bsd-ifaddrs.c",
@@ -234,9 +234,13 @@ fn createWrapperScript(
             .{zig_exe},
         );
 
-    const file = try std.fs.cwd().createFile(wrapper_path.getPath(b), .{ .truncate = true, .mode = 0o755 });
-    defer file.close();
-    try file.writeAll(script_content);
+    const io = b.graph.io;
+    const file = try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
+        .truncate = true,
+        .permissions = .fromMode(0o755),
+    });
+    defer file.close(io);
+    try file.writeStreamingAll(io, script_content);
 
     return wrapper_path;
 }
@@ -247,14 +251,14 @@ fn detectCustomGoBin(b: *std.Build, host_os: std.Target.Os.Tag, go_root_path: []
     else
         b.pathJoin(&.{ go_root_path, "bin", "go" });
 
-    if (std.fs.cwd().access(default_go_bin, .{ .mode = .read_only })) |_| {
+    if (std.Io.Dir.cwd().access(b.graph.io, default_go_bin, .{})) |_| {
         return default_go_bin;
     } else |_| {}
 
     // Windows zip often extracts under a top-level "go" folder.
     if (host_os == .windows) {
         const nested_go_bin = b.pathJoin(&.{ go_root_path, "go", "bin", "go.exe" });
-        if (std.fs.cwd().access(nested_go_bin, .{ .mode = .read_only })) |_| {
+        if (std.Io.Dir.cwd().access(b.graph.io, nested_go_bin, .{})) |_| {
             return nested_go_bin;
         } else |_| {}
     }
@@ -263,6 +267,7 @@ fn detectCustomGoBin(b: *std.Build, host_os: std.Target.Os.Tag, go_root_path: []
 }
 
 fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []const u8, output_path: []const u8) void {
+    const io = b.graph.io;
     var downloaded = false;
 
     const wget_argv = [_][]const u8{
@@ -272,10 +277,11 @@ fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []co
         output_path,
         url,
     };
-    var wget_child = std.process.Child.init(&wget_argv, b.allocator);
-    const wget_result = wget_child.spawnAndWait() catch null;
+    const wget_result = std.process.run(b.allocator, io, .{ .argv = &wget_argv }) catch null;
     if (wget_result) |result| {
-        if (result == .Exited and result.Exited == 0) {
+        defer b.allocator.free(result.stdout);
+        defer b.allocator.free(result.stderr);
+        if (result.term == .exited and result.term.exited == 0) {
             downloaded = true;
         }
     }
@@ -290,10 +296,11 @@ fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []co
             output_path,
             url,
         };
-        var curl_child = std.process.Child.init(&curl_argv, b.allocator);
-        const curl_result = curl_child.spawnAndWait() catch null;
+        const curl_result = std.process.run(b.allocator, io, .{ .argv = &curl_argv }) catch null;
         if (curl_result) |result| {
-            if (result == .Exited and result.Exited == 0) {
+            defer b.allocator.free(result.stdout);
+            defer b.allocator.free(result.stderr);
+            if (result.term == .exited and result.term.exited == 0) {
                 downloaded = true;
             }
         }
@@ -307,10 +314,11 @@ fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []co
             "-Command",
             ps_cmd,
         };
-        var ps_child = std.process.Child.init(&ps_argv, b.allocator);
-        const ps_result = ps_child.spawnAndWait() catch null;
+        const ps_result = std.process.run(b.allocator, io, .{ .argv = &ps_argv }) catch null;
         if (ps_result) |result| {
-            if (result == .Exited and result.Exited == 0) {
+            defer b.allocator.free(result.stdout);
+            defer b.allocator.free(result.stderr);
+            if (result.term == .exited and result.term.exited == 0) {
                 downloaded = true;
             }
         }
@@ -360,7 +368,7 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
         downloadFileWithFallback(b, host_os, go_url, temp_tarball_path);
 
         // Create go_root directory
-        std.fs.cwd().makePath(go_root_path) catch @panic("Failed to create go_root directory");
+        std.Io.Dir.cwd().createDirPath(b.graph.io, go_root_path) catch @panic("Failed to create go_root directory");
         // Extract based on file type
         if (host_os == .windows) {
             // Windows: use PowerShell to extract zip
@@ -369,9 +377,10 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
                 "-Command",
                 b.fmt("Expand-Archive -Path '{s}' -DestinationPath '{s}' -Force", .{ temp_tarball_path, go_root_path }),
             };
-            var unzip_child = std.process.Child.init(&unzip_argv, b.allocator);
-            const unzip_result = unzip_child.spawnAndWait() catch @panic("Failed to run PowerShell");
-            if (unzip_result.Exited != 0) {
+            const unzip_result = std.process.run(b.allocator, b.graph.io, .{ .argv = &unzip_argv }) catch @panic("Failed to run PowerShell");
+            defer b.allocator.free(unzip_result.stdout);
+            defer b.allocator.free(unzip_result.stderr);
+            if (unzip_result.term != .exited or unzip_result.term.exited != 0) {
                 @panic("zip extraction failed");
             }
         } else {
@@ -384,14 +393,15 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
                 go_root_path,
                 "--strip-components=1",
             };
-            var tar_child = std.process.Child.init(&tar_argv, b.allocator);
-            const tar_result = tar_child.spawnAndWait() catch @panic("Failed to run tar");
-            if (tar_result.Exited != 0) {
+            const tar_result = std.process.run(b.allocator, b.graph.io, .{ .argv = &tar_argv }) catch @panic("Failed to run tar");
+            defer b.allocator.free(tar_result.stdout);
+            defer b.allocator.free(tar_result.stderr);
+            if (tar_result.term != .exited or tar_result.term.exited != 0) {
                 @panic("tar extraction failed");
             }
         }
         // Remove tarball
-        std.fs.cwd().deleteFile(temp_tarball_path) catch {};
+        std.Io.Dir.cwd().deleteFile(b.graph.io, temp_tarball_path) catch {};
 
         const extracted_go_bin = detectCustomGoBin(b, host_os, go_root_path) orelse
             @panic("Downloaded Go toolchain but go binary was not found");
@@ -447,7 +457,7 @@ fn addGoLibrary(
         else => @panic("Unsupported architecture"),
     };
 
-    var go_args = std.ArrayListUnmanaged([]const u8){};
+    var go_args = std.ArrayListUnmanaged([]const u8).empty;
     const go_exe = if (custom_go_path) |path| path else "go";
     go_args.appendSlice(b.allocator, &.{
         go_exe,
@@ -530,23 +540,23 @@ fn addGoLibrary(
         go_cmd.setEnvironmentVariable("GOPATH", b.path(go_path).getPath(b));
 
         // Prevent empty/invalid GOPROXY inherited from host from breaking module downloads.
-        if (std.process.getEnvVarOwned(b.allocator, "GOPROXY")) |goproxy| {
+        if (b.graph.environ_map.get("GOPROXY")) |goproxy| {
             if (goproxy.len > 0) {
                 go_cmd.setEnvironmentVariable("GOPROXY", goproxy);
             } else {
                 go_cmd.setEnvironmentVariable("GOPROXY", "https://proxy.golang.org,direct");
             }
-        } else |_| {
+        } else {
             go_cmd.setEnvironmentVariable("GOPROXY", "https://proxy.golang.org,direct");
         }
 
-        if (std.process.getEnvVarOwned(b.allocator, "GOSUMDB")) |gosumdb| {
+        if (b.graph.environ_map.get("GOSUMDB")) |gosumdb| {
             if (gosumdb.len > 0) {
                 go_cmd.setEnvironmentVariable("GOSUMDB", gosumdb);
             } else {
                 go_cmd.setEnvironmentVariable("GOSUMDB", "sum.golang.org");
             }
-        } else |_| {
+        } else {
             go_cmd.setEnvironmentVariable("GOSUMDB", "sum.golang.org");
         }
 
@@ -554,20 +564,20 @@ fn addGoLibrary(
     } else {
         // Pass through GOROOT from environment if set - critical for using custom Go installation
         // Without this, Go may use system's default GOROOT which can cause conflicts
-        if (std.process.getEnvVarOwned(b.allocator, "GOROOT")) |goroot| {
+        if (b.graph.environ_map.get("GOROOT")) |goroot| {
             std.debug.print("Using GOROOT from environment: {s}\n", .{goroot});
             go_cmd.setEnvironmentVariable("GOROOT", goroot);
-        } else |_| {
+        } else {
             std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
         }
 
         // Also pass through GOPATH and GOMODCACHE if set
-        if (std.process.getEnvVarOwned(b.allocator, "GOPATH")) |gopath| {
+        if (b.graph.environ_map.get("GOPATH")) |gopath| {
             go_cmd.setEnvironmentVariable("GOPATH", gopath);
-        } else |_| {}
-        if (std.process.getEnvVarOwned(b.allocator, "GOMODCACHE")) |gomodcache| {
+        } else {}
+        if (b.graph.environ_map.get("GOMODCACHE")) |gomodcache| {
             go_cmd.setEnvironmentVariable("GOMODCACHE", gomodcache);
-        } else |_| {}
+        } else {}
     }
 
     const zig_exe = b.graph.zig_exe;
@@ -632,15 +642,32 @@ fn addCombinedGoLib(
         "libfrps"
     else
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
-    // Use architecture-specific output directory for parallel build support
+    const tags_dir = if (frpc and ddns and frps)
+        "frpc-ddns-frps"
+    else if (frpc and ddns)
+        "frpc-ddns"
+    else if (frpc and frps)
+        "frpc-frps"
+    else if (ddns and frps)
+        "ddns-frps"
+    else if (frpc)
+        "frpc"
+    else if (ddns)
+        "ddns"
+    else if (frps)
+        "frps"
+    else
+        @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
+
+    // Use architecture- and feature-specific output directory for parallel build support
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
-    const arch_dir = b.fmt("src/impl/golibs/dist/{s}", .{target_triple});
+    const arch_dir = b.fmt("src/impl/golibs/dist/{s}/{s}", .{ target_triple, tags_dir });
     const filename = if (target.result.os.tag == .windows) "golibs.lib" else "libgolibs.a";
     // Output path is relative to the Go working directory (src/impl/golibs)
-    const output_path = b.fmt("dist/{s}/{s}", .{ target_triple, filename });
+    const output_path = b.fmt("dist/{s}/{s}/{s}", .{ target_triple, tags_dir, filename });
 
     // Ensure output directory exists (at build script parse time)
-    std.fs.cwd().makePath(arch_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(b.graph.io, arch_dir) catch {};
 
     return .{
         .step = addGoLibrary(b, target, optimize, output_path, tags),
@@ -769,7 +796,7 @@ pub fn build(b: *std.Build) void {
         const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
 
         // Add combined library header file path
-        exe.addIncludePath(libgolibs_build_step.dir);
+        exe.root_module.addIncludePath(libgolibs_build_step.dir);
 
         // Static link libgolibs.a
         if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) {
@@ -783,21 +810,21 @@ pub fn build(b: *std.Build) void {
             });
             const extract_objects_dir = libgolibs_build_step.dir.join(b.allocator, "obj") catch @panic("Failed to get path for extracted object files");
             const extract_objects_dir_real = extract_objects_dir.getPath(b);
-            std.fs.cwd().access(extract_objects_dir_real, .{ .mode = .read_only }) catch {
-                std.fs.cwd().makeDir(extract_objects_dir_real) catch @panic("Failed to create dist directory");
+            std.Io.Dir.cwd().access(b.graph.io, extract_objects_dir_real, .{}) catch {
+                std.Io.Dir.cwd().createDirPath(b.graph.io, extract_objects_dir_real) catch @panic("Failed to create dist directory");
             };
             extract_objects.setCwd(extract_objects_dir);
             extract_objects.step.dependOn(libgolibs_build_step.step);
             exe.step.dependOn(&extract_objects.step);
-            var dir = std.fs.cwd().openDir(extract_objects_dir_real, .{ .iterate = true }) catch @panic("Failed to open dist directory");
-            defer dir.close();
+            var dir = std.Io.Dir.cwd().openDir(b.graph.io, extract_objects_dir_real, .{ .iterate = true }) catch @panic("Failed to open dist directory");
+            defer dir.close(b.graph.io);
             var it = dir.iterate();
-            while (it.next() catch @panic("Failed to iterate over dist directory")) |*entry| {
-                exe.addObjectFile(extract_objects_dir.join(b.allocator, entry.name) catch @panic("Failed to join path for extracted object file"));
+            while (it.next(b.graph.io) catch @panic("Failed to iterate over dist directory")) |entry| {
+                exe.root_module.addObjectFile(extract_objects_dir.join(b.allocator, entry.name) catch @panic("Failed to join path for extracted object file"));
             }
         } else {
             const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
-            exe.addObjectFile(libgolibs_path);
+            exe.root_module.addObjectFile(libgolibs_path);
             // exe.addLibraryPath(libgolibs_build_step.dir);
             // exe.root_module.linkSystemLibrary(libgolibs_build_step.libname, .{ .preferred_link_mode = .static });
         }
@@ -809,23 +836,23 @@ pub fn build(b: *std.Build) void {
     // Add C forwarder implementation
     // Build and link libuv from deps/libuv.
     const uv = addLibuv(b, target, optimize);
-    exe.linkLibrary(uv);
-    exe.addIncludePath(b.path("deps/libuv/include"));
-    exe.addIncludePath(b.path("deps/libuv/src"));
+    exe.root_module.linkLibrary(uv);
+    exe.root_module.addIncludePath(b.path("deps/libuv/include"));
+    exe.root_module.addIncludePath(b.path("deps/libuv/src"));
 
     // Add C forwarder implementation
-    exe.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    exe.addCSourceFile(.{
+    exe.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    exe.root_module.addCSourceFile(.{
         .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
 
     // Add C include paths for UCI library headers
-    exe.addIncludePath(b.path("deps/uci"));
+    exe.root_module.addIncludePath(b.path("deps/uci"));
     // Add C include paths for Ubus library headers
-    exe.addIncludePath(b.path("deps/fix"));
-    exe.addIncludePath(b.path("deps/openwrt-tools"));
-    exe.addIncludePath(b.path("deps/ubus"));
+    exe.root_module.addIncludePath(b.path("deps/fix"));
+    exe.root_module.addIncludePath(b.path("deps/openwrt-tools"));
+    exe.root_module.addIncludePath(b.path("deps/ubus"));
 
     if (target.result.os.tag == .windows) {
         exe.root_module.linkSystemLibrary("ws2_32", .{});
@@ -845,10 +872,10 @@ pub fn build(b: *std.Build) void {
         // Framework paths need manual sysroot prefix, unlike library paths
         if (b.sysroot) |sysroot| {
             const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            exe.addFrameworkPath(.{ .cwd_relative = framework_path });
+            exe.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
 
             // Only add /usr/lib, build system appends it to sysroot automatically
-            exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
         }
 
         exe.root_module.linkFramework("CoreFoundation", .{});
@@ -909,14 +936,29 @@ pub fn build(b: *std.Build) void {
             // which requires us to specify a target.
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = options_mod },
+            },
         }),
     });
 
-    mod_tests.linkLibrary(uv);
-    mod_tests.addIncludePath(b.path("deps/libuv/include"));
-    mod_tests.addIncludePath(b.path("deps/libuv/src"));
-    mod_tests.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    mod_tests.addCSourceFile(.{
+    if (frpc or ddns or frps) {
+        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
+        mod_tests.root_module.addIncludePath(libgolibs_build_step.dir);
+        const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
+        mod_tests.root_module.addObjectFile(libgolibs_path);
+        mod_tests.step.dependOn(libgolibs_build_step.step);
+    }
+
+    mod_tests.root_module.linkLibrary(uv);
+    mod_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
+    mod_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
+    mod_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    mod_tests.root_module.addIncludePath(b.path("deps/uci"));
+    mod_tests.root_module.addIncludePath(b.path("deps/fix"));
+    mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
+    mod_tests.root_module.addIncludePath(b.path("deps/ubus"));
+    mod_tests.root_module.addCSourceFile(.{
         .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
@@ -936,8 +978,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         if (b.sysroot) |sysroot| {
             const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            mod_tests.addFrameworkPath(.{ .cwd_relative = framework_path });
-            mod_tests.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            mod_tests.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
+            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
         }
 
         mod_tests.root_module.linkFramework("CoreFoundation", .{});
@@ -955,6 +997,21 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+
+    if (frpc or ddns or frps) {
+        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
+        exe_tests.root_module.addIncludePath(libgolibs_build_step.dir);
+        const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
+        exe_tests.root_module.addObjectFile(libgolibs_path);
+        exe_tests.step.dependOn(libgolibs_build_step.step);
+    }
+    exe_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
+    exe_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
+    exe_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    exe_tests.root_module.addIncludePath(b.path("deps/uci"));
+    exe_tests.root_module.addIncludePath(b.path("deps/fix"));
+    exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
+    exe_tests.root_module.addIncludePath(b.path("deps/ubus"));
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
