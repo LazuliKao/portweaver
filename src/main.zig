@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Ensure single instance - kill old process if exists
+    // Ensure single instance ownership before starting services.
     try process_lock.ensureSingleInstance(allocator);
     defer process_lock.cleanup();
 
@@ -106,9 +106,14 @@ pub fn main(init: std.process.Init) !void {
     if (has_app_forward or build_options.ubus_mode) {
         const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
-        // Keep program running with periodic sleep
+
         while (true) {
-            compat.sleepNanos(100 * std.time.ns_per_ms); // Sleep for 100ms instead of 1 second to be more responsive
+            if (process_lock.shouldExitForTakeover()) {
+                std.log.info("PortWeaver takeover requested. Stopping services cleanly...", .{});
+                break;
+            }
+
+            compat.sleepNanos(100 * std.time.ns_per_ms);
         }
     }
 }
