@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// 动态库加载器，支持自动查找版本化的库文件
 pub const DynamicLibLoader = struct {
@@ -11,6 +12,11 @@ pub const DynamicLibLoader = struct {
 
     /// 释放动态库资源
     pub fn deinit(self: *DynamicLibLoader) void {
+        if (builtin.os.tag == .windows) {
+            self.lib_handle = null;
+            return;
+        }
+
         if (self.lib_handle) |*lib| {
             lib.close();
             self.lib_handle = null;
@@ -21,6 +27,10 @@ pub const DynamicLibLoader = struct {
     /// lib_name: 库名称（不含路径和扩展名），例如 "libuci"
     /// Returns: 加载成功返回 void，失败返回错误
     pub fn load(self: *DynamicLibLoader, lib_name: []const u8) !void {
+        if (builtin.os.tag == .windows) {
+            return error.UnsupportedPlatform;
+        }
+
         if (self.lib_handle != null) return;
 
         var last_error: ?std.DynLib.Error = null;
@@ -93,6 +103,10 @@ pub const DynamicLibLoader = struct {
 
     /// 查找函数符号
     pub fn lookup(self: *DynamicLibLoader, comptime T: type, comptime name: [:0]const u8) !T {
+        if (builtin.os.tag == .windows) {
+            return error.UnsupportedPlatform;
+        }
+
         if (self.lib_handle == null) {
             return error.LibraryNotLoaded;
         }

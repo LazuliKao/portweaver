@@ -11,9 +11,13 @@ test "single instance enforcement" {
     try process_lock.ensureSingleInstance(allocator);
     defer process_lock.cleanup();
 
-    // Verify PID file exists
-    const file = try std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
-    file.close(compat.io());
+    if (@import("builtin").os.tag == .windows) {
+        try std.testing.expect(!process_lock.shouldExitForTakeover());
+    } else {
+        // Verify PID file exists on file-lock based platforms.
+        const file = try std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
+        file.close(compat.io());
+    }
 }
 
 test "cleanup removes PID file" {
@@ -27,7 +31,12 @@ test "cleanup removes PID file" {
     // Cleanup
     process_lock.cleanup();
 
-    // Verify PID file is removed
+    if (@import("builtin").os.tag == .windows) {
+        try std.testing.expect(!process_lock.shouldExitForTakeover());
+        return;
+    }
+
+    // Verify PID file is removed on file-lock based platforms.
     const result = std.Io.Dir.cwd().openFile(compat.io(), pid_file_path, .{});
 
     try std.testing.expectError(error.FileNotFound, result);
