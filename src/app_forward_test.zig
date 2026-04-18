@@ -293,3 +293,296 @@ test "app forward: project range both runs for 3s then stops" {
     try app_forward.startForwarding(alloc, &handle);
     compat.sleepNanos(run_duration_ns);
 }
+
+test "app forward: tcp single connection with data transfer" {
+    const alloc = testing.allocator;
+
+    var handle = try makeSinglePortHandle(alloc, 8, .tcp, 43150, 53150);
+    defer cleanupProjectHandle(&handle);
+
+    const EchoServer = struct {
+        fn tcpEchoServerThread(port: u16) void {
+            const address = std.net.Address.parseIp4("127.0.0.1", port) catch return;
+
+            const sockfd = std.posix.socket(address.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP) catch return;
+            defer std.posix.close(sockfd);
+
+            const reuse_addr = std.mem.toBytes(@as(c_int, 1));
+            std.posix.setsockopt(sockfd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, reuse_addr[0..]) catch return;
+
+            const socklen = address.getOsSockLen();
+            std.posix.bind(sockfd, &address.any, socklen) catch return;
+            std.posix.listen(sockfd, 128) catch return;
+
+            const connection_fd = std.posix.accept(sockfd, null, null, std.posix.SOCK.CLOEXEC) catch return;
+            defer std.posix.close(connection_fd);
+
+            const connection = std.net.Stream{ .handle = connection_fd };
+
+            var buffer: [4096]u8 = undefined;
+            while (true) {
+                const read_len = connection.read(&buffer) catch return;
+
+                if (read_len == 0) break;
+                connection.writeAll(buffer[0..read_len]) catch return;
+            }
+        }
+    };
+
+    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, 43150, 53150);
+    defer forwarder.deinit();
+
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{53150});
+    defer echo_thread.join();
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    const message = "Hello, PortWeaver!";
+    const response = try tcpClientTest(43150, message, std.time.ns_per_s);
+    defer alloc.free(response);
+
+    try testing.expectEqualStrings(message, response);
+
+    forwarder.stop();
+}
+
+test "app forward: tcp 5 sequential clients" {
+    const alloc = testing.allocator;
+
+    var handle = try makeSinglePortHandle(alloc, 9, .tcp, 43151, 53151);
+    defer cleanupProjectHandle(&handle);
+
+    const EchoServer = struct {
+        fn tcpEchoServerThread(port: u16) void {
+            const address = std.net.Address.parseIp4("127.0.0.1", port) catch return;
+
+            const sockfd = std.posix.socket(address.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP) catch return;
+            defer std.posix.close(sockfd);
+
+            const reuse_addr = std.mem.toBytes(@as(c_int, 1));
+            std.posix.setsockopt(sockfd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, reuse_addr[0..]) catch return;
+
+            const socklen = address.getOsSockLen();
+            std.posix.bind(sockfd, &address.any, socklen) catch return;
+            std.posix.listen(sockfd, 128) catch return;
+
+            var connections: usize = 0;
+            while (connections < 5) {
+                const connection_fd = std.posix.accept(sockfd, null, null, std.posix.SOCK.CLOEXEC) catch return;
+                defer std.posix.close(connection_fd);
+
+                const connection = std.net.Stream{ .handle = connection_fd };
+
+                var buffer: [4096]u8 = undefined;
+                while (true) {
+                    const read_len = connection.read(&buffer) catch return;
+                    if (read_len == 0) break;
+                    connection.writeAll(buffer[0..read_len]) catch return;
+                }
+
+                connections += 1;
+            }
+        }
+    };
+
+    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, 43151, 53151);
+    defer forwarder.deinit();
+
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{53151});
+    defer echo_thread.join();
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    for (0..5) |idx| {
+        var message_buffer: [32]u8 = undefined;
+        const message = try std.fmt.bufPrint(&message_buffer, "client {}", .{idx + 1});
+
+        const response = try tcpClientTest(43151, message, std.time.ns_per_s);
+        defer alloc.free(response);
+
+        try testing.expectEqualStrings(message, response);
+    }
+
+    forwarder.stop();
+}
+
+fn tcpEchoServerThread(port: u16) void {
+    const address = std.net.Address.parseIp4("127.0.0.1", port) catch return;
+
+    const sockfd = std.posix.socket(address.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP) catch return;
+    defer std.posix.close(sockfd);
+
+    const reuse_addr = std.mem.toBytes(@as(c_int, 1));
+    std.posix.setsockopt(sockfd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, reuse_addr[0..]) catch return;
+
+    const socklen = address.getOsSockLen();
+    std.posix.bind(sockfd, &address.any, socklen) catch return;
+    std.posix.listen(sockfd, 128) catch return;
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = sockfd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const deadline = std.time.nanoTimestamp() + std.time.ns_per_s;
+
+    while (true) {
+        const now = std.time.nanoTimestamp();
+        if (now >= deadline) return;
+
+        const remaining_ns: u64 = @intCast(deadline - now);
+        const remaining_ms: i32 = @intCast(@max(@as(u64, 1), (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
+        const poll_result = std.posix.poll(poll_fds[0..], remaining_ms) catch return;
+        if (poll_result == 0) return;
+        if ((poll_fds[0].revents & std.posix.POLL.IN) != 0) break;
+    }
+
+    const connection_fd = std.posix.accept(sockfd, null, null, std.posix.SOCK.CLOEXEC) catch return;
+    defer std.posix.close(connection_fd);
+
+    const connection = std.net.Stream{ .handle = connection_fd };
+
+    const expected_len = "Hello, PortWeaver!".len;
+    var echoed: usize = 0;
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const read_len = connection.read(&buffer) catch return;
+
+        if (read_len == 0) break;
+
+        connection.writeAll(buffer[0..read_len]) catch return;
+        echoed += read_len;
+        if (echoed >= expected_len) break;
+    }
+}
+
+fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
+    const allocator = testing.allocator;
+    const address = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    const sockfd = try std.posix.socket(
+        address.any.family,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        std.posix.IPPROTO.TCP,
+    );
+    defer std.posix.close(sockfd);
+
+    std.posix.connect(sockfd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => {},
+        else => return err,
+    };
+
+    const deadline = std.time.nanoTimestamp() + @as(i128, @intCast(timeout_ns));
+    while (true) {
+        const now = std.time.nanoTimestamp();
+        if (now >= deadline) return error.Timeout;
+
+        const remaining_ns: u64 = @intCast(deadline - now);
+        const remaining_ms: i32 = @intCast(@max(@as(u64, 1), (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = sockfd,
+            .events = std.posix.POLL.OUT,
+            .revents = 0,
+        }};
+        const poll_result = std.posix.poll(poll_fds[0..], remaining_ms) catch |err| return err;
+        if (poll_result == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+            return error.ConnectionResetByPeer;
+        }
+
+        std.posix.getsockoptError(sockfd) catch |err| switch (err) {
+            error.WouldBlock, error.ConnectionPending => continue,
+            else => return err,
+        };
+        break;
+    }
+
+    var stream = std.net.Stream{ .handle = sockfd };
+    defer stream.close();
+
+    try stream.writeAll(message);
+    std.posix.shutdown(stream.handle, .send) catch return error.ConnectionResetByPeer;
+    var response: [1024]u8 = undefined;
+    var response_len: usize = 0;
+
+    var buffer: [1024]u8 = undefined;
+    while (true) {
+        const read_len = stream.read(&buffer) catch |err| return err;
+
+        if (read_len == 0) break;
+        const end = response_len + read_len;
+        if (end > response.len) return error.MessageTooBig;
+        @memcpy(response[response_len..end], buffer[0..read_len]);
+        response_len = end;
+
+        if (response_len >= message.len) break;
+    }
+
+    return try allocator.dupe(u8, response[0..response_len]);
+}
+
+fn udpEchoServerThread(port: u16) void {
+    const address = std.net.Address.parseIp4("127.0.0.1", port) catch return;
+
+    var socket = std.net.UdpSocket.init(address) catch return;
+    defer socket.deinit();
+
+    var buffer: [65507]u8 = undefined;
+    var peer_addr: std.net.Address = undefined;
+    var peer_addr_len: usize = @sizeOf(std.net.Address);
+
+    while (true) {
+        const recv_len = socket.receiveFrom(buffer[0..], &peer_addr, &peer_addr_len) catch return;
+        if (recv_len == 0) continue;
+
+        socket.sendTo(peer_addr, buffer[0..recv_len]) catch return;
+    }
+}
+
+fn udpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
+    const allocator = testing.allocator;
+    const address = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    var socket = try std.net.UdpSocket.init(address);
+    defer socket.deinit();
+
+    const deadline = std.time.nanoTimestamp() + @as(i128, @intCast(timeout_ns));
+    try socket.send(message);
+
+    var response: [1024]u8 = undefined;
+    while (true) {
+        const now = std.time.nanoTimestamp();
+        if (now >= deadline) return error.Timeout;
+
+        const remaining_ns: u64 = @intCast(deadline - now);
+        const remaining_ms: i32 = @intCast(@max(@as(u64, 1), (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = socket.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+
+        const poll_result = std.posix.poll(poll_fds[0..], remaining_ms) catch |err| return err;
+        if (poll_result == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+            return error.ConnectionResetByPeer;
+        }
+
+        const recv_len = socket.receive(response[0..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+
+        return try allocator.dupe(u8, response[0..recv_len]);
+    }
+}

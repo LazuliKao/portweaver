@@ -235,10 +235,15 @@ fn createWrapperScript(
         );
 
     const io = b.graph.io;
-    const file = try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
-        .truncate = true,
-        .permissions = .fromMode(0o755),
-    });
+    const file = if (@import("builtin").os.tag == .windows)
+        try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
+            .truncate = true,
+        })
+    else
+        try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
+            .truncate = true,
+            .permissions = .fromMode(0o755),
+        });
     defer file.close(io);
     try file.writeStreamingAll(io, script_content);
 
@@ -508,7 +513,7 @@ fn addGoLibrary(
     const go_cache = b.cache_root.join(b.allocator, &.{ "go", goos, goarch }) catch @panic("OOM");
     const go_cache_rel = b.path(go_cache).getPath(b);
 
-    std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
+    // std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
 
     go_cmd.setEnvironmentVariable("GOCACHE", go_cache_rel);
     // Force module mode explicitly so cross-builds behave consistently.
@@ -568,7 +573,7 @@ fn addGoLibrary(
             std.debug.print("Using GOROOT from environment: {s}\n", .{goroot});
             go_cmd.setEnvironmentVariable("GOROOT", goroot);
         } else {
-            std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
+            // std.debug.print("GOROOT not set in environment, Go will use its default\n", .{});
         }
 
         // Also pass through GOPATH and GOMODCACHE if set
