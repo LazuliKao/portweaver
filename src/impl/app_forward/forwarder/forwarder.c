@@ -68,12 +68,19 @@ typedef struct tcp_conn_ctx
     uv_tcp_t client;
     uv_tcp_t target;
     uv_connect_t connect_req;
-    uv_shutdown_t shutdown_req_client; // changed: separate shutdown reqs
-    uv_shutdown_t shutdown_req_target;
+    uv_shutdown_t client_shutdown_req;
+    uv_shutdown_t target_shutdown_req;
     struct tcp_forwarder *forwarder;
     int closed;
     int close_count;
+    int expected_close_count;
     int active_counted;
+    int client_eof;
+    int target_eof;
+    int client_shutdown_started;
+    int target_shutdown_started;
+    int client_shutdown_pending;
+    int target_shutdown_pending;
 } tcp_conn_ctx_t;
 
 // Forward declarations for C callbacks
@@ -81,6 +88,7 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
 static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_t *buf);
 static void tcp_on_client_write(uv_write_t *req, int status);
 static void tcp_on_target_write(uv_write_t *req, int status);
+static void tcp_on_shutdown(uv_shutdown_t *req, int status);
 static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 static void tcp_conn_close_cb(uv_handle_t *handle);
@@ -98,6 +106,8 @@ static void destroy_create_state(forwarder_allocator_t allocator, uv_loop_t *loo
 static int cache_destination_addr(struct sockaddr_storage *dest, addr_family_t family, const char *target_address, uint16_t target_port);
 static void build_listen_addr(struct sockaddr_storage *addr, addr_family_t family, uint16_t listen_port);
 static int finalize_forwarder_loop(uv_loop_t *loop, uv_walk_cb walk_cb, void *arg);
+static void tcp_maybe_finish_connection(tcp_conn_ctx_t *ctx);
+static void tcp_shutdown_peer_write(tcp_conn_ctx_t *ctx, uv_stream_t *stream, uv_shutdown_t *req, int *started, int *pending, const char *label);
 
 /* Wrapper for write/send requests that carry a pointer back to the forwarder
  * so we can free memory with the right allocator in the completion callbacks.
@@ -145,6 +155,69 @@ static void tcp_on_target_write(uv_write_t *req, int status)
     DATA_FREE(fwd, fw);
 }
 
+static void tcp_maybe_finish_connection(tcp_conn_ctx_t *ctx)
+{
+    if (!ctx || ctx->closed)
+        return;
+
+    if (ctx->client_eof && ctx->target_eof &&
+        !ctx->client_shutdown_pending && !ctx->target_shutdown_pending)
+    {
+        tcp_terminate_connection(ctx);
+    }
+}
+
+static void tcp_on_shutdown(uv_shutdown_t *req, int status)
+{
+    tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)req->data;
+    if (!ctx)
+        return;
+
+    if (req == &ctx->client_shutdown_req)
+        ctx->client_shutdown_pending = 0;
+    else if (req == &ctx->target_shutdown_req)
+        ctx->target_shutdown_pending = 0;
+
+    if (status != 0 && status != UV_ENOTCONN && status != UV_EPIPE && status != UV_ECANCELED)
+    {
+        fprintf(stderr, "[tcp_on_shutdown] shutdown error: %s\n", uv_strerror(status));
+        tcp_terminate_connection(ctx);
+        return;
+    }
+
+    tcp_maybe_finish_connection(ctx);
+}
+
+static void tcp_shutdown_peer_write(tcp_conn_ctx_t *ctx, uv_stream_t *stream, uv_shutdown_t *req, int *started, int *pending, const char *label)
+{
+    if (!ctx || !stream || !req || !started || !pending)
+        return;
+
+    if (*started || uv_is_closing((uv_handle_t *)stream))
+    {
+        tcp_maybe_finish_connection(ctx);
+        return;
+    }
+
+    *started = 1;
+    *pending = 1;
+    req->data = ctx;
+
+    int r = uv_shutdown(req, stream, tcp_on_shutdown);
+    if (r != 0)
+    {
+        *pending = 0;
+        if (r != UV_ENOTCONN && r != UV_EPIPE)
+        {
+            fprintf(stderr, "[%s] uv_shutdown failed: %s\n", label, uv_strerror(r));
+            tcp_terminate_connection(ctx);
+            return;
+        }
+
+        tcp_maybe_finish_connection(ctx);
+    }
+}
+
 static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 {
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)client->data;
@@ -188,8 +261,14 @@ static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_
     {
         if (nread == UV_EOF)
         {
-            // Avoid half-close leaks: terminate both ends on EOF.
-            tcp_terminate_connection(ctx);
+            ctx->client_eof = 1;
+            uv_read_stop(client);
+            tcp_shutdown_peer_write(ctx,
+                                    (uv_stream_t *)&ctx->target,
+                                    &ctx->target_shutdown_req,
+                                    &ctx->target_shutdown_started,
+                                    &ctx->target_shutdown_pending,
+                                    "tcp_on_client_read");
             return;
         }
         tcp_terminate_connection(ctx);
@@ -239,8 +318,14 @@ static void tcp_on_target_read(uv_stream_t *target, ssize_t nread, const uv_buf_
     {
         if (nread == UV_EOF)
         {
-            // Avoid half-close leaks: terminate both ends on EOF.
-            tcp_terminate_connection(ctx);
+            ctx->target_eof = 1;
+            uv_read_stop(target);
+            tcp_shutdown_peer_write(ctx,
+                                    (uv_stream_t *)&ctx->client,
+                                    &ctx->client_shutdown_req,
+                                    &ctx->client_shutdown_started,
+                                    &ctx->client_shutdown_pending,
+                                    "tcp_on_target_read");
             return;
         }
         tcp_terminate_connection(ctx);
@@ -365,6 +450,38 @@ static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
 
     if (handle->type == UV_TCP)
     {
+        tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)handle->data;
+        if (ctx)
+        {
+            uv_handle_t *client_handle = (uv_handle_t *)&ctx->client;
+            uv_handle_t *target_handle = (uv_handle_t *)&ctx->target;
+            int close_target = !uv_is_closing(target_handle);
+            int close_client = !uv_is_closing(client_handle);
+
+            if (close_client || close_target)
+            {
+                int expected_close_count = ctx->close_count;
+                if (close_client)
+                    expected_close_count++;
+                if (close_target)
+                    expected_close_count++;
+                if (ctx->expected_close_count < expected_close_count)
+                    ctx->expected_close_count = expected_close_count;
+
+                if (close_client)
+                {
+                    uv_read_stop((uv_stream_t *)client_handle);
+                    uv_close(client_handle, tcp_conn_close_cb);
+                }
+                if (close_target)
+                {
+                    uv_read_stop((uv_stream_t *)target_handle);
+                    uv_close(target_handle, tcp_conn_close_cb);
+                }
+            }
+            return;
+        }
+
         uv_read_stop((uv_stream_t *)handle);
         uv_close(handle, tcp_conn_close_cb);
         return;
@@ -396,16 +513,32 @@ static void udp_close_walk_cb(uv_handle_t *handle, void *arg)
 
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx)
 {
-    if (!ctx)
+    if (!ctx || ctx->closed)
         return;
 
+    ctx->closed = 1;
+
+    int close_count = 0;
     uv_read_stop((uv_stream_t *)&ctx->client);
     uv_read_stop((uv_stream_t *)&ctx->target);
 
     if (!uv_is_closing((uv_handle_t *)&ctx->client))
+    {
         uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
+        close_count++;
+    }
     if (!uv_is_closing((uv_handle_t *)&ctx->target))
+    {
         uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
+        close_count++;
+    }
+
+    if (close_count > 0)
+    {
+        int expected_close_count = ctx->close_count + close_count;
+        if (ctx->expected_close_count < expected_close_count)
+            ctx->expected_close_count = expected_close_count;
+    }
 }
 
 static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
@@ -484,6 +617,7 @@ static void tcp_on_connect(uv_connect_t *req, int status)
     }
     else
     {
+        ctx->expected_close_count = 2;
         uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
         uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
     }
@@ -531,6 +665,7 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     ctx->forwarder = fwd;
     ctx->closed = 0;
     ctx->close_count = 0;
+    ctx->expected_close_count = 0;
     ctx->active_counted = 0;
 
     int init_rc = uv_tcp_init(fwd->loop, &ctx->client);
@@ -546,7 +681,7 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     if (init_rc != 0)
     {
         fprintf(stderr, "[tcp_on_new_connection] uv_tcp_init(target) failed: %s\n", uv_strerror(init_rc));
-        ctx->close_count = 1; // target not initialized, only client close callback will fire
+        ctx->expected_close_count = 1; // target not initialized, only client close callback will fire
         uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
         return;
     }
@@ -560,12 +695,14 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
         int connect_rc = uv_tcp_connect(&ctx->connect_req, &ctx->target, (const struct sockaddr *)&fwd->cached_dest_addr, tcp_on_connect);
         if (connect_rc != 0)
         {
+            ctx->expected_close_count = 2;
             uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
             uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
         }
     }
     else
     {
+        ctx->expected_close_count = 2;
         uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
         uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
     }
@@ -915,7 +1052,7 @@ static void tcp_conn_close_cb(uv_handle_t *handle)
     if (!ctx)
         return;
     ctx->close_count++;
-    if (ctx->close_count >= 2)
+    if (ctx->close_count >= ctx->expected_close_count)
     {
         // free connection context using forwarder's allocator
         if (ctx->active_counted)

@@ -299,36 +299,10 @@ test "app forward: tcp single connection with data transfer" {
     var handle = try makeSinglePortHandle(alloc, 8, .tcp, 43150, 53150);
     defer cleanupProjectHandle(&handle);
 
-    const EchoServer = struct {
-        fn tcpEchoServerThread(port: u16) void {
-            const io = compat.io();
-            var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return;
-            var server = address.listen(io, .{ .reuse_address = true, .mode = .stream, .protocol = .tcp }) catch return;
-            defer server.deinit(io);
-
-            const connection = server.accept(io) catch return;
-            defer connection.close(io);
-
-            var read_buffer: [4096]u8 = undefined;
-            var write_buffer: [4096]u8 = undefined;
-            var reader = connection.reader(io, &read_buffer);
-            var writer = connection.writer(io, &write_buffer);
-
-            while (true) {
-                var chunk: [4096]u8 = undefined;
-                const read_len = reader.interface.readSliceShort(&chunk) catch return;
-
-                if (read_len == 0) break;
-                writer.interface.writeAll(chunk[0..read_len]) catch return;
-                writer.interface.flush() catch return;
-            }
-        }
-    };
-
     const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, 43150, 53150);
     defer forwarder.deinit();
 
-    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{53150});
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpEchoServerThread, .{53150});
     defer echo_thread.join();
 
     var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
@@ -438,12 +412,17 @@ fn tcpEchoServerThread(port: u16) void {
 
 fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     const allocator = testing.allocator;
-    _ = timeout_ns;
 
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
     defer stream.close(io);
+
+    const timeout = std.posix.timeval{
+        .sec = @intCast(timeout_ns / std.time.ns_per_s),
+        .usec = @intCast((timeout_ns % std.time.ns_per_s) / std.time.ns_per_us),
+    };
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
     var write_buf: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
@@ -454,12 +433,12 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 
     var response: [1024]u8 = undefined;
     var response_len: usize = 0;
-
-    var read_buf: [1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buf);
     while (true) {
         var chunk: [1024]u8 = undefined;
-        const read_len = reader.interface.readSliceShort(&chunk) catch |err| return err;
+        const read_len = std.posix.read(stream.socket.handle, chunk[0..]) catch |err| switch (err) {
+            error.WouldBlock => return error.Timeout,
+            else => return err,
+        };
 
         if (read_len == 0) break;
         const end = response_len + read_len;
