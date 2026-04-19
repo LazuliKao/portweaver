@@ -6,7 +6,7 @@ const app_forward = @import("./impl/app_forward.zig");
 const project_status = @import("./impl/project_status.zig");
 const compat = @import("./compat.zig");
 
-const run_duration_ns = 3 * std.time.ns_per_s;
+const run_duration_ns = 1 * std.time.ns_per_s;
 
 fn testListenPort(id: u16, offset: u16) u16 {
     return 40000 + id * 4 + offset;
