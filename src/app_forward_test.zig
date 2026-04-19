@@ -412,17 +412,12 @@ fn tcpEchoServerThread(port: u16) void {
 
 fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     const allocator = testing.allocator;
+    _ = timeout_ns;
 
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
     defer stream.close(io);
-
-    const timeout = std.posix.timeval{
-        .sec = @intCast(timeout_ns / std.time.ns_per_s),
-        .usec = @intCast((timeout_ns % std.time.ns_per_s) / std.time.ns_per_us),
-    };
-    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
     var write_buf: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
@@ -431,14 +426,13 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 
     stream.shutdown(io, .send) catch return error.ConnectionResetByPeer;
 
+    var read_buf: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
     var response: [1024]u8 = undefined;
     var response_len: usize = 0;
     while (true) {
         var chunk: [1024]u8 = undefined;
-        const read_len = std.posix.read(stream.socket.handle, chunk[0..]) catch |err| switch (err) {
-            error.WouldBlock => return error.Timeout,
-            else => return err,
-        };
+        const read_len = try reader.interface.readSliceShort(&chunk);
 
         if (read_len == 0) break;
         const end = response_len + read_len;

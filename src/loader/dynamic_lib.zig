@@ -103,12 +103,12 @@ pub const DynamicLibLoader = struct {
 
     /// 查找函数符号
     pub fn lookup(self: *DynamicLibLoader, comptime T: type, comptime name: [:0]const u8) !T {
-        if (builtin.os.tag == .windows) {
-            return error.UnsupportedPlatform;
-        }
-
         if (self.lib_handle == null) {
             return error.LibraryNotLoaded;
+        }
+
+        if (builtin.os.tag == .windows) {
+            return error.UnsupportedPlatform;
         }
 
         return self.lib_handle.?.lookup(T, name) orelse {
