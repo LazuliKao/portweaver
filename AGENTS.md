@@ -26,6 +26,9 @@ zig build -Dubus=true       # Enable UBUS integration
 
 # Combined example (all Go features compiled into single libgolibs.a):
 zig build -Dfrpc=true -Dddns=true -Dfrps=true -Doptimize=ReleaseSmall
+
+# test
+zig build test --test-timeout 5s --summary all
 ```
 
 **Note:** FRP client, FRP server, and DDNS are compiled together into `libgolibs.a` from `src/impl/golibs/`.
