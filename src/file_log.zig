@@ -123,10 +123,10 @@ pub const FileLogger = struct {
             self.current_size = 0;
             return;
         };
-        self.current_size = stat.size;
+        self.current_size = std.math.cast(usize, stat.size) orelse std.math.maxInt(usize);
 
         var writer = self.file.?.writer(compat.io(), &.{});
-        try writer.seekTo(self.current_size);
+        try writer.seekTo(stat.size);
     }
 
     fn rotate(self: *Self) void {

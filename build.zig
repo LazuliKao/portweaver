@@ -461,6 +461,11 @@ fn addGoLibrary(
         .sparc64 => "sparc64",
         else => @panic("Unsupported architecture"),
     };
+    const goarm = if (arch_tag == .arm) switch (target.result.abi) {
+        .gnueabi, .musleabi => "5",
+        .gnueabihf, .musleabihf => "7",
+        else => null,
+    } else null;
 
     var go_args = std.ArrayListUnmanaged([]const u8).empty;
     const go_exe = if (custom_go_path) |path| path else "go";
@@ -507,10 +512,14 @@ fn addGoLibrary(
 
     go_cmd.setEnvironmentVariable("GOOS", goos);
     go_cmd.setEnvironmentVariable("GOARCH", goarch);
+    if (goarm) |goarm_value| {
+        go_cmd.setEnvironmentVariable("GOARM", goarm_value);
+    }
 
     // Use architecture-specific GOCACHE to avoid conflicts during parallel builds
     // GOCACHE must be an absolute path, use zig's cache root
-    const go_cache = b.cache_root.join(b.allocator, &.{ "go", goos, goarch }) catch @panic("OOM");
+    const target_triple_for_cache = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
+    const go_cache = b.cache_root.join(b.allocator, &.{ "go", goos, target_triple_for_cache }) catch @panic("OOM");
     const go_cache_rel = b.path(go_cache).getPath(b);
 
     // std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
