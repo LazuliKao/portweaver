@@ -102,9 +102,11 @@ jobs:
           - target: riscv64-linux-gnu
             os: ubuntu-latest
             name: portweaver-linux-riscv64-gnu
+            cpu: baseline_rv64
           - target: riscv64-linux-musl
             os: ubuntu-latest
             name: portweaver-linux-riscv64-musl
+            cpu: baseline_rv64
             custom_golang: true
 
     steps:
@@ -165,6 +167,9 @@ jobs:
         shell: bash
         run: |
           ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true"
+          if [ -n "${{ matrix.cpu }}" ]; then
+            ZIG_FLAGS="$ZIG_FLAGS -Dcpu=${{ matrix.cpu }}"
+          fi
           if [ "${{ runner.os }}" == "macOS" ]; then
             ZIG_FLAGS="$ZIG_FLAGS --sysroot $SDKROOT"
           fi
