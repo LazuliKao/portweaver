@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "uv.h"
 
 #ifdef __cplusplus
 extern "C"

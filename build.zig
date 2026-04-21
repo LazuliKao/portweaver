@@ -964,18 +964,19 @@ pub fn build(b: *std.Build) void {
         mod_tests.step.dependOn(libgolibs_build_step.step);
     }
 
-    mod_tests.root_module.linkLibrary(uv);
+    const uv_mod_tests = addLibuv(b, target, optimize);
+    mod_tests.root_module.linkLibrary(uv_mod_tests);
     mod_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
     mod_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
     mod_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    mod_tests.root_module.addIncludePath(b.path("deps/uci"));
-    mod_tests.root_module.addIncludePath(b.path("deps/fix"));
-    mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
-    mod_tests.root_module.addIncludePath(b.path("deps/ubus"));
     mod_tests.root_module.addCSourceFile(.{
         .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
+    mod_tests.root_module.addIncludePath(b.path("deps/uci"));
+    mod_tests.root_module.addIncludePath(b.path("deps/fix"));
+    mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
+    mod_tests.root_module.addIncludePath(b.path("deps/ubus"));
 
     if (target.result.os.tag == .windows) {
         mod_tests.root_module.linkSystemLibrary("ws2_32", .{});
@@ -1009,7 +1010,16 @@ pub fn build(b: *std.Build) void {
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = b.createModule(.{
+            .link_libc = true,
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "portweaver", .module = mod },
+                .{ .name = "build_options", .module = options_mod },
+            },
+        }),
     });
 
     if (frpc or ddns or frps) {
@@ -1019,9 +1029,15 @@ pub fn build(b: *std.Build) void {
         exe_tests.root_module.addObjectFile(libgolibs_path);
         exe_tests.step.dependOn(libgolibs_build_step.step);
     }
+    const uv_exe_tests = addLibuv(b, target, optimize);
+    exe_tests.root_module.linkLibrary(uv_exe_tests);
     exe_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
     exe_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
     exe_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    exe_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));
     exe_tests.root_module.addIncludePath(b.path("deps/fix"));
     exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
