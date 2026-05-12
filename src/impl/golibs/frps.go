@@ -2,8 +2,7 @@
 
 package main
 
-// #include <stdlib.h>
-// #include <string.h>
+// void free(void *);
 // #include <stdbool.h>
 //
 // typedef struct {
