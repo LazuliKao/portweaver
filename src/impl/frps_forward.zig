@@ -264,8 +264,8 @@ pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]con
 /// Clear the logs of a specific FRP server by node name
 /// This is idempotent - returns success if node not found or not started
 pub fn clearServerLogs(node_name: []const u8) void {
-    servers_lock.lock();
-    defer servers_lock.unlock();
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
 
     if (servers == null) {
         std.log.debug("[FRPS] No servers to clear logs for {s}", .{node_name});
@@ -346,8 +346,8 @@ pub fn getAllServerSummaries(allocator: std.mem.Allocator) ![]ServerSummary {
         node_names.deinit();
     }
     {
-        servers_lock.lock();
-        defer servers_lock.unlock();
+        servers_lock.lockUncancelable(compat.io());
+        defer servers_lock.unlock(compat.io());
         if (servers) |map| {
             var it = map.iterator();
             while (it.next()) |entry| {

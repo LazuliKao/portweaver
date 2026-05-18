@@ -8,6 +8,10 @@ pub const c = @cImport({
     @cInclude("libubus.h");
 });
 
+const BLOB_ATTR_LEN_MASK: u32 = 0x00ffffff;
+const BLOB_ATTR_EXTENDED: u32 = 0x80000000;
+const BLOBMSG_ALIGN: u5 = 2;
+
 const blob_buf_init_fn = *const fn (*c.blob_buf, c_int) callconv(.c) c_int;
 const blob_buf_free_fn = *const fn (*c.blob_buf) callconv(.c) void;
 const blobmsg_add_field_fn = *const fn (*c.blob_buf, c_int, [*c]const u8, ?*const anyopaque, c_uint) callconv(.c) c_int;
@@ -75,6 +79,61 @@ pub fn blobmsgParse(policy: []const c.blobmsg_policy, table: []?*c.blob_attr, da
     const func = try loadFunction(blobmsg_parse_fn, "blobmsg_parse", &fn_blobmsg_parse);
     const rc = func(policy.ptr, @intCast(policy.len), table.ptr, data, @intCast(data_len));
     if (rc < 0) return error.BlobParseFailed;
+}
+
+fn be16ToNative(value: u16) u16 {
+    return switch (@import("builtin").cpu.arch.endian()) {
+        .little => @byteSwap(value),
+        .big => value,
+    };
+}
+
+fn be32ToNative(value: u32) u32 {
+    return switch (@import("builtin").cpu.arch.endian()) {
+        .little => @byteSwap(value),
+        .big => value,
+    };
+}
+
+fn blobmsgPadding(len: usize) usize {
+    return (len + (@as(usize, 1) << BLOBMSG_ALIGN) - 1) & ~((@as(usize, 1) << BLOBMSG_ALIGN) - 1);
+}
+
+fn attrData(attr: *const c.blob_attr) [*]u8 {
+    return @as([*]u8, @ptrCast(@constCast(attr))) + @sizeOf(c.blob_attr);
+}
+
+pub fn blobData(attr: *const c.blob_attr) ?*anyopaque {
+    return attrData(attr);
+}
+
+pub fn blobLen(attr: *const c.blob_attr) usize {
+    return @as(usize, be32ToNative(attr.id_len) & BLOB_ATTR_LEN_MASK) - @sizeOf(c.blob_attr);
+}
+
+pub fn blobmsgData(attr: ?*c.blob_attr) ?*anyopaque {
+    const actual_attr = attr orelse return null;
+    var data = attrData(actual_attr);
+    const id_len = be32ToNative(actual_attr.id_len);
+    if ((id_len & BLOB_ATTR_EXTENDED) != 0) {
+        const namelen = be16ToNative(@as(*align(1) const u16, @ptrCast(data)).*);
+        data += blobmsgPadding(@sizeOf(u16) + namelen + 1);
+    }
+    return data;
+}
+
+pub fn blobmsgGetBool(attr: *c.blob_attr) bool {
+    const data = @as([*]u8, @ptrCast(blobmsgData(attr).?));
+    return data[0] != 0;
+}
+
+pub fn blobmsgGetU32(attr: *c.blob_attr) u32 {
+    const data = @as(*align(1) const u32, @ptrCast(blobmsgData(attr).?));
+    return be32ToNative(data.*);
+}
+
+pub fn blobmsgGetString(attr: *c.blob_attr) [*:0]const u8 {
+    return @ptrCast(blobmsgData(attr).?);
 }
 
 pub fn uloopInit() !void {

@@ -12,6 +12,7 @@ const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const main = @import("../main.zig");
+const compat = @import("../compat.zig");
 const event_log = main.event_log;
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
@@ -32,7 +33,7 @@ const RuntimeState = struct {
     projects: std.array_list.Managed(project_status.ProjectHandle),
     enabled: []bool,
     last_changed: []u64,
-    mutex: std.atomic.Mutex = .unlocked,
+    mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
@@ -60,8 +61,8 @@ const RuntimeState = struct {
     }
 
     fn globalSnapshot(self: *RuntimeState) GlobalSnapshot {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
 
         var enabled_projects: u32 = 0;
         var success_projects: u32 = 0;
@@ -436,8 +437,8 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
     const arr = ubox.blobmsgOpenNested(&buf, field_names.projects, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
 
-    state.mutex.lock();
-    defer state.mutex.unlock();
+    state.mutex.lockUncancelable(compat.io());
+    defer state.mutex.unlock(compat.io());
 
     var i: usize = 0;
     while (i < state.projects.items.len) : (i += 1) {
@@ -510,18 +511,18 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     const state = g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
 
     var tb: [set_enabled_policy.len]?*c.blob_attr = .{ null, null };
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(set_enabled_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null or tb[1] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const id = c.blobmsg_get_u32(tb[0].?);
+    const id = ubox.blobmsgGetU32(tb[0].?);
     const idx: usize = @intCast(id);
-    const enabled_flag = c.blobmsg_get_bool(tb[1].?);
+    const enabled_flag = ubox.blobmsgGetBool(tb[1].?);
 
-    state.mutex.lock();
+    state.mutex.lockUncancelable(compat.io());
     if (idx >= state.projects.items.len) {
-        state.mutex.unlock();
+        state.mutex.unlock(compat.io());
         return c.UBUS_STATUS_INVALID_ARGUMENT;
     }
     // Update state and control actual forwarding
@@ -532,7 +533,7 @@ fn handleSetEnabled(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.
     var project = &state.projects.items[idx];
     project.setRuntimeEnabled(enabled_flag);
 
-    state.mutex.unlock();
+    state.mutex.unlock(compat.io());
 
     var buf: c.blob_buf = std.mem.zeroes(c.blob_buf);
     ubox.blobBufInit(&buf, c.BLOBMSG_TYPE_TABLE) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
@@ -667,12 +668,12 @@ fn handleGetFrpcInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c
 
     // Parse the "id" (node_name) parameter
     var tb: [frp_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frp_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Get client status from frpc_forward
@@ -726,12 +727,12 @@ fn handleGetFrpsInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c
 
     // Parse the "id" (node_name) parameter
     var tb: [frps_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frps_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Get server status from frps_forward
@@ -785,13 +786,13 @@ fn handleGetFrpProxyStats(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: 
 
     // Parse the "id" and "proxy_name" parameters
     var tb: [frp_proxy_stats_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frp_proxy_stats_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
 
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Get all proxy stats for the client
@@ -825,13 +826,13 @@ fn handleGetFrpsProxyStats(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req:
 
     // Parse the "id" parameter
     var tb: [frps_proxy_stats_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frps_proxy_stats_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
 
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Get all proxy stats for the server
@@ -864,12 +865,12 @@ fn handleClearFrpLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
 
     // Parse the "id" parameter (node name)
     var tb: [frp_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frp_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Clear logs for the specified node (idempotent operation)
@@ -893,12 +894,12 @@ fn handleClearFrpsLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
 
     // Parse the "id" parameter (node name)
     var tb: [frps_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(frps_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const node_name_cstr = c.blobmsg_get_string(tb[0].?);
+    const node_name_cstr = ubox.blobmsgGetString(tb[0].?);
     const node_name = std.mem.span(node_name_cstr);
 
     // Clear logs for the specified node (idempotent operation)
@@ -1037,12 +1038,12 @@ fn handleGetDdnsInfo(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c
 
     // Parse the "name" parameter
     var tb: [ddns_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(ddns_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const name_cstr = c.blobmsg_get_string(tb[0].?);
+    const name_cstr = ubox.blobmsgGetString(tb[0].?);
     const name = std.mem.span(name_cstr);
 
     // Get DDNS info from manager
@@ -1089,12 +1090,12 @@ fn handleClearDdnsLogs(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
 
     // Parse the "name" parameter
     var tb: [ddns_info_policy.len]?*c.blob_attr = .{null};
-    const data_ptr = c.blob_data(msg);
-    const data_len = c.blob_len(msg);
+    const data_ptr = ubox.blobData(msg);
+    const data_len = ubox.blobLen(msg);
     ubox.blobmsgParse(ddns_info_policy[0..], tb[0..], data_ptr, data_len) catch return c.UBUS_STATUS_INVALID_ARGUMENT;
 
     if (tb[0] == null) return c.UBUS_STATUS_INVALID_ARGUMENT;
-    const name_cstr = c.blobmsg_get_string(tb[0].?);
+    const name_cstr = ubox.blobmsgGetString(tb[0].?);
     const name = std.mem.span(name_cstr);
 
     // Clear logs
@@ -1137,8 +1138,8 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
     const projects_arr = ubox.blobmsgOpenNested(&buf, field_names.projects, true) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
     if (projects_arr == null) return c.UBUS_STATUS_UNKNOWN_ERROR;
     {
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        state.mutex.lockUncancelable(compat.io());
+        defer state.mutex.unlock(compat.io());
         var i: usize = 0;
         while (i < state.projects.items.len) : (i += 1) {
             const item = ubox.blobmsgOpenNested(&buf, null, false) catch break;
@@ -1406,7 +1407,7 @@ fn addI64(buf: *c.blob_buf, name: [:0]const u8, val: i64) !void {
 }
 
 fn currentTs() u64 {
-    const ts = std.time.timestamp();
-    if (ts < 0) return 0;
-    return @intCast(ts);
+    const seconds = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
+    if (seconds < 0) return 0;
+    return @intCast(seconds);
 }
