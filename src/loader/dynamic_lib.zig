@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const compat = @import("../compat.zig");
 
 /// 动态库加载器，支持自动查找版本化的库文件
 pub const DynamicLibLoader = struct {
@@ -71,11 +72,11 @@ pub const DynamicLibLoader = struct {
         for (standard_paths) |dir| {
             if (std.mem.eql(u8, dir, ".")) continue; // 跳过当前目录的遍历
 
-            var dir_handle = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
-            defer dir_handle.close();
+            var dir_handle = std.Io.Dir.cwd().openDir(compat.io(), dir, .{ .iterate = true }) catch continue;
+            defer dir_handle.close(compat.io());
 
             var it = dir_handle.iterate();
-            while (it.next() catch null) |entry| {
+            while (it.next(compat.io()) catch null) |entry| {
                 if (entry.kind != .file) continue;
 
                 // 检查文件名是否以 lib_name.so 开头
