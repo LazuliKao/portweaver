@@ -557,21 +557,6 @@ static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
     buf->len = 0;
 }
 
-// UDP buffer allocation callback (optimized for typical UDP packet size)
-// #define UDP_BUFFER_SIZE 65536 // Max UDP datagram size
-static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
-{
-    if (handle && handle->data)
-    {
-        struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
-        buf->base = (char *)DATA_ALLOC(fwd, suggested_size);
-        buf->len = suggested_size;
-        return;
-    }
-    buf->base = NULL;
-    buf->len = 0;
-}
-
 // Compare two sockaddr structures for equality (supports IPv4 and IPv6)
 static int sockaddr_equal(const struct sockaddr *a, const struct sockaddr *b)
 {
@@ -885,6 +870,32 @@ typedef struct udp_client_session
     int expected_close_count; // number of handles expected to close before free
     int tracked_in_forwarder; // whether session has been added to list/hash + active_sessions
 } udp_client_session_t;
+
+// UDP buffer allocation callback. The UDP listener stores a udp_forwarder_t in
+// handle->data, while per-client target sockets store udp_client_session_t.
+static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
+{
+    if (handle && handle->data)
+    {
+        udp_forwarder_t *fwd = (udp_forwarder_t *)handle->data;
+        if (handle == (uv_handle_t *)&fwd->server)
+        {
+            buf->base = (char *)DATA_ALLOC(fwd, suggested_size);
+            buf->len = suggested_size;
+            return;
+        }
+
+        udp_client_session_t *session = (udp_client_session_t *)handle->data;
+        if (handle == (uv_handle_t *)&session->sock && session->fwd)
+        {
+            buf->base = (char *)DATA_ALLOC(session->fwd, suggested_size);
+            buf->len = suggested_size;
+            return;
+        }
+    }
+    buf->base = NULL;
+    buf->len = 0;
+}
 
 #ifdef DEBUG
 // 5s
