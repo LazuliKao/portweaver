@@ -31,7 +31,7 @@ pub const TcpForwarder = struct {
         enable_stats: bool,
         out_error_code: *i32,
     ) !void {
-        const target_z = self.allocator.dupeZ(u8, target_address) catch unreachable;
+        const target_z = try self.allocator.dupeZ(u8, target_address);
         defer self.allocator.free(target_z);
 
         const c_family: c.addr_family_t = switch (family) {

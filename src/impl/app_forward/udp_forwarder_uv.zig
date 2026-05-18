@@ -38,7 +38,7 @@ pub const UdpForwarder = struct {
             .any => c.ADDR_FAMILY_ANY,
         };
 
-        const target_host_z = self.allocator.dupeZ(u8, target_address) catch unreachable;
+        const target_host_z = try self.allocator.dupeZ(u8, target_address);
         defer self.allocator.free(target_host_z);
 
         const fwd_allocator = uv.buildAllocator(&self.allocator);
