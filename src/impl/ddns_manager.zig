@@ -1,8 +1,6 @@
 const std = @import("std");
 const types = @import("../config/types.zig");
 const libddns = @import("ddns/libddns.zig");
-const main = @import("../main.zig");
-const event_log = main.event_log;
 const compat = @import("../compat.zig");
 
 pub const DdnsStatus = struct {

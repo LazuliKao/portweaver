@@ -1,6 +1,5 @@
 const std = @import("std");
 const types = @import("../config/types.zig");
-const server = @import("../ubus/server.zig");
 const project_status = @import("project_status.zig");
 const common = @import("app_forward/common.zig");
 const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");

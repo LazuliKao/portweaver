@@ -3,8 +3,7 @@ const types = @import("../config/types.zig");
 const project_status = @import("project_status.zig");
 const libfrp = @import("frpc/libfrpc.zig");
 const common = @import("app_forward/common.zig");
-const main = @import("../main.zig");
-const event_log = main.event_log;
+const event_log = @import("../event_log.zig");
 const build_options = @import("build_options");
 const compat = @import("../compat.zig");
 
