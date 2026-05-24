@@ -36,13 +36,21 @@ const RuntimeState = struct {
 
     pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
+        errdefer allocator.destroy(state);
+
         const now = currentTs();
+        const enabled = try allocator.alloc(bool, projects.items.len);
+        errdefer allocator.free(enabled);
+
+        const last_changed = try allocator.alloc(u64, projects.items.len);
+        errdefer allocator.free(last_changed);
+
         state.* = .{
             .allocator = allocator,
             .start_ts = now,
             .projects = projects,
-            .enabled = try allocator.alloc(bool, projects.items.len),
-            .last_changed = try allocator.alloc(u64, projects.items.len),
+            .enabled = enabled,
+            .last_changed = last_changed,
         };
 
         for (projects.items, 0..) |project, idx| {
