@@ -229,13 +229,15 @@ pub fn stop() void {
     const ctx_to_shutdown = g_ctx;
     const thread_to_join = g_thread;
     g_thread = null;
-    g_lifecycle_mutex.unlock(compat.io());
 
+    // Keep the lifecycle lock while shutting down the context so the UBUS
+    // thread cannot clear/free g_ctx between taking the snapshot and using it.
     if (ctx_to_shutdown) |ctx| {
         ubus.ubus_shutdown(ctx) catch |err| {
             std.log.warn("ubus: shutdown failed: {any}", .{err});
         };
     }
+    g_lifecycle_mutex.unlock(compat.io());
 
     if (thread_to_join) |thread| {
         thread.join();
@@ -276,12 +278,15 @@ fn ubusThread(state: *RuntimeState) void {
     g_lifecycle_mutex.unlock(compat.io());
     defer {
         g_lifecycle_mutex.lockUncancelable(compat.io());
-        g_ctx = null;
+        if (g_ctx == ctx) {
+            g_ctx = null;
+        }
         g_lifecycle_mutex.unlock(compat.io());
+
+        ubus.ubus_free(ctx) catch |err| {
+            std.log.warn("ubus: free context failed: {any}", .{err});
+        };
     }
-    defer ubus.ubus_free(ctx) catch |err| {
-        std.log.warn("ubus: free context failed: {any}", .{err});
-    };
 
     const commonMethods = [_]c.ubus_method{
         .{
