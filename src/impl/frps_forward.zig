@@ -3,6 +3,7 @@ const types = @import("../config/types.zig");
 const project_status = @import("project_status.zig");
 const libfrps = @import("frps/libfrps.zig");
 const common = @import("app_forward/common.zig");
+const frp_common = @import("frp_common.zig");
 const compat = @import("../compat.zig");
 const build_options = @import("build_options");
 
@@ -219,7 +220,7 @@ pub fn getServerStatus(allocator: std.mem.Allocator, node_name: []const u8) !str
     const logs = try holder.server.getLogs(allocator);
     errdefer allocator.free(logs);
 
-    const parsed = try parseStatusJson(allocator, status_json);
+    const parsed = try frp_common.parseStatusJson(allocator, status_json);
     // Note: logs is already owned by caller, parsed.status and parsed.last_error also owned
 
     return .{
@@ -283,39 +284,6 @@ pub fn clearServerLogs(node_name: []const u8) void {
 
     holder.server.clearLogs();
     std.log.debug("[FRPS] Logs cleared for server {s}", .{node_name});
-}
-
-/// Parse the status JSON from FrpsGetStatus
-fn parseStatusJson(allocator: std.mem.Allocator, json: []const u8) !struct {
-    status: []const u8,
-    last_error: []const u8,
-} {
-    // Simple JSON parsing for {"status":"...","last_error":"..."}
-    // We use a basic approach since std.json might not be available in all builds
-
-    var status: []const u8 = "unknown";
-    var last_error: []const u8 = "";
-
-    // Find "status":"..."
-    if (std.mem.indexOf(u8, json, "\"status\":\"")) |start| {
-        const value_start = start + 10; // length of "status":"
-        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
-            status = json[value_start..end];
-        }
-    }
-
-    // Find "last_error":"..."
-    if (std.mem.indexOf(u8, json, "\"last_error\":\"")) |start| {
-        const value_start = start + 14; // length of "last_error":"
-        if (std.mem.indexOfPos(u8, json, value_start, "\"")) |end| {
-            last_error = json[value_start..end];
-        }
-    }
-
-    return .{
-        .status = try allocator.dupe(u8, status),
-        .last_error = try allocator.dupe(u8, last_error),
-    };
 }
 
 pub const ServerSummary = struct {

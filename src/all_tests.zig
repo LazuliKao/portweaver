@@ -15,6 +15,7 @@ test {
     _ = @import("./process_lock_test.zig");
     _ = @import("./uci/mod.zig");
     _ = @import("./impl/project_status.zig");
+    _ = @import("./impl/frp_common.zig");
     _ = @import("./impl/frps_forward.zig");
     _ = @import("./impl/app_forward/common.zig");
 
