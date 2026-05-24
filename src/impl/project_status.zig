@@ -72,20 +72,44 @@ pub const ProjectHandle = struct {
         };
     }
     pub fn deinit(self: *ProjectHandle) void {
-        for (self.tcp_forwarders.items) |fwd| {
+        self.lock.lockUncancelable(compat.io());
+        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            std.log.err("Failed to snapshot TCP forwarders for project {d}: {}", .{ self.id, err });
+            return;
+        };
+        defer self.allocator.free(tcp_forwarders);
+
+        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            std.log.err("Failed to snapshot UDP forwarders for project {d}: {}", .{ self.id, err });
+            return;
+        };
+        defer self.allocator.free(udp_forwarders);
+        self.lock.unlock(compat.io());
+
+        for (tcp_forwarders) |fwd| {
             fwd.stop();
         }
-        for (self.udp_forwarders.items) |fwd| {
+        for (udp_forwarders) |fwd| {
             fwd.stop();
         }
+
         // up to 5s
         const rate = 10;
         for (0..10 * rate) |_| {
-            if (self.tcp_forwarders.items.len == 0 and self.udp_forwarders.items.len == 0) {
+            self.lock.lockUncancelable(compat.io());
+            const stopped = self.tcp_forwarders.items.len == 0 and self.udp_forwarders.items.len == 0;
+            self.lock.unlock(compat.io());
+
+            if (stopped) {
                 break;
             }
             compat.sleepNanos(std.time.ns_per_s / rate);
         }
+
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
     }
@@ -157,7 +181,7 @@ pub const ProjectHandle = struct {
         try self.udp_forwarders.append(fwd);
     }
 
-    pub fn getProjectStats(self: *ProjectHandle) TrafficStats {
+    fn collectProjectStatsLocked(self: *ProjectHandle) TrafficStats {
         var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0 };
         // Sum stats from all TCP forwarders
         for (self.tcp_forwarders.items) |fwd| {
@@ -174,8 +198,18 @@ pub const ProjectHandle = struct {
         return stats;
     }
 
+    pub fn getProjectStats(self: *ProjectHandle) TrafficStats {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+
+        return self.collectProjectStatsLocked();
+    }
+
     pub fn getProjectRuntimeInfo(self: *ProjectHandle) ProjectRuntimeInfo {
-        const s = self.getProjectStats();
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+
+        const s = self.collectProjectStatsLocked();
         return .{
             .active_ports = self.active_ports,
             .bytes_in = s.bytes_in,
@@ -245,10 +279,26 @@ pub const ProjectHandle = struct {
             } else {
                 std.log.info("Project {d} ({s}) runtime disabled - stopping forwarders", .{ self.id, self.cfg.remark });
                 // Stop all forwarders
-                for (self.tcp_forwarders.items) |fwd| {
+                self.lock.lockUncancelable(compat.io());
+                const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
+                    self.lock.unlock(compat.io());
+                    std.log.err("Failed to snapshot TCP forwarders for project {d}: {}", .{ self.id, err });
+                    return;
+                };
+                const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
+                    self.lock.unlock(compat.io());
+                    self.allocator.free(tcp_forwarders);
+                    std.log.err("Failed to snapshot UDP forwarders for project {d}: {}", .{ self.id, err });
+                    return;
+                };
+                self.lock.unlock(compat.io());
+                defer self.allocator.free(tcp_forwarders);
+                defer self.allocator.free(udp_forwarders);
+
+                for (tcp_forwarders) |fwd| {
                     fwd.stop();
                 }
-                for (self.udp_forwarders.items) |fwd| {
+                for (udp_forwarders) |fwd| {
                     fwd.stop();
                 }
             }
