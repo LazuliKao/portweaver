@@ -5,6 +5,7 @@ const app_forward = @import("impl/app_forward.zig");
 const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig") else struct {};
 const frps_forward = if (build_options.frps_mode) @import("impl/frps_forward.zig") else struct {};
+const libfrpc = if (build_options.frpc_mode) @import("impl/frpc/libfrpc.zig") else struct {};
 const libfrps = if (build_options.frps_mode) @import("impl/frps/libfrps.zig") else struct {};
 const project_status = @import("impl/project_status.zig");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
@@ -84,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
         handles.deinit();
         if (build_options.frpc_mode) {
             frpc_forward.stopAll();
+            libfrpc.cleanup();
         }
         if (build_options.ddns_mode) {
             ddns_manager.deinit(allocator);
