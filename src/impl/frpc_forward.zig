@@ -286,7 +286,16 @@ pub fn getAggregatedStatus(allocator: std.mem.Allocator) !struct {
             has_error = true;
             if (parsed.last_error.len > 0) {
                 // Log the error to the event log
-                event_log.logEvent(.frpc_error, parsed.last_error, -1);
+                const sanitized_error = frp_common.sanitizeErrorForLog(allocator, parsed.last_error) catch blk: {
+                    const fallback = "[redacted sensitive frp error]";
+                    std.log.warn("[FRPC] Failed to sanitize error for event log: {any}", .{err});
+                    event_log.logEvent(.frpc_error, fallback, -1);
+                    break :blk null;
+                };
+                if (sanitized_error) |message| {
+                    defer allocator.free(message);
+                    event_log.logEvent(.frpc_error, message, -1);
+                }
                 // Keep the latest non-empty error
                 if (last_error_msg.len > 0) allocator.free(last_error_msg);
                 last_error_msg = allocator.dupe(u8, parsed.last_error) catch "";
