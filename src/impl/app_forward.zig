@@ -109,7 +109,12 @@ fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandle, allocator: 
         return;
     };
 
-    const tcp_thread = try std.Thread.spawn(getThreadConfig(), loopTcpForward, .{ projectHandle, fwd });
+    projectHandle.beginForwarderWorker();
+    const tcp_thread = std.Thread.spawn(getThreadConfig(), loopTcpForward, .{ projectHandle, fwd }) catch |err| {
+        projectHandle.finishForwarderWorker();
+        fwd.deinit();
+        return err;
+    };
     tcp_thread.detach();
 }
 
@@ -119,21 +124,33 @@ fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, allocator: 
         return;
     };
 
-    const udp_thread = try std.Thread.spawn(getThreadConfig(), loopUdpForward, .{ projectHandle, fwd });
+    projectHandle.beginForwarderWorker();
+    const udp_thread = std.Thread.spawn(getThreadConfig(), loopUdpForward, .{ projectHandle, fwd }) catch |err| {
+        projectHandle.finishForwarderWorker();
+        fwd.deinit();
+        return err;
+    };
     udp_thread.detach();
 }
 
 fn loopTcpForward(projectHandle: *project_status.ProjectHandle, tcp_forwarder: *TcpForwarder) void {
     std.log.debug("[TcpForward] Thread started", .{});
+    var registered = false;
     defer {
-        projectHandle.deregisterTcpHandle(tcp_forwarder) catch {};
+        if (registered) {
+            projectHandle.deregisterTcpHandle(tcp_forwarder) catch |err| {
+                std.log.warn("[TCP] Failed to deregister forwarder: {any}", .{err});
+            };
+        }
         tcp_forwarder.deinit();
+        projectHandle.finishForwarderWorker();
     }
     projectHandle.registerTcpHandle(tcp_forwarder) catch |err| {
         std.log.debug("[TCP] Failed to register forwarder: {any}", .{err});
         projectHandle.setStartupFailed();
         return;
     };
+    registered = true;
     tcp_forwarder.start(projectHandle) catch |err| {
         std.log.debug("[TCP] Failed to start forwarder: {any}", .{err});
         projectHandle.setStartupFailed();
@@ -144,15 +161,22 @@ fn loopTcpForward(projectHandle: *project_status.ProjectHandle, tcp_forwarder: *
 
 fn loopUdpForward(projectHandle: *project_status.ProjectHandle, udp_forwarder: *UdpForwarder) void {
     std.log.debug("[UdpForward] Thread started", .{});
+    var registered = false;
     defer {
-        projectHandle.deregisterUdpHandle(udp_forwarder) catch {};
+        if (registered) {
+            projectHandle.deregisterUdpHandle(udp_forwarder) catch |err| {
+                std.log.warn("[UDP] Failed to deregister forwarder: {any}", .{err});
+            };
+        }
         udp_forwarder.deinit();
+        projectHandle.finishForwarderWorker();
     }
     projectHandle.registerUdpHandle(udp_forwarder) catch |err| {
         std.log.debug("[UDP] Failed to register forwarder: {any}", .{err});
         projectHandle.setStartupFailed();
         return;
     };
+    registered = true;
     udp_forwarder.start(projectHandle) catch |err| {
         std.log.debug("[UDP] Failed to start forwarder: {any}", .{err});
         projectHandle.setStartupFailed();

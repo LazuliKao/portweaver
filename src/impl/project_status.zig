@@ -57,6 +57,8 @@ pub const ProjectHandle = struct {
     active_ports: u32 = 0,
     id: usize,
     runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    active_workers: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     runtime_enabled_lock: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandle {
@@ -72,17 +74,41 @@ pub const ProjectHandle = struct {
         };
     }
     pub fn deinit(self: *ProjectHandle) void {
+        self.shutting_down.store(true, .seq_cst);
+
         self.lock.lockUncancelable(compat.io());
         const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
             std.log.err("Failed to snapshot TCP forwarders for project {d}: {}", .{ self.id, err });
+            for (self.tcp_forwarders.items) |fwd| {
+                fwd.stop();
+            }
+            for (self.udp_forwarders.items) |fwd| {
+                fwd.stop();
+            }
+            self.lock.unlock(compat.io());
+            self.waitForForwardersStopped();
+            self.lock.lockUncancelable(compat.io());
+            defer self.lock.unlock(compat.io());
+            self.tcp_forwarders.deinit();
+            self.udp_forwarders.deinit();
             return;
         };
         defer self.allocator.free(tcp_forwarders);
 
         const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
             std.log.err("Failed to snapshot UDP forwarders for project {d}: {}", .{ self.id, err });
+            for (self.udp_forwarders.items) |fwd| {
+                fwd.stop();
+            }
+            self.lock.unlock(compat.io());
+            for (tcp_forwarders) |fwd| {
+                fwd.stop();
+            }
+            self.waitForForwardersStopped();
+            self.lock.lockUncancelable(compat.io());
+            defer self.lock.unlock(compat.io());
+            self.tcp_forwarders.deinit();
+            self.udp_forwarders.deinit();
             return;
         };
         defer self.allocator.free(udp_forwarders);
@@ -95,18 +121,7 @@ pub const ProjectHandle = struct {
             fwd.stop();
         }
 
-        // up to 5s
-        const rate = 10;
-        for (0..10 * rate) |_| {
-            self.lock.lockUncancelable(compat.io());
-            const stopped = self.tcp_forwarders.items.len == 0 and self.udp_forwarders.items.len == 0;
-            self.lock.unlock(compat.io());
-
-            if (stopped) {
-                break;
-            }
-            compat.sleepNanos(std.time.ns_per_s / rate);
-        }
+        self.waitForForwardersStopped();
 
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
@@ -161,6 +176,7 @@ pub const ProjectHandle = struct {
     pub inline fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
+        if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;
         defer self.updateRuntimeStatus();
         self.active_ports += 1;
         try self.tcp_forwarders.append(fwd);
@@ -176,9 +192,31 @@ pub const ProjectHandle = struct {
     pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
+        if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;
         defer self.updateRuntimeStatus();
         self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
+    }
+
+    pub inline fn beginForwarderWorker(self: *ProjectHandle) void {
+        _ = self.active_workers.fetchAdd(1, .seq_cst);
+    }
+
+    pub inline fn finishForwarderWorker(self: *ProjectHandle) void {
+        _ = self.active_workers.fetchSub(1, .seq_cst);
+    }
+
+    fn waitForForwardersStopped(self: *ProjectHandle) void {
+        while (true) {
+            self.lock.lockUncancelable(compat.io());
+            const stopped = self.tcp_forwarders.items.len == 0 and
+                self.udp_forwarders.items.len == 0 and
+                self.active_workers.load(.seq_cst) == 0;
+            self.lock.unlock(compat.io());
+
+            if (stopped) return;
+            compat.sleepNanos(std.time.ns_per_ms * 100);
+        }
     }
 
     fn collectProjectStatsLocked(self: *ProjectHandle) TrafficStats {
