@@ -23,6 +23,7 @@ const uloop_init_fn = *const fn () callconv(.c) c_int;
 const uloop_run_timeout_fn = *const fn (c_int) callconv(.c) c_int;
 const uloop_done_fn = *const fn () callconv(.c) void;
 const uloop_fd_add_fn = *const fn (*c.uloop_fd, c_uint) callconv(.c) c_int;
+const uloop_cancelled_ptr = *c.bool;
 
 var lib_loader = DynamicLibLoader.init();
 var fn_blob_buf_init: ?blob_buf_init_fn = null;
@@ -35,6 +36,7 @@ var fn_uloop_init: ?uloop_init_fn = null;
 var fn_uloop_run_timeout: ?uloop_run_timeout_fn = null;
 var fn_uloop_done: ?uloop_done_fn = null;
 var fn_uloop_fd_add: ?uloop_fd_add_fn = null;
+var ptr_uloop_cancelled: ?uloop_cancelled_ptr = null;
 
 fn ensureLibLoaded() !void {
     if (lib_loader.isLoaded()) return;
@@ -154,4 +156,11 @@ pub fn uloopDone() !void {
 pub fn uloopFdAdd(fd: *c.uloop_fd, flags: c_uint) !void {
     const func = try loadFunction(uloop_fd_add_fn, "uloop_fd_add", &fn_uloop_fd_add);
     if (func(fd, flags) != 0) return error.UloopAddFdFailed;
+}
+
+pub fn uloopCancel() !void {
+    // uloop_end() is a static inline in libubox/uloop.h; setting the exported
+    // cancellation flag is the equivalent operation available at runtime.
+    const ptr = try loadFunction(uloop_cancelled_ptr, "uloop_cancelled", &ptr_uloop_cancelled);
+    ptr.* = true;
 }

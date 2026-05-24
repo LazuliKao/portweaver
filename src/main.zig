@@ -77,6 +77,9 @@ pub fn main(init: std.process.Init) !void {
 
     var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
     defer {
+        if (build_options.ubus_mode) {
+            ubus_server.stop();
+        }
         project_status.stopAll(&handles);
         handles.deinit();
         if (build_options.frpc_mode) {
@@ -95,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
 
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, handles) catch |err| {
+        ubus_server.start(allocator, &handles) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
         };
     }

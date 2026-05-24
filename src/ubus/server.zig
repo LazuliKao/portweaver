@@ -29,12 +29,12 @@ const GlobalSnapshot = struct {
 const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
-    projects: std.array_list.Managed(project_status.ProjectHandle),
+    projects: *std.array_list.Managed(project_status.ProjectHandle),
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Io.Mutex = .init,
 
-    pub fn init(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         const now = currentTs();
         state.* = .{
@@ -107,6 +107,9 @@ const RuntimeState = struct {
 };
 
 var g_state: ?*RuntimeState = null;
+var g_ctx: ?*c.ubus_context = null;
+var g_thread: ?std.Thread = null;
+var g_lifecycle_mutex: std.Io.Mutex = .init;
 
 const set_enabled_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
@@ -201,13 +204,52 @@ const field_names = struct {
     pub const version: [:0]const u8 = "version";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: std.array_list.Managed(project_status.ProjectHandle)) !void {
+pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !void {
+    g_lifecycle_mutex.lockUncancelable(compat.io());
+    defer g_lifecycle_mutex.unlock(compat.io());
+
     if (g_state != null) return;
     const state = try RuntimeState.init(allocator, projects);
     g_state = state;
+    errdefer {
+        g_state = null;
+        state.deinit();
+    }
 
     const thread = try std.Thread.spawn(.{}, ubusThread, .{state});
-    thread.detach();
+    g_thread = thread;
+}
+
+pub fn stop() void {
+    ubox.uloopCancel() catch |err| {
+        std.log.warn("ubus: failed to cancel uloop: {any}", .{err});
+    };
+
+    g_lifecycle_mutex.lockUncancelable(compat.io());
+    const ctx_to_shutdown = g_ctx;
+    const thread_to_join = g_thread;
+    g_thread = null;
+    g_lifecycle_mutex.unlock(compat.io());
+
+    if (ctx_to_shutdown) |ctx| {
+        ubus.ubus_shutdown(ctx) catch |err| {
+            std.log.warn("ubus: shutdown failed: {any}", .{err});
+        };
+    }
+
+    if (thread_to_join) |thread| {
+        thread.join();
+    }
+
+    g_lifecycle_mutex.lockUncancelable(compat.io());
+    defer g_lifecycle_mutex.unlock(compat.io());
+
+    if (g_state) |state| {
+        g_state = null;
+        state.deinit();
+    }
+
+    g_ctx = null;
 }
 
 fn ubusThread(state: *RuntimeState) void {
@@ -215,6 +257,9 @@ fn ubusThread(state: *RuntimeState) void {
     ubox.uloopInit() catch |err| {
         std.log.warn("ubus: failed to init uloop: {any}", .{err});
         return;
+    };
+    defer ubox.uloopDone() catch |err| {
+        std.log.warn("ubus: failed to cleanup uloop: {any}", .{err});
     };
 
     const ctx_opt = ubus.ubus_connect(null) catch |err| blk: {
@@ -226,6 +271,17 @@ fn ubusThread(state: *RuntimeState) void {
         return;
     }
     const ctx = ctx_opt.?;
+    g_lifecycle_mutex.lockUncancelable(compat.io());
+    g_ctx = ctx;
+    g_lifecycle_mutex.unlock(compat.io());
+    defer {
+        g_lifecycle_mutex.lockUncancelable(compat.io());
+        g_ctx = null;
+        g_lifecycle_mutex.unlock(compat.io());
+    }
+    defer ubus.ubus_free(ctx) catch |err| {
+        std.log.warn("ubus: free context failed: {any}", .{err});
+    };
 
     const commonMethods = [_]c.ubus_method{
         .{
@@ -381,21 +437,17 @@ fn ubusThread(state: *RuntimeState) void {
 
     _ = ubus.ubus_add_object(ctx, &obj) catch |err| {
         std.log.warn("ubus: add object failed: {any}", .{err});
-        ubus.ubus_free(ctx) catch {};
         return;
     };
 
     ubox.uloopFdAdd(&ctx.sock, @intCast(c.ULOOP_BLOCKING | c.ULOOP_READ)) catch |err| {
         std.log.warn("ubus: add fd failed: {any}", .{err});
-        ubus.ubus_free(ctx) catch {};
         return;
     };
 
     std.log.info("ubus: server started successfully.", .{});
 
     ubox.uloopRun(-1) catch {};
-    ubus.ubus_free(ctx) catch {};
-    ubox.uloopDone() catch {};
 }
 
 fn handleGetStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]c.ubus_request_data, method: [*c]const u8, msg: [*c]c.blob_attr) callconv(.c) c_int {
