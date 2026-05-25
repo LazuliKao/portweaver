@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const DynamicLibLoader = @import("../loader/dynamic_lib.zig").DynamicLibLoader;
 
 pub const c = @cImport({
@@ -26,7 +27,7 @@ const uloop_fd_add_fn = *const fn (*c.uloop_fd, c_uint) callconv(.c) c_int;
 const uloop_cancelled_ptr = *c.bool;
 
 var lib_loader = DynamicLibLoader.init();
-var load_mutex: std.Thread.Mutex = .{};
+var load_mutex: std.Io.Mutex = .init;
 var fn_blob_buf_init: ?blob_buf_init_fn = null;
 var fn_blob_buf_free: ?blob_buf_free_fn = null;
 var fn_blobmsg_add_field: ?blobmsg_add_field_fn = null;
@@ -46,8 +47,8 @@ fn ensureLibLoaded() !void {
 
 fn loadFunction(comptime T: type, comptime name: [:0]const u8, cache: *?T) !T {
     if (cache.*) |func| return func;
-    load_mutex.lock();
-    defer load_mutex.unlock();
+    load_mutex.lockUncancelable(compat.io());
+    defer load_mutex.unlock(compat.io());
 
     if (cache.*) |func| return func;
     try ensureLibLoaded();
