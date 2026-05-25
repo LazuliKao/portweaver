@@ -256,19 +256,42 @@ fn detectCustomGoBin(b: *std.Build, host_os: std.Target.Os.Tag, go_root_path: []
     else
         b.pathJoin(&.{ go_root_path, "bin", "go" });
 
-    if (std.Io.Dir.cwd().access(b.graph.io, default_go_bin, .{})) |_| {
+    if (customGoRootComplete(b, go_root_path) and pathExists(b, default_go_bin)) {
         return default_go_bin;
-    } else |_| {}
+    }
 
     // Windows zip often extracts under a top-level "go" folder.
     if (host_os == .windows) {
+        const nested_go_root = b.pathJoin(&.{ go_root_path, "go" });
         const nested_go_bin = b.pathJoin(&.{ go_root_path, "go", "bin", "go.exe" });
-        if (std.Io.Dir.cwd().access(b.graph.io, nested_go_bin, .{})) |_| {
+        if (customGoRootComplete(b, nested_go_root) and pathExists(b, nested_go_bin)) {
             return nested_go_bin;
-        } else |_| {}
+        }
     }
 
     return null;
+}
+
+fn pathExists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
+    return true;
+}
+
+fn customGoRootComplete(b: *std.Build, go_root_path: []const u8) bool {
+    const required_paths = [_][]const u8{
+        "src/unsafe/unsafe.go",
+        "src/runtime/runtime.go",
+        "src/sync/mutex.go",
+        "src/net/net.go",
+        "src/math/bits/bits.go",
+    };
+
+    for (required_paths) |required_path| {
+        const path = b.pathJoin(&.{ go_root_path, required_path });
+        if (!pathExists(b, path)) return false;
+    }
+
+    return true;
 }
 
 fn downloadFileWithFallback(b: *std.Build, host_os: std.Target.Os.Tag, url: []const u8, output_path: []const u8) void {
@@ -358,6 +381,9 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
     {
         // Need to download Go toolchain synchronously at config time
         std.debug.print("Downloading patched Go 1.25.7 for musl builds...\n", .{});
+        std.Io.Dir.cwd().deleteTree(b.graph.io, go_root_path) catch |err| {
+            std.debug.print("Warning: failed to clean incomplete Go toolchain cache: {}\n", .{err});
+        };
         const tarball_ext = if (host_os == .windows) ".zip" else ".tar.gz";
         const temp_tarball = b.cache_root.join(b.allocator, &.{b.fmt("portweaver-go{s}", .{tarball_ext})}) catch @panic("OOM");
         const temp_tarball_path = b.path(temp_tarball).getPath(b);
@@ -423,6 +449,10 @@ fn addGoLibrary(
 ) *std.Build.Step {
     const os_tag = target.result.os.tag;
     const arch_tag = target.result.cpu.arch;
+
+    if (!goCArchiveSupported(os_tag, arch_tag)) {
+        return &b.addFail("Go -buildmode=c-archive is not supported for this target; disable -Dfrpc/-Dfrps/-Dddns or choose a supported architecture").step;
+    }
 
     // Check if we should use custom Go toolchain for musl targets
     const use_custom_go = target.result.abi.isMusl() and
@@ -623,6 +653,25 @@ fn addGoLibrary(
     go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
     go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     return &go_cmd.step;
+}
+
+fn goCArchiveSupported(os_tag: std.Target.Os.Tag, arch_tag: std.Target.Cpu.Arch) bool {
+    return switch (os_tag) {
+        .linux => switch (arch_tag) {
+            .x86,
+            .x86_64,
+            .arm,
+            .aarch64,
+            .loongarch64,
+            .powerpc64,
+            .powerpc64le,
+            .riscv64,
+            .s390x,
+            => true,
+            else => false,
+        },
+        else => true,
+    };
 }
 
 const LibResult = struct { step: *std.Build.Step, dir: std.Build.LazyPath, libname: []const u8, libfilename: []const u8 };
