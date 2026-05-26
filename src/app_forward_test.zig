@@ -3,7 +3,9 @@ const testing = std.testing;
 
 const types = @import("./config/types.zig");
 const app_forward = @import("./impl/app_forward.zig");
+const loop_manager = @import("./impl/app_forward/loop_manager.zig");
 const project_status = @import("./impl/project_status.zig");
+const uv = @import("./impl/app_forward/uv.zig");
 const compat = @import("./compat.zig");
 
 const run_duration_ns = 1 * std.time.ns_per_s;
@@ -20,14 +22,68 @@ fn testTargetPort(id: u16, offset: u16) u16 {
 
 const TcpRunContext = struct {
     handle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
     forwarder: *app_forward.TcpForwarder,
     start_error: ?anyerror = null,
 };
 
 const UdpRunContext = struct {
     handle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
     forwarder: *app_forward.UdpForwarder,
     start_error: ?anyerror = null,
+};
+
+const TcpCreateContext = struct {
+    allocator: std.mem.Allocator,
+    handle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
+    listen_port: u16,
+    target_port: u16,
+    forwarder: ?*app_forward.TcpForwarder = null,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        ctx.forwarder = try app_forward.TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.handle, token, ctx.listen_port, ctx.target_port);
+    }
+};
+
+const UdpCreateContext = struct {
+    allocator: std.mem.Allocator,
+    handle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
+    listen_port: u16,
+    target_port: u16,
+    forwarder: ?*app_forward.UdpForwarder = null,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        ctx.forwarder = try app_forward.UdpForwarder.createOnRuntimeThread(ctx.allocator, ctx.handle, token, ctx.listen_port, ctx.target_port);
+    }
+};
+
+const TcpDestroyContext = struct {
+    runtime: *loop_manager.LoopRuntime,
+    forwarder: *app_forward.TcpForwarder,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        ctx.forwarder.destroyOnRuntimeThread(token);
+    }
+};
+
+const UdpDestroyContext = struct {
+    runtime: *loop_manager.LoopRuntime,
+    forwarder: *app_forward.UdpForwarder,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        ctx.forwarder.destroyOnRuntimeThread(token);
+    }
 };
 
 const UdpEchoServerContext = struct {
@@ -56,6 +112,46 @@ const TcpPeerCloseClientContext = struct {
 fn cleanupProjectHandle(handle: *project_status.ProjectHandle) void {
     handle.deinit();
     handle.cfg.deinit(handle.allocator);
+}
+
+fn createTcpForwarderOnRuntime(allocator: std.mem.Allocator, handle: *project_status.ProjectHandle, runtime: *loop_manager.LoopRuntime, listen_port: u16, target_port: u16) !*app_forward.TcpForwarder {
+    var ctx = TcpCreateContext{
+        .allocator = allocator,
+        .handle = handle,
+        .runtime = runtime,
+        .listen_port = listen_port,
+        .target_port = target_port,
+    };
+    try runtime.marshal(.{ .callback = TcpCreateContext.run, .context = &ctx });
+    return ctx.forwarder.?;
+}
+
+fn createUdpForwarderOnRuntime(allocator: std.mem.Allocator, handle: *project_status.ProjectHandle, runtime: *loop_manager.LoopRuntime, listen_port: u16, target_port: u16) !*app_forward.UdpForwarder {
+    var ctx = UdpCreateContext{
+        .allocator = allocator,
+        .handle = handle,
+        .runtime = runtime,
+        .listen_port = listen_port,
+        .target_port = target_port,
+    };
+    try runtime.marshal(.{ .callback = UdpCreateContext.run, .context = &ctx });
+    return ctx.forwarder.?;
+}
+
+fn destroyTcpForwarderOnRuntime(runtime: *loop_manager.LoopRuntime, forwarder: *app_forward.TcpForwarder) void {
+    var ctx = TcpDestroyContext{ .runtime = runtime, .forwarder = forwarder };
+    runtime.marshal(.{ .callback = TcpDestroyContext.run, .context = &ctx }) catch |err| {
+        std.log.err("Failed to destroy TCP forwarder on runtime thread: {}", .{err});
+    };
+    forwarder.destroyWrapper();
+}
+
+fn destroyUdpForwarderOnRuntime(runtime: *loop_manager.LoopRuntime, forwarder: *app_forward.UdpForwarder) void {
+    var ctx = UdpDestroyContext{ .runtime = runtime, .forwarder = forwarder };
+    runtime.marshal(.{ .callback = UdpDestroyContext.run, .context = &ctx }) catch |err| {
+        std.log.err("Failed to destroy UDP forwarder on runtime thread: {}", .{err});
+    };
+    forwarder.destroyWrapper();
 }
 
 fn makeSinglePortHandle(
@@ -143,7 +239,16 @@ fn makeRangeMappingHandle(
 }
 
 fn tcpStartThread(ctx: *TcpRunContext) void {
-    ctx.forwarder.start(ctx.handle) catch |err| {
+    ctx.runtime.marshal(.{
+        .callback = struct {
+            fn run(ptr: *anyopaque) !void {
+                const start_ctx: *TcpRunContext = @ptrCast(@alignCast(ptr));
+                const token = uv.runtimeToken(start_ctx.runtime.ctx.?);
+                try start_ctx.forwarder.startOnRuntimeThread(token, start_ctx.handle);
+            }
+        }.run,
+        .context = ctx,
+    }) catch |err| {
         ctx.start_error = err;
         return;
     };
@@ -152,7 +257,16 @@ fn tcpStartThread(ctx: *TcpRunContext) void {
 }
 
 fn udpStartThread(ctx: *UdpRunContext) void {
-    ctx.forwarder.start(ctx.handle) catch |err| {
+    ctx.runtime.marshal(.{
+        .callback = struct {
+            fn run(ptr: *anyopaque) !void {
+                const start_ctx: *UdpRunContext = @ptrCast(@alignCast(ptr));
+                const token = uv.runtimeToken(start_ctx.runtime.ctx.?);
+                try start_ctx.forwarder.startOnRuntimeThread(token, start_ctx.handle);
+            }
+        }.run,
+        .context = ctx,
+    }) catch |err| {
         ctx.start_error = err;
         return;
     };
@@ -168,8 +282,12 @@ test "app forward: tcp forwarder init/deinit no leak" {
     var handle = try makeSinglePortHandle(alloc, 1, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 }
 
 test "app forward: udp forwarder init/deinit no leak" {
@@ -180,8 +298,12 @@ test "app forward: udp forwarder init/deinit no leak" {
     var handle = try makeSinglePortHandle(alloc, 2, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
 }
 
 test "app forward: tcp forwarder reports invalid target address" {
@@ -192,7 +314,11 @@ test "app forward: tcp forwarder reports invalid target address" {
     var handle = try makeSinglePortHandleWithOptions(alloc, 20, .tcp, listen_port, "not-an-ip", target_port, false);
     defer cleanupProjectHandle(&handle);
 
-    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port));
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    try testing.expectError(app_forward.ForwardError.ListenFailed, createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port));
     try testing.expectEqual(project_status.StartupStatus.failed, handle.startup_status);
     try testing.expectEqual(@as(i32, -5), handle.error_code);
 }
@@ -205,7 +331,11 @@ test "app forward: udp forwarder reports invalid target address" {
     var handle = try makeSinglePortHandleWithOptions(alloc, 21, .udp, listen_port, "not-an-ip", target_port, false);
     defer cleanupProjectHandle(&handle);
 
-    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port));
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    try testing.expectError(app_forward.ForwardError.ListenFailed, createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port));
     try testing.expectEqual(project_status.StartupStatus.failed, handle.startup_status);
     try testing.expectEqual(@as(i32, -5), handle.error_code);
 }
@@ -219,8 +349,12 @@ test "app forward: forwarder stats preserve listen port and start at zero" {
 
     var tcp_handle = try makeSinglePortHandleWithOptions(alloc, 22, .tcp, tcp_listen_port, "127.0.0.1", tcp_target_port, true);
     defer cleanupProjectHandle(&tcp_handle);
-    const tcp_forwarder = try app_forward.TcpForwarder.init(alloc, &tcp_handle, tcp_listen_port, tcp_target_port);
-    defer tcp_forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const tcp_forwarder = try createTcpForwarderOnRuntime(alloc, &tcp_handle, &runtime, tcp_listen_port, tcp_target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, tcp_forwarder);
 
     const tcp_stats = tcp_forwarder.getStats();
     try testing.expectEqual(@as(u64, 0), tcp_stats.bytes_in);
@@ -229,8 +363,8 @@ test "app forward: forwarder stats preserve listen port and start at zero" {
 
     var udp_handle = try makeSinglePortHandleWithOptions(alloc, 23, .udp, udp_listen_port, "127.0.0.1", udp_target_port, true);
     defer cleanupProjectHandle(&udp_handle);
-    const udp_forwarder = try app_forward.UdpForwarder.init(alloc, &udp_handle, udp_listen_port, udp_target_port);
-    defer udp_forwarder.deinit();
+    const udp_forwarder = try createUdpForwarderOnRuntime(alloc, &udp_handle, &runtime, udp_listen_port, udp_target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, udp_forwarder);
 
     const udp_stats = udp_forwarder.getStats();
     try testing.expectEqual(@as(u64, 0), udp_stats.bytes_in);
@@ -249,7 +383,11 @@ test "app forward: tcp init returns OutOfMemory when wrapper allocation fails" {
     var failing_allocator = testing.FailingAllocator.init(base_alloc, .{ .fail_index = 1 });
     const alloc = failing_allocator.allocator();
 
-    try testing.expectError(error.OutOfMemory, app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port));
+    var runtime = loop_manager.LoopRuntime.init(base_alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    try testing.expectError(error.OutOfMemory, createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port));
     try testing.expect(failing_allocator.has_induced_failure);
 }
 
@@ -264,7 +402,11 @@ test "app forward: udp init returns OutOfMemory when wrapper allocation fails" {
     var failing_allocator = testing.FailingAllocator.init(base_alloc, .{ .fail_index = 1 });
     const alloc = failing_allocator.allocator();
 
-    try testing.expectError(error.OutOfMemory, app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port));
+    var runtime = loop_manager.LoopRuntime.init(base_alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    try testing.expectError(error.OutOfMemory, createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port));
     try testing.expect(failing_allocator.has_induced_failure);
 }
 
@@ -288,14 +430,18 @@ test "app forward: tcp forwarder runs for 3s then exits cleanly" {
     var handle = try makeSinglePortHandle(alloc, 3, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
 
-    var ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+
+    var ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&ctx});
 
     compat.sleepNanos(run_duration_ns);
-    forwarder.stop();
+    forwarder.requestStop();
     thread.join();
 
     try testing.expect(ctx.start_error == null);
@@ -309,14 +455,18 @@ test "app forward: udp forwarder runs for 3s then exits cleanly" {
     var handle = try makeSinglePortHandle(alloc, 4, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
 
-    var ctx = UdpRunContext{ .handle = &handle, .forwarder = forwarder };
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
+
+    var ctx = UdpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpStartThread, .{&ctx});
 
     compat.sleepNanos(run_duration_ns);
-    forwarder.stop();
+    forwarder.requestStop();
     thread.join();
 
     try testing.expect(ctx.start_error == null);
@@ -362,19 +512,193 @@ test "app forward: project range both runs for 3s then stops" {
     compat.sleepNanos(run_duration_ns);
 }
 
+test "app forward: per_project shared loop hosts two tcp listeners" {
+    const alloc = testing.allocator;
+    const listen_start = testListenPort(40, 0);
+    const target_start = testTargetPort(40, 0);
+    const listen_range = try std.fmt.allocPrint(alloc, "{d}-{d}", .{ listen_start, listen_start + 1 });
+    defer alloc.free(listen_range);
+    const target_range = try std.fmt.allocPrint(alloc, "{d}-{d}", .{ target_start, target_start + 1 });
+    defer alloc.free(target_range);
+
+    var handle = try makeRangeMappingHandle(alloc, 40, .tcp, listen_range, target_range);
+    handle.cfg.app_forward_loop_mode = .per_project;
+
+    var runtime_manager = try loop_manager.LoopManager.init(alloc);
+    defer runtime_manager.deinit();
+    defer handle.cfg.deinit(handle.allocator);
+    defer handle.deinit();
+    defer runtime_manager.releaseProjectRuntime(&handle) catch |err| {
+        std.log.err("failed to release shared loop runtime for project {d}: {}", .{ handle.id, err });
+    };
+
+    var first_echo = TcpSizedEchoServerContext{ .port = target_start, .max_connections = 1 };
+    var second_echo = TcpSizedEchoServerContext{ .port = target_start + 1, .max_connections = 1 };
+    const first_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&first_echo});
+    defer first_echo_thread.join();
+    const second_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&second_echo});
+    defer second_echo_thread.join();
+
+    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expectEqual(@as(u32, 2), handle.active_ports);
+    try testing.expectEqual(@as(usize, 1), runtime_manager.debugRuntimeCount(.per_project));
+
+    const first_response = try tcpClientTest(listen_start, "first shared tcp", std.time.ns_per_s);
+    defer alloc.free(first_response);
+    const second_response = try tcpClientTest(listen_start + 1, "second shared tcp", std.time.ns_per_s);
+    defer alloc.free(second_response);
+
+    try testing.expectEqualStrings("first shared tcp", first_response);
+    try testing.expectEqualStrings("second shared tcp", second_response);
+    try testing.expect(first_echo.start_error == null);
+    try testing.expect(second_echo.start_error == null);
+}
+
+test "app forward: per_project shared loop hosts mixed tcp and udp listeners" {
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(41, 0);
+    const target_port = testTargetPort(41, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 41, .both, listen_port, target_port);
+    handle.cfg.app_forward_loop_mode = .per_project;
+
+    var runtime_manager = try loop_manager.LoopManager.init(alloc);
+    defer runtime_manager.deinit();
+    defer handle.cfg.deinit(handle.allocator);
+    defer handle.deinit();
+    defer runtime_manager.releaseProjectRuntime(&handle) catch |err| {
+        std.log.err("failed to release shared loop runtime for project {d}: {}", .{ handle.id, err });
+    };
+
+    var tcp_echo = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const tcp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&tcp_echo});
+    defer tcp_echo_thread.join();
+    var udp_echo = UdpEchoServerContext{ .port = target_port, .max_messages = 1 };
+    const udp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&udp_echo});
+    defer udp_echo_thread.join();
+
+    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expectEqual(@as(u32, 2), handle.active_ports);
+    try testing.expectEqual(@as(usize, 1), runtime_manager.debugRuntimeCount(.per_project));
+
+    const tcp_response = try tcpClientTest(listen_port, "mixed tcp", std.time.ns_per_s);
+    defer alloc.free(tcp_response);
+    const udp_response = try udpClientTest(listen_port, "mixed udp", std.time.ns_per_s);
+    defer alloc.free(udp_response);
+
+    try testing.expectEqualStrings("mixed tcp", tcp_response);
+    try testing.expectEqualStrings("mixed udp", udp_response);
+    try testing.expect(tcp_echo.start_error == null);
+    try testing.expect(udp_echo.start_error == null);
+}
+
+test "app forward: per_listener compatibility keeps listeners isolated" {
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(42, 0);
+    const target_port = testTargetPort(42, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 42, .both, listen_port, target_port);
+    handle.cfg.app_forward_loop_mode = .per_listener;
+
+    var runtime_manager = try loop_manager.LoopManager.init(alloc);
+    defer runtime_manager.deinit();
+    defer handle.cfg.deinit(handle.allocator);
+    defer handle.deinit();
+    defer runtime_manager.releaseProjectRuntime(&handle) catch |err| {
+        std.log.err("failed to release shared loop runtime for project {d}: {}", .{ handle.id, err });
+    };
+
+    var tcp_echo = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const tcp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&tcp_echo});
+    defer tcp_echo_thread.join();
+    var udp_echo = UdpEchoServerContext{ .port = target_port, .max_messages = 1 };
+    const udp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&udp_echo});
+    defer udp_echo_thread.join();
+
+    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expectEqual(@as(u32, 2), handle.active_ports);
+    try testing.expectEqual(@as(usize, 2), runtime_manager.debugRuntimeCount(.per_listener));
+
+    const tcp_response = try tcpClientTest(listen_port, "isolated tcp", std.time.ns_per_s);
+    defer alloc.free(tcp_response);
+    const udp_response = try udpClientTest(listen_port, "isolated udp", std.time.ns_per_s);
+    defer alloc.free(udp_response);
+
+    try testing.expectEqualStrings("isolated tcp", tcp_response);
+    try testing.expectEqualStrings("isolated udp", udp_response);
+    try testing.expect(tcp_echo.start_error == null);
+    try testing.expect(udp_echo.start_error == null);
+}
+
+test "app forward: shared loop shutdown releases runtime and bind failure is isolated" {
+    const alloc = testing.allocator;
+
+    var runtime_manager = try loop_manager.LoopManager.init(alloc);
+    defer runtime_manager.deinit();
+
+    const conflict_listen_port = testListenPort(43, 0);
+    const conflict_target_port = testTargetPort(43, 0);
+    var occupied_handle = try makeSinglePortHandle(alloc, 43, .tcp, conflict_listen_port, conflict_target_port);
+    occupied_handle.cfg.app_forward_loop_mode = .global;
+    var occupied_released = false;
+    defer occupied_handle.cfg.deinit(occupied_handle.allocator);
+    defer if (!occupied_released) occupied_handle.deinit();
+    defer if (!occupied_released) runtime_manager.releaseProjectRuntime(&occupied_handle) catch |err| {
+        std.log.err("failed to release occupied shared loop runtime for project {d}: {}", .{ occupied_handle.id, err });
+    };
+    try app_forward.startForwardingWithLoopManager(alloc, &occupied_handle, &runtime_manager);
+
+    var conflict_handle = try makeSinglePortHandle(alloc, 45, .tcp, conflict_listen_port, conflict_target_port);
+    conflict_handle.cfg.app_forward_loop_mode = .global;
+    defer cleanupProjectHandle(&conflict_handle);
+    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(alloc, &conflict_handle, &runtime_manager));
+    try testing.expectEqual(project_status.StartupStatus.failed, conflict_handle.startup_status);
+
+    try runtime_manager.releaseProjectRuntime(&occupied_handle);
+    occupied_handle.deinit();
+    occupied_released = true;
+
+    const healthy_listen_port = testListenPort(44, 0);
+    const healthy_target_port = testTargetPort(44, 0);
+    var healthy_handle = try makeSinglePortHandle(alloc, 44, .tcp, healthy_listen_port, healthy_target_port);
+    healthy_handle.cfg.app_forward_loop_mode = .global;
+    try app_forward.startForwardingWithLoopManager(alloc, &healthy_handle, &runtime_manager);
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expectEqual(project_status.StartupStatus.success, healthy_handle.startup_status);
+    try testing.expectEqual(@as(usize, 1), runtime_manager.debugRuntimeCount(.global));
+
+    try runtime_manager.releaseProjectRuntime(&healthy_handle);
+    healthy_handle.deinit();
+    try testing.expectEqual(@as(usize, 0), runtime_manager.debugRuntimeCount(.global));
+    healthy_handle.cfg.deinit(healthy_handle.allocator);
+}
+
 test "app forward: tcp single connection with data transfer" {
     const alloc = testing.allocator;
 
     var handle = try makeSinglePortHandle(alloc, 8, .tcp, 43150, 53150);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, 43150, 53150);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, 43150, 53150);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
     const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpEchoServerThread, .{53150});
     defer echo_thread.join();
 
-    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
 
@@ -386,7 +710,7 @@ test "app forward: tcp single connection with data transfer" {
 
     try testing.expectEqualStrings(message, response);
 
-    forwarder.stop();
+    forwarder.requestStop();
 }
 
 test "app forward: udp single datagram with data transfer" {
@@ -397,17 +721,21 @@ test "app forward: udp single datagram with data transfer" {
     var handle = try makeSinglePortHandle(alloc, 32, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
 
     var echo_ctx = UdpEchoServerContext{ .port = target_port, .max_messages = 1 };
     const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&echo_ctx});
     defer echo_thread.join();
 
-    var forwarder_ctx = UdpRunContext{ .handle = &handle, .forwarder = forwarder };
+    var forwarder_ctx = UdpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
-    defer forwarder.stop();
+    defer forwarder.requestStop();
 
     compat.sleepNanos(forwarder_ready_ns);
     try testing.expect(forwarder_ctx.start_error == null);
@@ -457,16 +785,20 @@ test "app forward: tcp 5 sequential clients" {
         }
     };
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, 43151, 53151);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, 43151, 53151);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
     const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{53151});
     defer echo_thread.join();
 
-    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
-    defer forwarder.stop();
+    defer forwarder.requestStop();
 
     try testing.expect(forwarder_ctx.start_error == null);
 
@@ -480,7 +812,7 @@ test "app forward: tcp 5 sequential clients" {
         try testing.expectEqualStrings(message, response);
     }
 
-    forwarder.stop();
+    forwarder.requestStop();
 }
 
 test "app forward: tcp target can disconnect abruptly" {
@@ -491,14 +823,18 @@ test "app forward: tcp target can disconnect abruptly" {
     var handle = try makeSinglePortHandle(alloc, 33, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
     var close_ctx = TcpCloseServerContext{ .port = target_port };
     const close_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpCloseServerThread, .{&close_ctx});
     defer close_thread.join();
 
-    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
 
@@ -508,7 +844,7 @@ test "app forward: tcp target can disconnect abruptly" {
     var client_ctx = TcpPeerCloseClientContext{ .port = listen_port };
     const client_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpPeerCloseClientThread, .{&client_ctx});
     compat.sleepNanos(forwarder_ready_ns);
-    forwarder.stop();
+    forwarder.requestStop();
     client_thread.join();
 
     try testing.expect(client_ctx.completed);
@@ -526,17 +862,21 @@ test "app forward: tcp concurrent clients with large payload" {
     var handle = try makeSinglePortHandle(alloc, 34, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    const forwarder = try app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port);
-    defer forwarder.deinit();
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
     var echo_ctx = TcpSizedEchoServerContext{ .port = target_port, .max_connections = client_count };
     const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_ctx});
     defer echo_thread.join();
 
-    var forwarder_ctx = TcpRunContext{ .handle = &handle, .forwarder = forwarder };
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
-    defer forwarder.stop();
+    defer forwarder.requestStop();
 
     compat.sleepNanos(forwarder_ready_ns);
     try testing.expect(forwarder_ctx.start_error == null);
@@ -586,9 +926,15 @@ fn expectForwarderInitMallocFailure(kind: ForwarderKind, id: usize, fail_index: 
     var failing_allocator = testing.FailingAllocator.init(base_alloc, .{ .fail_index = fail_index });
     const alloc = failing_allocator.allocator();
 
+    var runtime = loop_manager.LoopRuntime.init(base_alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    runtime.allocator = alloc;
+
     switch (kind) {
-        .tcp => try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.TcpForwarder.init(alloc, &handle, listen_port, target_port)),
-        .udp => try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.UdpForwarder.init(alloc, &handle, listen_port, target_port)),
+        .tcp => try testing.expectError(app_forward.ForwardError.ListenFailed, createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port)),
+        .udp => try testing.expectError(app_forward.ForwardError.ListenFailed, createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port)),
     }
 
     try testing.expect(failing_allocator.has_induced_failure);
