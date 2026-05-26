@@ -126,6 +126,12 @@ pub const Protocol = enum {
     udp,
 };
 
+pub const LoopMode = enum {
+    per_listener,
+    per_project,
+    global,
+};
+
 /// FRP 节点配置
 pub const FrpcNode = struct {
     /// 是否启用此规则
@@ -266,6 +272,8 @@ pub const Project = struct {
     /// 启用流量统计（仅当 enable_app_forward=true 时有效）
     /// 注意：启用统计后无法使用防火墙转发（add_firewall_forward 会被强制禁用）
     enable_stats: bool = false,
+    /// Application-forward loop sharing override. Null inherits Config.app_forward_loop_mode.
+    app_forward_loop_mode: ?LoopMode = null,
 
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);
@@ -291,6 +299,10 @@ pub const Project = struct {
         const has_port_mappings = self.port_mappings.len > 0;
         // 必须恰好选择一种模式
         return (has_single_port and !has_port_mappings) or (!has_single_port and has_port_mappings);
+    }
+
+    pub fn effectiveAppForwardLoopMode(self: *const Project, default_mode: LoopMode) LoopMode {
+        return self.app_forward_loop_mode orelse default_mode;
     }
 };
 
@@ -406,6 +418,7 @@ pub const DdnsConfig = struct {
 };
 
 pub const Config = struct {
+    app_forward_loop_mode: LoopMode = .per_project,
     log_config: file_log.LogConfig,
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
@@ -507,6 +520,15 @@ pub fn parseProtocol(val: []const u8) !Protocol {
     return ConfigError.InvalidValue;
 }
 
+pub fn parseLoopMode(val: []const u8) !LoopMode {
+    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+    if (trimmed.len == 0) return .per_project;
+    if (eqlIgnoreCase(trimmed, "per_listener") or eqlIgnoreCase(trimmed, "per-listener")) return .per_listener;
+    if (eqlIgnoreCase(trimmed, "per_project") or eqlIgnoreCase(trimmed, "per-project")) return .per_project;
+    if (eqlIgnoreCase(trimmed, "global")) return .global;
+    return ConfigError.InvalidValue;
+}
+
 pub fn dupeIfNonEmpty(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (s.len == 0) return "";
     return allocator.dupe(u8, s);
@@ -524,4 +546,36 @@ test "config: parse enums" {
     try std.testing.expectEqual(AddressFamily.ipv4, try parseFamily("ipv4"));
     try std.testing.expectEqual(Protocol.both, try parseProtocol("TCP+UDP"));
     try std.testing.expectEqual(Protocol.tcp, try parseProtocol("tcp"));
+}
+
+test "config: parse app forward loop mode" {
+    try std.testing.expectEqual(LoopMode.per_listener, try parseLoopMode("per_listener"));
+    try std.testing.expectEqual(LoopMode.per_project, try parseLoopMode("per_project"));
+    try std.testing.expectEqual(LoopMode.global, try parseLoopMode("global"));
+    try std.testing.expectError(ConfigError.InvalidValue, parseLoopMode("bad_mode"));
+}
+
+test "config: app forward loop mode defaults and effective override" {
+    const config = Config{
+        .log_config = undefined,
+        .projects = &[_]Project{},
+        .frpc_nodes = undefined,
+        .frps_nodes = undefined,
+        .ddns_configs = &[_]DdnsConfig{},
+    };
+    const inherited = Project{
+        .listen_port = 1000,
+        .target_address = "127.0.0.1",
+        .target_port = 2000,
+    };
+    const overridden = Project{
+        .listen_port = 1001,
+        .target_address = "127.0.0.1",
+        .target_port = 2001,
+        .app_forward_loop_mode = .per_listener,
+    };
+
+    try std.testing.expectEqual(LoopMode.per_project, config.app_forward_loop_mode);
+    try std.testing.expectEqual(LoopMode.per_project, inherited.effectiveAppForwardLoopMode(config.app_forward_loop_mode));
+    try std.testing.expectEqual(LoopMode.per_listener, overridden.effectiveAppForwardLoopMode(config.app_forward_loop_mode));
 }
