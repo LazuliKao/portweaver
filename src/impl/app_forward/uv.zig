@@ -4,6 +4,19 @@ pub const c = @cImport({
     @cInclude("forwarder.h");
 });
 
+/// Capability passed only while executing on a forwarder runtime thread.
+/// It intentionally wraps the C runtime pointer so forwarder lifecycle APIs do
+/// not accept raw runtime pointers from arbitrary caller threads.
+pub const RuntimeThreadToken = *opaque {};
+
+pub inline fn runtimeToken(ctx: *c.forwarder_runtime_t) RuntimeThreadToken {
+    return @ptrCast(ctx);
+}
+
+pub inline fn runtimeFromToken(token: RuntimeThreadToken) *c.forwarder_runtime_t {
+    return @ptrCast(@alignCast(token));
+}
+
 const AllocationHeader = extern struct {
     len: usize,
 };

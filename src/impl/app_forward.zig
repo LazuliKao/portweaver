@@ -4,7 +4,8 @@ const project_status = @import("project_status.zig");
 const common = @import("app_forward/common.zig");
 const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
-const c = @import("app_forward/uv.zig").c;
+const loop_manager = @import("app_forward/loop_manager.zig");
+const uv = @import("app_forward/uv.zig");
 
 pub const ForwardError = common.ForwardError;
 
@@ -15,41 +16,116 @@ pub inline fn getThreadConfig() std.Thread.SpawnConfig {
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
 
-/// Start a port forwarding project
+const SharedTcpStartContext = struct {
+    allocator: std.mem.Allocator,
+    projectHandle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
+    listen_port: u16,
+    target_port: u16,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const fwd = try TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
+        try ctx.projectHandle.registerTcpHandle(fwd);
+        errdefer {
+            ctx.projectHandle.deregisterTcpHandle(fwd) catch |err| {
+                std.log.warn("Failed to deregister TCP forwarder after start failure: {}", .{err});
+            };
+            fwd.destroyOnRuntimeThread(token);
+            fwd.destroyWrapper();
+        }
+        try fwd.startOnRuntimeThread(token, ctx.projectHandle);
+    }
+};
+
+const SharedUdpStartContext = struct {
+    allocator: std.mem.Allocator,
+    projectHandle: *project_status.ProjectHandle,
+    runtime: *loop_manager.LoopRuntime,
+    listen_port: u16,
+    target_port: u16,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const fwd = try UdpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
+        try ctx.projectHandle.registerUdpHandle(fwd);
+        errdefer {
+            ctx.projectHandle.deregisterUdpHandle(fwd) catch |err| {
+                std.log.warn("Failed to deregister UDP forwarder after start failure: {}", .{err});
+            };
+            fwd.destroyOnRuntimeThread(token);
+            fwd.destroyWrapper();
+        }
+        try fwd.startOnRuntimeThread(token, ctx.projectHandle);
+    }
+};
+
+/// Start a port forwarding project.
+/// Creates a LoopManager on the project if one does not already exist,
+/// then delegates to the shared-loop code path.
 pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
-    errdefer {
-        projectHandle.setStartupFailed();
+    errdefer projectHandle.setStartupFailed();
+    if (!projectHandle.cfg.enable_app_forward) return;
+
+    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
+
+    // Create LoopManager if not already present
+    if (projectHandle.runtime_manager == null) {
+        projectHandle.runtime_manager = try loop_manager.LoopManager.init(allocator);
     }
-    std.log.debug("[startForwarding] Entry - project {d}", .{projectHandle.id});
-    if (!projectHandle.cfg.enable_app_forward) {
-        std.log.debug("[startForwarding] App forward disabled, returning", .{});
-        return;
-    }
-    // Multi-port mode
+    const rm = &projectHandle.runtime_manager.?;
+
     if (projectHandle.cfg.port_mappings.len > 0) {
-        std.log.debug("[startForwarding] Multi-port mode - {d} mappings", .{projectHandle.cfg.port_mappings.len});
         for (projectHandle.cfg.port_mappings) |mapping| {
-            try startForwardingForMapping(allocator, projectHandle, mapping);
+            startForwardingForMappingWithLoopManager(allocator, projectHandle, mapping, rm, mode) catch |err| {
+                std.log.err("Failed to start forwarding: {}", .{err});
+            };
         }
         projectHandle.setStartupSuccess();
         return;
     }
+
     // Single-port mode
-    std.log.debug("[startForwarding] Single-port mode - port {d}", .{projectHandle.cfg.listen_port});
     const listen_port_str = try common.portToString(projectHandle.cfg.listen_port, allocator);
     defer allocator.free(listen_port_str);
     const target_port_str = try common.portToString(projectHandle.cfg.target_port, allocator);
     defer allocator.free(target_port_str);
 
-    std.log.debug("[startForwarding] Calling startForwardingForMapping...", .{});
-    try startForwardingForMapping(allocator, projectHandle, .{ // convert to mapping
+    startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
         .protocol = projectHandle.cfg.protocol,
         .listen_port = listen_port_str,
         .target_port = target_port_str,
-    });
-    std.log.debug("[startForwarding] Setting startup success...", .{});
+    }, rm, mode) catch |err| {
+        std.log.err("Failed to start forwarding: {}", .{err});
+    };
     projectHandle.setStartupSuccess();
-    std.log.debug("[startForwarding] Done", .{});
+}
+
+pub fn startForwardingWithLoopManager(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, runtime_manager: *loop_manager.LoopManager) !void {
+    errdefer projectHandle.setStartupFailed();
+    if (!projectHandle.cfg.enable_app_forward) return;
+
+    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
+    if (projectHandle.cfg.port_mappings.len > 0) {
+        for (projectHandle.cfg.port_mappings) |mapping| {
+            try startForwardingForMappingWithLoopManager(allocator, projectHandle, mapping, runtime_manager, mode);
+        }
+        projectHandle.setStartupSuccess();
+        return;
+    }
+
+    const listen_port_str = try common.portToString(projectHandle.cfg.listen_port, allocator);
+    defer allocator.free(listen_port_str);
+    const target_port_str = try common.portToString(projectHandle.cfg.target_port, allocator);
+    defer allocator.free(target_port_str);
+    try startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
+        .protocol = projectHandle.cfg.protocol,
+        .listen_port = listen_port_str,
+        .target_port = target_port_str,
+    }, runtime_manager, mode);
+    projectHandle.setStartupSuccess();
 }
 
 /// 解析端口范围字符串，返回起始和结束端口
@@ -57,130 +133,98 @@ fn parsePortRange(port_str: []const u8) !common.PortRange {
     return common.parsePortRange(port_str);
 }
 
-/// 为单个端口映射启动转发
-fn startForwardingForMapping(
+/// 为单个端口映射启动转发 (shared-loop path)
+fn startForwardingForMappingWithLoopManager(
     allocator: std.mem.Allocator,
     projectHandle: *project_status.ProjectHandle,
     mapping: types.PortMapping,
+    runtime_manager: *loop_manager.LoopManager,
+    mode: types.LoopMode,
 ) !void {
-    std.log.debug("[startForwardingForMapping] Entry - parsing port ranges", .{});
     const listen_range = try parsePortRange(mapping.listen_port);
     const target_range = try parsePortRange(mapping.target_port);
-
-    std.log.debug("[startForwardingForMapping] Listen range: {d}-{d}, Target range: {d}-{d}", .{ listen_range.start, listen_range.end, target_range.start, target_range.end });
-
-    // 验证端口范围长度一致
     const listen_count = listen_range.end - listen_range.start + 1;
     const target_count = target_range.end - target_range.start + 1;
+    if (listen_count != target_count) return ForwardError.InvalidAddress;
 
-    if (listen_count != target_count) {
-        std.log.debug("[Forward] Port range mismatch: {d} listen ports vs {d} target ports", .{ listen_count, target_count });
-        return ForwardError.InvalidAddress;
+    var shared_lease: ?loop_manager.RuntimeLease = null;
+    if (mode != .per_listener) {
+        shared_lease = try runtime_manager.acquire(mode, projectHandle);
     }
+    errdefer if (shared_lease) |lease| {
+        if (projectHandle.getProjectRuntimeInfo().active_ports > 0) {
+            runtime_manager.releaseProjectRuntime(projectHandle) catch |err| {
+                std.log.err("Failed to roll back partially started shared runtime: {}", .{err});
+                runtime_manager.release(lease);
+            };
+        } else {
+            runtime_manager.release(lease);
+        }
+    };
 
-    std.log.debug("[startForwardingForMapping] Starting {d} port forwarder(s), protocol={s}", .{ listen_count, @tagName(mapping.protocol) });
-    // 为范围内的每个端口启动转发
     var i: u16 = 0;
     while (i < listen_count) : (i += 1) {
         const listen_port = listen_range.start + i;
         const target_port = target_range.start + i;
-
-        std.log.debug("[startForwardingForMapping] Creating forwarder {d}/{d} on port {d}", .{ i + 1, listen_count, listen_port });
-
         switch (mapping.protocol) {
-            .tcp => {
-                try startAndRegisterTcp(projectHandle, allocator, listen_port, target_port);
-            },
-            .udp => {
-                try startAndRegisterUdp(projectHandle, allocator, listen_port, target_port);
-            },
+            .tcp => try startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease),
+            .udp => try startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease),
             .both => {
-                try startAndRegisterTcp(projectHandle, allocator, listen_port, target_port);
-                try startAndRegisterUdp(projectHandle, allocator, listen_port, target_port);
+                try startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease);
+                try startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease);
             },
         }
     }
-    std.log.debug("[startForwardingForMapping] All forwarders created and registered", .{});
 }
 
-fn startAndRegisterTcp(projectHandle: *project_status.ProjectHandle, allocator: std.mem.Allocator, listen_port: u16, target_port: u16) !void {
-    const fwd = TcpForwarder.init(allocator, projectHandle, listen_port, target_port) catch |err| {
-        std.log.debug("[TCP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-        return;
+fn startAndRegisterSharedTcp(
+    projectHandle: *project_status.ProjectHandle,
+    allocator: std.mem.Allocator,
+    listen_port: u16,
+    target_port: u16,
+    runtime_manager: *loop_manager.LoopManager,
+    mode: types.LoopMode,
+    shared_lease: ?loop_manager.RuntimeLease,
+) !void {
+    var owned_lease: ?loop_manager.RuntimeLease = null;
+    const lease = shared_lease orelse blk: {
+        owned_lease = try runtime_manager.acquire(mode, projectHandle);
+        break :blk owned_lease.?;
     };
+    errdefer if (owned_lease) |owned| runtime_manager.release(owned);
 
-    projectHandle.beginForwarderWorker();
-    const tcp_thread = std.Thread.spawn(getThreadConfig(), loopTcpForward, .{ projectHandle, fwd }) catch |err| {
-        projectHandle.finishForwarderWorker();
-        fwd.deinit();
-        return err;
+    var ctx = SharedTcpStartContext{
+        .allocator = allocator,
+        .projectHandle = projectHandle,
+        .runtime = lease.runtime,
+        .listen_port = listen_port,
+        .target_port = target_port,
     };
-    tcp_thread.detach();
+    try lease.runtime.marshal(.{ .callback = SharedTcpStartContext.run, .context = &ctx });
 }
 
-fn startAndRegisterUdp(projectHandle: *project_status.ProjectHandle, allocator: std.mem.Allocator, listen_port: u16, target_port: u16) !void {
-    const fwd = UdpForwarder.init(allocator, projectHandle, listen_port, target_port) catch |err| {
-        std.log.debug("[UDP] Failed to create forwarder on port {d}: {any}", .{ listen_port, err });
-        return;
+fn startAndRegisterSharedUdp(
+    projectHandle: *project_status.ProjectHandle,
+    allocator: std.mem.Allocator,
+    listen_port: u16,
+    target_port: u16,
+    runtime_manager: *loop_manager.LoopManager,
+    mode: types.LoopMode,
+    shared_lease: ?loop_manager.RuntimeLease,
+) !void {
+    var owned_lease: ?loop_manager.RuntimeLease = null;
+    const lease = shared_lease orelse blk: {
+        owned_lease = try runtime_manager.acquire(mode, projectHandle);
+        break :blk owned_lease.?;
     };
+    errdefer if (owned_lease) |owned| runtime_manager.release(owned);
 
-    projectHandle.beginForwarderWorker();
-    const udp_thread = std.Thread.spawn(getThreadConfig(), loopUdpForward, .{ projectHandle, fwd }) catch |err| {
-        projectHandle.finishForwarderWorker();
-        fwd.deinit();
-        return err;
+    var ctx = SharedUdpStartContext{
+        .allocator = allocator,
+        .projectHandle = projectHandle,
+        .runtime = lease.runtime,
+        .listen_port = listen_port,
+        .target_port = target_port,
     };
-    udp_thread.detach();
-}
-
-fn loopTcpForward(projectHandle: *project_status.ProjectHandle, tcp_forwarder: *TcpForwarder) void {
-    std.log.debug("[TcpForward] Thread started", .{});
-    var registered = false;
-    defer {
-        if (registered) {
-            projectHandle.deregisterTcpHandle(tcp_forwarder) catch |err| {
-                std.log.warn("[TCP] Failed to deregister forwarder: {any}", .{err});
-            };
-        }
-        tcp_forwarder.deinit();
-        projectHandle.finishForwarderWorker();
-    }
-    projectHandle.registerTcpHandle(tcp_forwarder) catch |err| {
-        std.log.debug("[TCP] Failed to register forwarder: {any}", .{err});
-        projectHandle.setStartupFailed();
-        return;
-    };
-    registered = true;
-    tcp_forwarder.start(projectHandle) catch |err| {
-        std.log.debug("[TCP] Failed to start forwarder: {any}", .{err});
-        projectHandle.setStartupFailed();
-        return;
-    };
-    std.log.debug("[TcpForward] Thread done.", .{});
-}
-
-fn loopUdpForward(projectHandle: *project_status.ProjectHandle, udp_forwarder: *UdpForwarder) void {
-    std.log.debug("[UdpForward] Thread started", .{});
-    var registered = false;
-    defer {
-        if (registered) {
-            projectHandle.deregisterUdpHandle(udp_forwarder) catch |err| {
-                std.log.warn("[UDP] Failed to deregister forwarder: {any}", .{err});
-            };
-        }
-        udp_forwarder.deinit();
-        projectHandle.finishForwarderWorker();
-    }
-    projectHandle.registerUdpHandle(udp_forwarder) catch |err| {
-        std.log.debug("[UDP] Failed to register forwarder: {any}", .{err});
-        projectHandle.setStartupFailed();
-        return;
-    };
-    registered = true;
-    udp_forwarder.start(projectHandle) catch |err| {
-        std.log.debug("[UDP] Failed to start forwarder: {any}", .{err});
-        projectHandle.setStartupFailed();
-        return;
-    };
-    std.log.debug("[UdpForward] Thread done.", .{});
+    try lease.runtime.marshal(.{ .callback = SharedUdpStartContext.run, .context = &ctx });
 }

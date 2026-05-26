@@ -3,6 +3,9 @@ const types = @import("../config/types.zig");
 const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
 const app_forward = @import("app_forward.zig");
+const loop_manager = @import("app_forward/loop_manager.zig");
+const uv = @import("app_forward/uv.zig");
+const c = uv.c;
 const compat = @import("../compat.zig");
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
@@ -57,9 +60,9 @@ pub const ProjectHandle = struct {
     active_ports: u32 = 0,
     id: usize,
     runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    active_workers: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     runtime_enabled_lock: std.Io.Mutex = .init,
+    runtime_manager: ?loop_manager.LoopManager = null,
 
     pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandle {
         return ProjectHandle{
@@ -76,52 +79,24 @@ pub const ProjectHandle = struct {
     pub fn deinit(self: *ProjectHandle) void {
         self.shutting_down.store(true, .seq_cst);
 
-        self.lock.lockUncancelable(compat.io());
-        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-            std.log.err("Failed to snapshot TCP forwarders for project {d}: {}", .{ self.id, err });
-            for (self.tcp_forwarders.items) |fwd| {
-                fwd.stop();
-            }
-            for (self.udp_forwarders.items) |fwd| {
-                fwd.stop();
-            }
-            self.lock.unlock(compat.io());
-            self.waitForForwardersStopped();
-            self.lock.lockUncancelable(compat.io());
-            defer self.lock.unlock(compat.io());
-            self.tcp_forwarders.deinit();
-            self.udp_forwarders.deinit();
-            return;
-        };
-        defer self.allocator.free(tcp_forwarders);
-
-        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-            std.log.err("Failed to snapshot UDP forwarders for project {d}: {}", .{ self.id, err });
-            for (self.udp_forwarders.items) |fwd| {
-                fwd.stop();
-            }
-            self.lock.unlock(compat.io());
-            for (tcp_forwarders) |fwd| {
-                fwd.stop();
-            }
-            self.waitForForwardersStopped();
-            self.lock.lockUncancelable(compat.io());
-            defer self.lock.unlock(compat.io());
-            self.tcp_forwarders.deinit();
-            self.udp_forwarders.deinit();
-            return;
-        };
-        defer self.allocator.free(udp_forwarders);
-        self.lock.unlock(compat.io());
-
-        for (tcp_forwarders) |fwd| {
-            fwd.stop();
-        }
-        for (udp_forwarders) |fwd| {
-            fwd.stop();
+        if (self.runtime_manager) |*manager| {
+            manager.releaseProjectRuntime(self) catch |err| {
+                std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
+                self.stopSharedForwarders() catch |stop_err| {
+                    std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, stop_err });
+                };
+            };
+            manager.deinit();
+            self.runtime_manager = null;
+        } else {
+            self.stopSharedForwarders() catch |err| {
+                std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, err });
+            };
         }
 
-        self.waitForForwardersStopped();
+        self.destroySharedForwardersAfterRuntimeStop() catch |err| {
+            std.log.err("Failed to free forwarder wrappers for project {d}: {}", .{ self.id, err });
+        };
 
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
@@ -169,9 +144,11 @@ pub const ProjectHandle = struct {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
-        self.active_ports -= 1;
         const index = try self.findIndexOfTcpForwarder(fwd);
         _ = self.tcp_forwarders.swapRemove(index);
+        if (self.active_ports > 0) {
+            self.active_ports -= 1;
+        }
     }
     pub inline fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
@@ -185,9 +162,11 @@ pub const ProjectHandle = struct {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
-        self.active_ports -= 1;
         const index = try self.findIndexOfUdpForwarder(fwd);
         _ = self.udp_forwarders.swapRemove(index);
+        if (self.active_ports > 0) {
+            self.active_ports -= 1;
+        }
     }
     pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
@@ -198,24 +177,92 @@ pub const ProjectHandle = struct {
         try self.udp_forwarders.append(fwd);
     }
 
-    pub inline fn beginForwarderWorker(self: *ProjectHandle) void {
-        _ = self.active_workers.fetchAdd(1, .seq_cst);
-    }
-
-    pub inline fn finishForwarderWorker(self: *ProjectHandle) void {
-        _ = self.active_workers.fetchSub(1, .seq_cst);
-    }
-
-    fn waitForForwardersStopped(self: *ProjectHandle) void {
-        while (true) {
-            self.lock.lockUncancelable(compat.io());
-            const stopped = self.tcp_forwarders.items.len == 0 and
-                self.udp_forwarders.items.len == 0 and
-                self.active_workers.load(.seq_cst) == 0;
+    /// Frees shared-loop forwarder wrappers after their owning loop runtime has
+    /// destroyed the C resources on the runtime thread.
+    pub fn destroySharedForwardersAfterRuntimeStop(self: *ProjectHandle) !void {
+        self.lock.lockUncancelable(compat.io());
+        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
             self.lock.unlock(compat.io());
+            return err;
+        };
+        errdefer self.allocator.free(tcp_forwarders);
+        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            return err;
+        };
+        self.lock.unlock(compat.io());
+        defer self.allocator.free(tcp_forwarders);
+        defer self.allocator.free(udp_forwarders);
 
-            if (stopped) return;
-            compat.sleepNanos(std.time.ns_per_ms * 100);
+        for (tcp_forwarders) |fwd| {
+            self.deregisterTcpHandle(fwd) catch |err| {
+                std.log.warn("Failed to deregister TCP forwarder for project {d}: {}", .{ self.id, err });
+            };
+            fwd.destroyWrapper();
+        }
+        for (udp_forwarders) |fwd| {
+            self.deregisterUdpHandle(fwd) catch |err| {
+                std.log.warn("Failed to deregister UDP forwarder for project {d}: {}", .{ self.id, err });
+            };
+            fwd.destroyWrapper();
+        }
+    }
+
+    /// Runs on the owning runtime thread during runtime shutdown, after backend
+    /// close callbacks have drained and before the runtime itself is closed.
+    pub fn destroySharedForwarderCResourcesForRuntime(self: *ProjectHandle, runtime: *c.forwarder_runtime_t) void {
+        const token = uv.runtimeToken(runtime);
+        self.lock.lockUncancelable(compat.io());
+        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            std.log.err("Failed to snapshot TCP forwarders for C destroy in project {d}: {}", .{ self.id, err });
+            return;
+        };
+        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            self.allocator.free(tcp_forwarders);
+            std.log.err("Failed to snapshot UDP forwarders for C destroy in project {d}: {}", .{ self.id, err });
+            return;
+        };
+        self.lock.unlock(compat.io());
+        defer self.allocator.free(tcp_forwarders);
+        defer self.allocator.free(udp_forwarders);
+
+        for (tcp_forwarders) |fwd| {
+            if (fwd.belongsToRuntime(runtime)) {
+                fwd.destroyOnRuntimeThread(token);
+            }
+        }
+        for (udp_forwarders) |fwd| {
+            if (fwd.belongsToRuntime(runtime)) {
+                fwd.destroyOnRuntimeThread(token);
+            }
+        }
+    }
+
+    /// Requests loop-thread closure for shared-loop forwarders. The loop manager
+    /// calls this before stopping the runtime so C close callbacks can release
+    /// per-listener/session allocations while the libuv loop is still alive.
+    pub fn stopSharedForwarders(self: *ProjectHandle) !void {
+        self.lock.lockUncancelable(compat.io());
+        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            return err;
+        };
+        errdefer self.allocator.free(tcp_forwarders);
+        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
+            self.lock.unlock(compat.io());
+            return err;
+        };
+        self.lock.unlock(compat.io());
+        defer self.allocator.free(tcp_forwarders);
+        defer self.allocator.free(udp_forwarders);
+
+        for (tcp_forwarders) |fwd| {
+            fwd.requestStop();
+        }
+        for (udp_forwarders) |fwd| {
+            fwd.requestStop();
         }
     }
 
@@ -316,28 +363,19 @@ pub const ProjectHandle = struct {
                 };
             } else {
                 std.log.info("Project {d} ({s}) runtime disabled - stopping forwarders", .{ self.id, self.cfg.remark });
-                // Stop all forwarders
-                self.lock.lockUncancelable(compat.io());
-                const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-                    self.lock.unlock(compat.io());
-                    std.log.err("Failed to snapshot TCP forwarders for project {d}: {}", .{ self.id, err });
-                    return;
-                };
-                const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-                    self.lock.unlock(compat.io());
-                    self.allocator.free(tcp_forwarders);
-                    std.log.err("Failed to snapshot UDP forwarders for project {d}: {}", .{ self.id, err });
-                    return;
-                };
-                self.lock.unlock(compat.io());
-                defer self.allocator.free(tcp_forwarders);
-                defer self.allocator.free(udp_forwarders);
-
-                for (tcp_forwarders) |fwd| {
-                    fwd.stop();
-                }
-                for (udp_forwarders) |fwd| {
-                    fwd.stop();
+                if (self.runtime_manager) |*manager| {
+                    manager.releaseProjectRuntime(self) catch |err| {
+                        std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
+                    };
+                    manager.deinit();
+                    self.runtime_manager = null;
+                } else {
+                    self.stopSharedForwarders() catch |err| {
+                        std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, err });
+                    };
+                    self.destroySharedForwardersAfterRuntimeStop() catch |err| {
+                        std.log.err("Failed to free forwarders for project {d}: {}", .{ self.id, err });
+                    };
                 }
             }
         }

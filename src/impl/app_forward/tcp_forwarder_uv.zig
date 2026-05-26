@@ -1,29 +1,39 @@
 const std = @import("std");
-const uv = @import("uv.zig");
 const common = @import("common.zig");
 const project_status = @import("../project_status.zig");
 const TrafficStats = project_status.TrafficStats;
+const compat = @import("../../compat.zig");
 pub const ForwardError = common.ForwardError;
 
+const uv = @import("uv.zig");
 const c = uv.c;
 
 pub const TcpForwarder = struct {
     allocator: std.mem.Allocator,
     forwarder: ?*c.tcp_forwarder_t,
-    pub fn init(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, listen_port: u16, target_port: u16) !*TcpForwarder {
+    runtime: ?*c.forwarder_runtime_t = null,
+    lock: std.Io.Mutex = .init,
+
+    pub fn createOnRuntimeThread(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, token: uv.RuntimeThreadToken, listen_port: u16, target_port: u16) !*TcpForwarder {
         var error_code: i32 = 0;
+        const runtime = uv.runtimeFromToken(token);
         const fwd = try allocator.create(TcpForwarder);
-        fwd.allocator = allocator;
-        fwd.forwarder = null;
-        fwd.setup(listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
+        fwd.* = .{
+            .allocator = allocator,
+            .forwarder = null,
+        };
+
+        fwd.setup(runtime, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;
         };
         return fwd;
     }
-    pub fn setup(
+
+    fn setup(
         self: *TcpForwarder,
+        runtime: *c.forwarder_runtime_t,
         listen_port: u16,
         target_address: []const u8,
         target_port: u16,
@@ -40,15 +50,13 @@ pub const TcpForwarder = struct {
             .any => c.ADDR_FAMILY_ANY,
         };
 
-        const fwd_allocator = uv.buildAllocator(&self.allocator);
-
-        const forwarder_ptr = c.tcp_forwarder_create(
+        const forwarder_ptr = c.tcp_forwarder_create_on_runtime(
+            runtime,
             listen_port,
             target_z.ptr,
             target_port,
             c_family,
             if (enable_stats) 1 else 0,
-            fwd_allocator,
             out_error_code,
         );
 
@@ -58,13 +66,14 @@ pub const TcpForwarder = struct {
         }
 
         self.forwarder = forwarder_ptr.?;
+        self.runtime = runtime;
         out_error_code.* = 0;
     }
-    pub fn start(self: *TcpForwarder, projectHandle: *project_status.ProjectHandle) !void {
-        if (self.forwarder == null) {
-            // Init should have created the forwarder already
-            return ForwardError.ListenFailed;
-        }
+
+    pub fn startOnRuntimeThread(self: *TcpForwarder, token: uv.RuntimeThreadToken, projectHandle: *project_status.ProjectHandle) !void {
+        const runtime = uv.runtimeFromToken(token);
+        if (!self.belongsToRuntime(runtime)) return ForwardError.ListenFailed;
+        if (self.forwarder == null) return ForwardError.ListenFailed;
         const r = c.tcp_forwarder_start(self.forwarder);
         if (r != 0) {
             projectHandle.setStartupFailedCode(r);
@@ -72,22 +81,38 @@ pub const TcpForwarder = struct {
         }
     }
 
-    pub fn stop(self: *TcpForwarder) void {
+    pub fn requestStop(self: *TcpForwarder) void {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         if (self.forwarder) |f| {
-            c.tcp_forwarder_stop(f);
+            c.tcp_forwarder_request_stop(f);
         }
     }
 
-    pub fn deinit(self: *TcpForwarder) void {
+    pub fn belongsToRuntime(self: *const TcpForwarder, runtime: *c.forwarder_runtime_t) bool {
+        return self.runtime == runtime;
+    }
+
+    /// Must run on the owning runtime thread after stop/close callbacks drained.
+    pub fn destroyOnRuntimeThread(self: *TcpForwarder, token: uv.RuntimeThreadToken) void {
+        const runtime = uv.runtimeFromToken(token);
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        if (self.runtime != runtime) return;
         if (self.forwarder) |f| {
-            c.tcp_forwarder_stop(f);
             c.tcp_forwarder_destroy(f);
             self.forwarder = null;
         }
+        self.runtime = null;
+    }
+
+    pub fn destroyWrapper(self: *TcpForwarder) void {
         self.allocator.destroy(self);
     }
 
     pub fn getStats(self: *TcpForwarder) TrafficStats {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
         if (self.forwarder) |f| {
             const c_stats = c.tcp_forwarder_get_stats(f);
             return .{
