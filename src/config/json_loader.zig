@@ -244,6 +244,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     const a = allocator;
     var log_config = try file_log.defaultLogConfig(a);
     errdefer log_config.deinit(a);
+    var app_forward_loop_mode: types.LoopMode = .per_project;
 
     std.Io.Dir.cwd().access(compat.io(), path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
@@ -290,6 +291,14 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         if (obj.get("flush_interval_ms")) |v| {
             if (parseJsonUnsigned(v, ec.fieldPath("flush_interval_ms", .{}), ec)) |interval| {
                 log_config.flush_interval_ms = @intCast(interval);
+            }
+        }
+        if (obj.get("app_forward_loop_mode")) |v| {
+            if (parseJsonString(v, ec.fieldPath("app_forward_loop_mode", .{}), ec)) |s| {
+                app_forward_loop_mode = types.parseLoopMode(s) catch blk: {
+                    ec.addFmt(ec.fieldPath("app_forward_loop_mode", .{}), .enum_value_invalid, "per_listener/per_project/global", "{s}", .{s}, "invalid app forward loop mode");
+                    break :blk .per_project;
+                };
             }
         }
     }
@@ -436,6 +445,15 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
         if (obj.get("enable_stats")) |v| {
             if (parseJsonBool(v, ec.fieldPath("{s}.enable_stats", .{prefix}), ec)) |b| project.enable_stats = b;
+        }
+
+        if (obj.get("app_forward_loop_mode")) |v| {
+            if (parseJsonString(v, ec.fieldPath("{s}.app_forward_loop_mode", .{prefix}), ec)) |s| {
+                project.app_forward_loop_mode = types.parseLoopMode(s) catch blk: {
+                    ec.addFmt(ec.fieldPath("{s}.app_forward_loop_mode", .{prefix}), .enum_value_invalid, "per_listener/per_project/global", "{s}", .{s}, "invalid app forward loop mode");
+                    break :blk null;
+                };
+            }
         }
 
         // ── port_mappings ──
@@ -880,6 +898,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     }
 
     return .{
+        .app_forward_loop_mode = app_forward_loop_mode,
         .log_config = log_config,
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,
@@ -1014,6 +1033,72 @@ test "json: boolean as integer and string" {
     try testing.expect(cfg.projects[0].enable_app_forward);
     try testing.expect(!cfg.projects[0].open_firewall_port);
     try testing.expect(cfg.projects[0].add_firewall_forward);
+}
+
+test "json: app forward loop mode top-level default and project override" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "app_forward_loop_mode": "global",
+        \\  "projects": [
+        \\    {"target_address": "127.0.0.1", "listen_port": 1000, "target_port": 2000, "enable_app_forward": true},
+        \\    {"target_address": "127.0.0.1", "listen_port": 1001, "target_port": 2001, "enable_app_forward": true, "app_forward_loop_mode": "per_listener"}
+        \\  ]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(types.LoopMode.global, cfg.app_forward_loop_mode);
+    try testing.expectEqual(types.LoopMode.global, cfg.projects[0].effectiveAppForwardLoopMode(cfg.app_forward_loop_mode));
+    try testing.expectEqual(types.LoopMode.per_listener, cfg.projects[1].effectiveAppForwardLoopMode(cfg.app_forward_loop_mode));
+}
+
+test "json: app forward loop mode missing value defaults to per_project" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 1002, "target_port": 2002, "enable_app_forward": true}]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(types.LoopMode.per_project, cfg.app_forward_loop_mode);
+    try testing.expectEqual(types.LoopMode.per_project, cfg.projects[0].effectiveAppForwardLoopMode(cfg.app_forward_loop_mode));
+}
+
+test "json: invalid app forward loop mode is rejected" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\  "projects": [{"target_address": "127.0.0.1", "listen_port": 1003, "target_port": 2003, "app_forward_loop_mode": "bad_mode"}]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+
+    var found = false;
+    for (ec.errors.items) |e| {
+        if (std.mem.indexOf(u8, e.field_path, "app_forward_loop_mode") != null and e.error_type == .enum_value_invalid) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
 }
 
 test "json: frpc nodes" {
