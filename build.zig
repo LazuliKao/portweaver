@@ -906,7 +906,15 @@ pub fn build(b: *std.Build) void {
     // Add C forwarder implementation
     exe.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
     exe.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
 
@@ -1019,7 +1027,15 @@ pub fn build(b: *std.Build) void {
     mod_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
     mod_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
     mod_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    mod_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    mod_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
     mod_tests.root_module.addIncludePath(b.path("deps/uci"));
@@ -1084,7 +1100,15 @@ pub fn build(b: *std.Build) void {
     exe_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
     exe_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
     exe_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/forwarder.c"),
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    exe_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
+        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+    });
+    exe_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
         .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
     });
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));
