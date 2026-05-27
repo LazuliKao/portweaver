@@ -140,6 +140,13 @@ pub fn blobmsgGetU32(attr: *c.blob_attr) u32 {
     return be32ToNative(data.*);
 }
 
+pub fn blobmsgGetU64(attr: *c.blob_attr) u64 {
+    const data = @as(*align(1) const [2]u32, @ptrCast(blobmsgData(attr).?));
+    const high = be32ToNative(data[0]);
+    const low = be32ToNative(data[1]);
+    return (@as(u64, high) << 32) | low;
+}
+
 pub fn blobmsgGetString(attr: *c.blob_attr) [*:0]const u8 {
     return @ptrCast(blobmsgData(attr).?);
 }
