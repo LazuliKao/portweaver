@@ -31,6 +31,7 @@ pub const ProjectRuntimeInfo = struct {
     active_ports: u32,
     bytes_in: u64,
     bytes_out: u64,
+    active_sessions: u32,
     startup_status: StartupStatus,
     error_code: i32,
 };
@@ -39,6 +40,7 @@ pub const TrafficStats = struct {
     bytes_in: u64,
     bytes_out: u64,
     listen_port: u16,
+    active_sessions: u32 = 0,
 };
 
 /// Statistics for a single forwarder (port)
@@ -47,6 +49,7 @@ pub const ForwarderStats = struct {
     local_port: u16,
     bytes_in: u64,
     bytes_out: u64,
+    active_sessions: u32,
 };
 
 pub const ProjectHandle = struct {
@@ -267,18 +270,20 @@ pub const ProjectHandle = struct {
     }
 
     fn collectProjectStatsLocked(self: *ProjectHandle) TrafficStats {
-        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0 };
+        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0, .active_sessions = 0 };
         // Sum stats from all TCP forwarders
         for (self.tcp_forwarders.items) |fwd| {
             const s = fwd.getStats();
             stats.bytes_in += s.bytes_in;
             stats.bytes_out += s.bytes_out;
+            stats.active_sessions += s.active_sessions;
         }
         // Sum stats from all UDP forwarders
         for (self.udp_forwarders.items) |fwd| {
             const s = fwd.getStats();
             stats.bytes_in += s.bytes_in;
             stats.bytes_out += s.bytes_out;
+            stats.active_sessions += s.active_sessions;
         }
         return stats;
     }
@@ -299,6 +304,7 @@ pub const ProjectHandle = struct {
             .active_ports = self.active_ports,
             .bytes_in = s.bytes_in,
             .bytes_out = s.bytes_out,
+            .active_sessions = s.active_sessions,
             .startup_status = self.startup_status,
             .error_code = self.error_code,
         };
@@ -328,6 +334,7 @@ pub const ProjectHandle = struct {
                 .local_port = s.listen_port,
                 .bytes_in = s.bytes_in,
                 .bytes_out = s.bytes_out,
+                .active_sessions = s.active_sessions,
             };
             idx += 1;
         }
@@ -340,6 +347,7 @@ pub const ProjectHandle = struct {
                 .local_port = s.listen_port,
                 .bytes_in = s.bytes_in,
                 .bytes_out = s.bytes_out,
+                .active_sessions = s.active_sessions,
             };
             idx += 1;
         }

@@ -210,6 +210,7 @@ const field_names = struct {
     pub const servers: [:0]const u8 = "servers";
     pub const instances: [:0]const u8 = "instances";
     pub const version: [:0]const u8 = "version";
+    pub const active_sessions: [:0]const u8 = "active_sessions";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !void {
@@ -522,6 +523,7 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
         addU32(&buf, field_names.active_ports, project.active_ports) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.bytes_in, info.bytes_in) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.bytes_out, info.bytes_out) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
+        addU32(&buf, field_names.active_sessions, info.active_sessions) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
         addU64(&buf, field_names.last_changed, state.last_changed[i]) catch return c.UBUS_STATUS_UNKNOWN_ERROR;
 
         // 如果启动失败，返回错误代码（使用运行时信息）
@@ -550,6 +552,7 @@ fn handleListProjects(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c]
                 // Add traffic stats
                 addU64(&buf, field_names.bytes_in, fwd_stat.bytes_in) catch {};
                 addU64(&buf, field_names.bytes_out, fwd_stat.bytes_out) catch {};
+                addU32(&buf, field_names.active_sessions, fwd_stat.active_sessions) catch {};
 
                 ubox.blobNestEnd(&buf, fwd_item) catch {};
             }
@@ -1217,6 +1220,7 @@ fn handleGetFullStatus(ctx: [*c]c.ubus_context, obj: [*c]c.ubus_object, req: [*c
             addU32(&buf, field_names.active_ports, project.active_ports) catch {};
             addU64(&buf, field_names.bytes_in, info.bytes_in) catch {};
             addU64(&buf, field_names.bytes_out, info.bytes_out) catch {};
+            addU32(&buf, field_names.active_sessions, info.active_sessions) catch {};
             addU64(&buf, field_names.last_changed, state.last_changed[i]) catch {};
             if (info.startup_status == .failed and info.error_code != 0) {
                 addI32(&buf, field_names.error_code, info.error_code) catch {};
