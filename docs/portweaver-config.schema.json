@@ -7,6 +7,10 @@
         "$schema": {
           "type": "string"
         },
+        "app_forward_loop_mode": {
+          "$ref": "#/definitions/LoopMode",
+          "description": "Global default for application-forward loop sharing mode (default: per_project)"
+        },
         "ddns": {
           "description": "DDNS configurations",
           "items": {
@@ -370,6 +374,15 @@
       ],
       "type": "object"
     },
+    "LoopMode": {
+      "description": "Application-forward loop sharing mode. Controls how event loop runtimes are shared among listeners: per_listener (highest isolation, more memory), per_project (default, balanced), global (lowest memory, no isolation)",
+      "enum": [
+        "per_listener",
+        "per_project",
+        "global"
+      ],
+      "type": "string"
+    },
     "Project": {
       "additionalProperties": false,
       "description": "Port forwarding project/rule\n\nTwo modes (mutually exclusive): 1. Single-port mode: listen_port + target_port 2. Multi-port mode: port_mappings array",
@@ -395,6 +408,10 @@
         "enable_app_forward": {
           "description": "Enable application-layer forwarding (Zig network lib, like socat)",
           "type": "boolean"
+        },
+        "app_forward_loop_mode": {
+          "$ref": "#/definitions/LoopMode",
+          "description": "Application-forward loop sharing override. Inherits global app_forward_loop_mode if omitted."
         },
         "enable_stats": {
           "description": "Enable traffic statistics (only when enable_app_forward=true)",

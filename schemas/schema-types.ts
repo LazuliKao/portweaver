@@ -17,6 +17,15 @@ export type AddressFamily = "any" | "ipv4" | "ipv6";
 export type Protocol = "both" | "tcp" | "udp";
 
 /**
+ * Application-forward loop sharing mode
+ * Controls how event loop runtimes are shared among listeners:
+ * - per_listener: each listener gets its own dedicated runtime, highest isolation but uses more memory
+ * - per_project: one runtime shared by all listeners in a project (default, balanced)
+ * - global: all projects share a single global runtime, lowest memory usage but no isolation
+ */
+export type LoopMode = "per_listener" | "per_project" | "global";
+
+/**
  * DDNS IP get method
  */
 export type DdnsIpGetType = "url" | "net_interface" | "cmd";
@@ -190,6 +199,8 @@ export interface Project {
   preserve_source_ip?: boolean;
   /** Enable application-layer forwarding (Zig network lib, like socat) */
   enable_app_forward?: boolean;
+  /** Application-forward loop sharing override. Inherits global app_forward_loop_mode if omitted. */
+  app_forward_loop_mode?: LoopMode;
   /** Reuse address when binding */
   reuseaddr?: boolean;
   /** Enable traffic statistics (only when enable_app_forward=true) */
@@ -214,6 +225,8 @@ export interface PortWeaverConfigObject {
   frps_nodes?: Record<string, FrpsNode>;
   /** DDNS configurations */
   ddns?: DdnsConfig[];
+  /** Global default for application-forward loop sharing mode (default: per_project) */
+  app_forward_loop_mode?: LoopMode;
 }
 
 /**
