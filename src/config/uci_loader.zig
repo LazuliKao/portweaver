@@ -168,6 +168,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     var log_config = try file_log.defaultLogConfig(allocator);
     errdefer log_config.deinit(allocator);
     var app_forward_loop_mode: types.LoopMode = .per_project;
+    var use_nftables: bool = false;
 
     var global_sec_it = uci.sections(pkg);
     while (global_sec_it.next()) |sec| {
@@ -196,6 +197,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 log_config.max_files = std.fmt.parseUnsigned(usize, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 3;
             } else if (std.mem.eql(u8, opt_name, "app_forward_loop_mode")) {
                 app_forward_loop_mode = try types.parseLoopMode(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "use_nftables")) {
+                use_nftables = try types.parseBool(opt_val);
             }
         }
         break;
@@ -573,6 +576,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     return .{
         .log_config = log_config,
         .app_forward_loop_mode = app_forward_loop_mode,
+        .use_nftables = use_nftables,
         .projects = try list.toOwnedSlice(),
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,

@@ -245,6 +245,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     var log_config = try file_log.defaultLogConfig(a);
     errdefer log_config.deinit(a);
     var app_forward_loop_mode: types.LoopMode = .per_project;
+    var use_nftables: bool = false;
 
     std.Io.Dir.cwd().access(compat.io(), path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
@@ -299,6 +300,11 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                     ec.addFmt(ec.fieldPath("app_forward_loop_mode", .{}), .enum_value_invalid, "per_listener/per_project/global", "{s}", .{s}, "invalid app forward loop mode");
                     break :blk .per_project;
                 };
+            }
+        }
+        if (obj.get("use_nftables")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("use_nftables", .{}), ec)) |b| {
+                use_nftables = b;
             }
         }
     }
@@ -899,6 +905,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
     return .{
         .app_forward_loop_mode = app_forward_loop_mode,
+        .use_nftables = use_nftables,
         .log_config = log_config,
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,

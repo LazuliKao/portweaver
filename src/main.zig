@@ -11,6 +11,8 @@ const project_status = @import("impl/project_status.zig");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
 // 仅在 UCI 模式下导入 UCI 相关模块
 const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
+const nft_firewall = if (build_options.nftables_mode) @import("impl/nft_firewall.zig") else void;
+const nftables = if (build_options.nftables_mode) @import("nftables/mod.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
 const event_log = @import("event_log.zig");
 const process_lock = @import("process_lock.zig");
@@ -74,6 +76,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (build_options.frps_mode) {
         std.log.info("FRPS server mode enabled (build flag)", .{});
+    }
+    if (build_options.nftables_mode) {
+        std.log.info("nftables mode enabled (build flag)", .{});
     }
 
     var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
@@ -179,8 +184,14 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(pr
         };
     }
 
-    // UCI 模式：配置防火墙规则
-    if (build_options.uci_mode) {
+    // 防火墙规则：根据配置选择后端
+    if (build_options.nftables_mode and cfg.use_nftables) {
+        // 使用 nftables 后端
+        applyNftablesRules(allocator, cfg.projects) catch |err| {
+            std.log.warn("Failed to apply nftables rules: {any}", .{err});
+        };
+    } else if (build_options.uci_mode) {
+        // 使用 OpenWrt fw4 后端（默认）
         try applyFirewallRules(allocator, cfg.projects);
     }
 
@@ -245,6 +256,42 @@ fn applyFirewallRules(allocator: std.mem.Allocator, projects: []const config.Pro
     firewall.reloadFirewall(allocator) catch |err| {
         std.log.warn("Failed to reload firewall: {any}", .{err});
     };
+}
+
+/// 配置 nftables 规则（仅 nftables 模式）
+fn applyNftablesRules(allocator: std.mem.Allocator, projects: []const config.Project) !void {
+    if (!nftables.isLoaded()) {
+        std.log.warn("libnftables not available, skipping nftables rules", .{});
+        return;
+    }
+
+    var ctx = try nftables.NftablesContext.init(allocator);
+    defer ctx.deinit();
+
+    // Setup table and chains
+    std.log.info("Setting up nftables table...", .{});
+    nft_firewall.setupTable(&ctx) catch |err| {
+        std.log.warn("Failed to setup nftables table: {any}", .{err});
+        return;
+    };
+
+    // Clear old rules
+    std.log.info("Clearing old nftables rules...", .{});
+    nft_firewall.clearRules(&ctx) catch |err| {
+        std.log.warn("Failed to clear old nftables rules: {any}", .{err});
+    };
+
+    // Apply new rules
+    for (projects, 0..) |project, i| {
+        if (!project.enabled) continue;
+
+        std.log.info("Applying nftables rules for project {d}: {s}", .{ i + 1, project.remark });
+        nft_firewall.applyRulesForProject(&ctx, allocator, project) catch |err| {
+            std.log.warn("Failed to apply nftables rules for project {d}: {any}", .{ i + 1, err });
+        };
+    }
+
+    std.log.info("nftables rules applied successfully.", .{});
 }
 
 /// 记录项目配置信息

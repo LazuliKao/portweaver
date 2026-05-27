@@ -764,6 +764,9 @@ pub fn build(b: *std.Build) void {
     const frps = b.option(bool, "frps", "FRP Server Support") orelse false;
     options.addOption(bool, "frps_mode", frps);
 
+    const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
+    options.addOption(bool, "nftables_mode", nftables);
+
     const options_mod = options.createModule();
 
     // Standard target options allow the person running `zig build` to choose
@@ -924,6 +927,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("deps/fix"));
     exe.root_module.addIncludePath(b.path("deps/openwrt-tools"));
     exe.root_module.addIncludePath(b.path("deps/ubus"));
+    exe.root_module.addIncludePath(b.path("deps/nftables"));
 
     if (target.result.os.tag == .windows) {
         exe.root_module.linkSystemLibrary("ws2_32", .{});
@@ -1042,6 +1046,7 @@ pub fn build(b: *std.Build) void {
     mod_tests.root_module.addIncludePath(b.path("deps/fix"));
     mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
     mod_tests.root_module.addIncludePath(b.path("deps/ubus"));
+    mod_tests.root_module.addIncludePath(b.path("deps/nftables"));
 
     if (target.result.os.tag == .windows) {
         mod_tests.root_module.linkSystemLibrary("ws2_32", .{});
@@ -1115,6 +1120,7 @@ pub fn build(b: *std.Build) void {
     exe_tests.root_module.addIncludePath(b.path("deps/fix"));
     exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
     exe_tests.root_module.addIncludePath(b.path("deps/ubus"));
+    exe_tests.root_module.addIncludePath(b.path("deps/nftables"));
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);

@@ -419,6 +419,8 @@ pub const DdnsConfig = struct {
 
 pub const Config = struct {
     app_forward_loop_mode: LoopMode = .per_project,
+    /// 是否使用 nftables 作为防火墙后端（默认使用 OpenWrt fw4）
+    use_nftables: bool = false,
     log_config: file_log.LogConfig,
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
