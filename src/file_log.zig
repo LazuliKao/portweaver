@@ -174,25 +174,18 @@ pub const FileLogger = struct {
         const allocator = fba.allocator();
 
         const timestamp = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
-        const epoch_days = @divFloor(timestamp, 86400);
-        const secs_of_day = @mod(timestamp, 86400);
-        const hours = @divFloor(secs_of_day, 3600);
-        const mins = @divFloor(@rem(secs_of_day, 3600), 60);
-        const secs = @rem(secs_of_day, 60);
+        const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
+        const epoch_day = epoch_seconds.getEpochDay();
+        const day_seconds = epoch_seconds.getDaySeconds();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
 
-        const days_since_epoch: i64 = epoch_days;
-        const year_cycle = @divFloor(days_since_epoch, 146097);
-        const remaining_days = @rem(days_since_epoch, 146097);
-        const year_cycle_start = year_cycle * 400;
-        const century = @divFloor(remaining_days * 4 + 3, 146097);
-        const year_start = year_cycle_start + century * 100;
-        const century_day = remaining_days - (century * 100 * 365 + @divTrunc(century, 4));
-        const year_4cycle = @divFloor(century_day * 4 + 3, 1461);
-        const year = year_start + year_4cycle;
-        const year_day = century_day - year_4cycle * 365 - @divTrunc(year_4cycle, 4);
-        const month_adj = @divFloor(year_day * 12 + 6, 367);
-        const month = month_adj + 1;
-        const day = year_day - @divFloor(month_adj * 367, 12) + 1;
+        const year = year_day.year;
+        const month = month_day.month.numeric();
+        const day = month_day.day_index + 1;
+        const hours = day_seconds.getHoursIntoDay();
+        const mins = day_seconds.getMinutesIntoHour();
+        const secs = day_seconds.getSecondsIntoMinute();
 
         const level_str = switch (level) {
             .debug => "DEBUG",
