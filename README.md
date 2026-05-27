@@ -26,7 +26,7 @@ Create a `config.json` file:
 
 ```json
 {
-  "$schema": "./docs/portweaver-config.schema.json",
+  "$schema": "https://github.com/LazuliKao/portweaver/raw/refs/heads/main/docs/portweaver-config.schema.json",
   "projects": [
     {
       "remark": "Forward HTTP",

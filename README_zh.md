@@ -34,7 +34,7 @@ alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, cloudflare, huaweiclo
 
 ```json
 {
-    "$schema": "./docs/portweaver-config.schema.json",
+    "$schema": "https://github.com/LazuliKao/portweaver/raw/refs/heads/main/docs/portweaver-config.schema.json",
     "projects": [
         {
             "remark": "HTTP 转发",
