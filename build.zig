@@ -942,20 +942,23 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .macos) {
-        // Add framework search path if sysroot is specified
-        // See: https://github.com/ziglang/zig/issues/22704
-        // Framework paths need manual sysroot prefix, unlike library paths
         if (b.sysroot) |sysroot| {
+            // Add framework search path if sysroot is specified.
+            // See: https://github.com/ziglang/zig/issues/22704
+            // Framework paths need manual sysroot prefix, unlike library paths.
             const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
             exe.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
 
             // Only add /usr/lib, build system appends it to sysroot automatically
             exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-        }
 
-        exe.root_module.linkFramework("CoreFoundation", .{});
-        exe.root_module.linkFramework("Security", .{});
-        exe.root_module.linkFramework("IOKit", .{});
+            exe.root_module.linkFramework("CoreFoundation", .{});
+            exe.root_module.linkFramework("Security", .{});
+            exe.root_module.linkFramework("IOKit", .{});
+        }
+    }
+
+    if (target.result.os.tag == .linux) {
         exe.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 
@@ -1065,11 +1068,14 @@ pub fn build(b: *std.Build) void {
             const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
             mod_tests.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
             mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-        }
 
-        mod_tests.root_module.linkFramework("CoreFoundation", .{});
-        mod_tests.root_module.linkFramework("Security", .{});
-        mod_tests.root_module.linkFramework("IOKit", .{});
+            mod_tests.root_module.linkFramework("CoreFoundation", .{});
+            mod_tests.root_module.linkFramework("Security", .{});
+            mod_tests.root_module.linkFramework("IOKit", .{});
+        }
+    }
+
+    if (target.result.os.tag == .linux) {
         mod_tests.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 
