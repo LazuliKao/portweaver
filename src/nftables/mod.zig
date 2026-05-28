@@ -75,4 +75,12 @@ pub const NftablesContext = struct {
     pub fn setOutputFlags(self: *Self, flags: u32) !void {
         try libnftables.nft_ctx_output_set_flags(self.ctx, flags);
     }
+
+    pub fn listRules(self: *Self) ?[:0]const u8 {
+        self.runCommand("list table inet portweaver") catch {
+            // Table might not exist yet
+            return null;
+        };
+        return self.getOutputMsg();
+    }
 };

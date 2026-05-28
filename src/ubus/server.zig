@@ -11,6 +11,7 @@ const frp_status = if (build_options.frpc_mode or build_options.frps_mode) @impo
 const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.zig") else struct {};
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
+const nftables = if (build_options.nftables_mode) @import("../nftables/mod.zig") else struct {};
 const compat = @import("../compat.zig");
 const event_log = @import("../event_log.zig");
 const serialization = @import("serialization.zig");
@@ -165,6 +166,7 @@ const method_names = struct {
     pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
     pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
     pub const get_full_status: [:0]const u8 = "get_full_status";
+    pub const get_nftables_rules: [:0]const u8 = "get_nftables_rules";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -343,6 +345,16 @@ fn ubusThread(state: *RuntimeState) void {
             .n_policy = 0,
         },
     };
+    const nftablesMethods = if (build_options.nftables_mode) [_]c.ubus_method{
+        .{
+            .name = method_names.get_nftables_rules,
+            .handler = wrapHandler(getNftablesRules, void, null),
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
+    } else [_]c.ubus_method{};
     const frpMethods = if (build_options.frpc_mode or build_options.frps_mode) [_]c.ubus_method{
         .{
             .name = method_names.get_frp_status,
@@ -439,7 +451,7 @@ fn ubusThread(state: *RuntimeState) void {
             .n_policy = @intCast(ddns_info_policy.len),
         },
     } else [_]c.ubus_method{};
-    const methods = commonMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods;
+    const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods;
     var obj_type = c.ubus_object_type{
         .name = method_names.object_name,
         .id = 0,
@@ -1012,6 +1024,26 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
         .events = events_res.events,
     };
 }
+
+const GetNftablesRulesResponse = struct {
+    rules: []const u8,
+};
+
+fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNftablesRulesResponse {
+    _ = state;
+    if (!build_options.nftables_mode) {
+        return .{ .rules = "nftables support not compiled" };
+    }
+
+    var ctx = nftables.NftablesContext.init(allocator) catch {
+        return .{ .rules = "Failed to initialize nftables context" };
+    };
+    defer ctx.deinit();
+
+    const rules = ctx.listRules() orelse "No rules found or table does not exist";
+    return .{ .rules = rules };
+}
+
 
 fn currentTs() u64 {
     const seconds = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
