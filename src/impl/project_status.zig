@@ -7,6 +7,8 @@ const loop_manager = @import("app_forward/loop_manager.zig");
 const uv = @import("app_forward/uv.zig");
 const c = uv.c;
 const compat = @import("../compat.zig");
+const build_options = @import("build_options");
+const nft_fw = if (build_options.nftables_mode) @import("nft_firewall.zig") else void;
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
 
@@ -292,14 +294,33 @@ pub const ProjectHandle = struct {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
 
-        return self.collectProjectStatsLocked();
+        var stats = self.collectProjectStatsLocked();
+
+        // Add nftables firewall stats when enabled
+        if (build_options.nftables_mode and self.shouldUseNftStats()) {
+            if (self.collectNftStatsLocked()) |nft| {
+                stats.bytes_in += nft.bytes_in;
+                stats.bytes_out += nft.bytes_out;
+            } else |_| {}
+        }
+
+        return stats;
     }
 
     pub fn getProjectRuntimeInfo(self: *ProjectHandle) ProjectRuntimeInfo {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
 
-        const s = self.collectProjectStatsLocked();
+        var s = self.collectProjectStatsLocked();
+
+        // Add nftables firewall stats when enabled
+        if (build_options.nftables_mode and self.shouldUseNftStats()) {
+            if (self.collectNftStatsLocked()) |nft| {
+                s.bytes_in += nft.bytes_in;
+                s.bytes_out += nft.bytes_out;
+            } else |_| {}
+        }
+
         return .{
             .active_ports = self.active_ports,
             .bytes_in = s.bytes_in,
@@ -393,7 +414,78 @@ pub const ProjectHandle = struct {
     pub fn isRuntimeEnabled(self: *ProjectHandle) bool {
         return self.runtime_enabled.load(.seq_cst);
     }
+
+    /// Whether this project should collect nftables counter stats.
+    /// Requires: nftables build, enable_firewall_stats flag, and add_firewall_forward flag.
+    fn shouldUseNftStats(self: *const ProjectHandle) bool {
+        if (!build_options.nftables_mode) return false;
+        if (!self.cfg.enable_firewall_stats) return false;
+        return self.cfg.add_firewall_forward;
+    }
+
+    /// Collect nftables counter stats by creating a temporary NftablesContext,
+    /// enabling JSON output, and reading the counters for each port+proto combination.
+    /// Must be called while lock is held.
+    fn collectNftStatsLocked(self: *ProjectHandle) !TrafficStats {
+        var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0, .active_sessions = 0 };
+        if (build_options.nftables_mode) {
+            var ctx = try nft_fw.NftablesContext.init(self.allocator);
+            defer ctx.deinit();
+            try ctx.setJsonOutput();
+
+            if (self.cfg.port_mappings.len > 0) {
+                for (self.cfg.port_mappings) |mapping| {
+                    collectNftCountersForPorts(&ctx, self.allocator, mapping.listen_port, mapping.protocol, &stats);
+                }
+            } else {
+                var port_buf: [5]u8 = undefined;
+                const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{self.cfg.listen_port}) catch unreachable;
+                collectNftCountersForPorts(&ctx, self.allocator, port_str, self.cfg.protocol, &stats);
+            }
+        }
+        return stats;
+    }
 };
+
+/// Reads nftables counter stats for a given port string and protocol.
+/// Uses `anytype` for the context to avoid compile-time issues when nftables_mode is false.
+/// dstnat counter → bytes_in (inbound traffic), srcnat counter → bytes_out (outbound traffic).
+fn collectNftCountersForPorts(
+    ctx: anytype,
+    allocator: std.mem.Allocator,
+    port_str: []const u8,
+    protocol: types.Protocol,
+    stats: *TrafficStats,
+) void {
+    if (build_options.nftables_mode) {
+        const protos: [2][]const u8 = switch (protocol) {
+            .tcp => .{ "tcp", "tcp" },
+            .udp => .{ "udp", "udp" },
+            .both => .{ "tcp", "udp" },
+        };
+        const count: usize = if (protocol == .both) 2 else 1;
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const proto = protos[i];
+            // Read dstnat counter (inbound traffic)
+            if (std.fmt.allocPrint(allocator, "pw_{s}_{s}_dstnat", .{ port_str, proto })) |dstnat_name| {
+                defer allocator.free(dstnat_name);
+                if (nft_fw.getCounterStats(ctx, allocator, dstnat_name)) |dstnat| {
+                    stats.bytes_in += dstnat.bytes;
+                } else |_| {}
+            } else |_| {}
+
+            // Read srcnat counter (outbound traffic)
+            if (std.fmt.allocPrint(allocator, "pw_{s}_{s}_srcnat", .{ port_str, proto })) |srcnat_name| {
+                defer allocator.free(srcnat_name);
+                if (nft_fw.getCounterStats(ctx, allocator, srcnat_name)) |srcnat| {
+                    stats.bytes_out += srcnat.bytes;
+                } else |_| {}
+            } else |_| {}
+        }
+    }
+}
 pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {
     for (handles.items) |*handle| {
         handle.deinit();
