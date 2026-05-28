@@ -184,8 +184,8 @@ pub const EventLogger = struct {
 /// Default capacity for the global event logger
 pub const DEFAULT_CAPACITY: usize = 20;
 
-/// Global event logger instance (initialized lazily)
-var global_logger: ?EventLogger = null;
+/// Global event logger instance (initialized lazily, heap-allocated)
+var global_logger_ptr: std.atomic.Value(?*EventLogger) = std.atomic.Value(?*EventLogger).init(null);
 var global_logger_lock: std.Io.Mutex = .init;
 
 /// Initialize the global event logger
@@ -194,13 +194,20 @@ pub fn initGlobal(allocator: std.mem.Allocator) void {
     global_logger_lock.lockUncancelable(compat.io());
     defer global_logger_lock.unlock(compat.io());
 
-    if (global_logger == null) {
-        global_logger = EventLogger.init(allocator, DEFAULT_CAPACITY) catch |err| {
-            std.log.err("Failed to initialize event logger: {any}", .{err});
-            return;
-        };
-        std.log.info("Event logger initialized with capacity {d}", .{DEFAULT_CAPACITY});
-    }
+    if (global_logger_ptr.load(.acquire) != null) return;
+
+    const logger = allocator.create(EventLogger) catch |err| {
+        std.log.err("Failed to allocate event logger: {any}", .{err});
+        return;
+    };
+    logger.* = EventLogger.init(allocator, DEFAULT_CAPACITY) catch |err| {
+        std.log.err("Failed to initialize event logger: {any}", .{err});
+        allocator.destroy(logger);
+        return;
+    };
+
+    global_logger_ptr.store(logger, .release);
+    std.log.info("Event logger initialized with capacity {d}", .{DEFAULT_CAPACITY});
 }
 
 /// Deinitialize the global event logger
@@ -208,18 +215,17 @@ pub fn deinitGlobal() void {
     global_logger_lock.lockUncancelable(compat.io());
     defer global_logger_lock.unlock(compat.io());
 
-    if (global_logger) |*logger| {
+    if (global_logger_ptr.swap(null, .acq_rel)) |logger| {
         logger.deinit();
-        global_logger = null;
+        logger.allocator.destroy(logger);
     }
 }
 
 /// Get the global event logger
 /// Returns null if not initialized
+/// Uses atomic load — no mutex contention on the read path
 pub fn getGlobal() ?*EventLogger {
-    global_logger_lock.lockUncancelable(compat.io());
-    defer global_logger_lock.unlock(compat.io());
-    return if (global_logger) |*logger| logger else null;
+    return global_logger_ptr.load(.acquire);
 }
 
 /// Convenience function to add an event to the global logger
