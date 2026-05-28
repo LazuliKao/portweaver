@@ -270,7 +270,7 @@ fn applyNftablesRules(allocator: std.mem.Allocator, projects: []const config.Pro
 
     // Setup table and chains
     std.log.info("Setting up nftables table...", .{});
-    nft_firewall.setupTable(&ctx) catch |err| {
+    nft_firewall.setupTable(&ctx, allocator) catch |err| {
         std.log.warn("Failed to setup nftables table: {any}", .{err});
         return;
     };
