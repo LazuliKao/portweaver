@@ -99,9 +99,12 @@ pub const EventLogger = struct {
         defer self.lock.unlock(compat.io());
 
         // Trim oldest events if at capacity
-        while (self.events.items.len >= self.capacity) {
-            var oldest = self.events.orderedRemove(0);
-            oldest.deinit(self.allocator);
+        if (self.events.items.len >= self.capacity) {
+            const excess = self.events.items.len - self.capacity + 1;
+            for (self.events.items[0..excess]) |*old| {
+                old.deinit(self.allocator);
+            }
+            try self.events.replaceRange(0, excess, &.{});
         }
 
         // Duplicate the message so we own it
