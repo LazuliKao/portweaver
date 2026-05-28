@@ -76,7 +76,9 @@ pub const ErrorCollector = struct {
             .expected = expected,
             .actual = actual,
             .message = message,
-        }) catch {};
+        }) catch |err| {
+            std.log.warn("ErrorCollector: failed to append validation error: {}", .{err});
+        };
     }
 
     /// Convenience: format `actual` from a runtime value.
@@ -269,9 +271,14 @@ pub const Project = struct {
     enable_app_forward: bool = false,
     /// reuseaddr 绑定到本地端口
     reuseaddr: bool = true,
-    /// 启用流量统计（仅当 enable_app_forward=true 时有效）
-    /// 注意：启用统计后无法使用防火墙转发（add_firewall_forward 会被强制禁用）
-    enable_stats: bool = false,
+    /// 启用应用层转发流量统计（仅当 enable_app_forward=true 时有效）
+    /// 由 libuv forwarder 在用户态统计字节数和活跃会话数
+    enable_app_stats: bool = false,
+    /// 启用防火墙转发流量统计（仅当使用 nftables 后端时有效）
+    /// 通过 nftables named counter 在内核层统计，开销极低
+    /// 与 enable_app_stats 独立，两者可同时开启（数据相加）
+    /// 注意：UCI/fw4 防火墙模式不支持此功能
+    enable_firewall_stats: bool = false,
     /// Application-forward loop sharing override. Null inherits Config.app_forward_loop_mode.
     app_forward_loop_mode: ?LoopMode = null,
 
