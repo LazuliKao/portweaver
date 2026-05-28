@@ -38,8 +38,8 @@ pub fn parsePortRange(port_str: []const u8) !PortRange {
     return .{ .start = port, .end = port };
 }
 
-pub fn portToString(port: u16, allocator: std.mem.Allocator) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "{}", .{port});
+pub fn portToString(port: u16, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{}", .{port}) catch unreachable;
 }
 
 test "app forward common: parsePortRange handles single and ranged ports" {
@@ -59,9 +59,8 @@ test "app forward common: parsePortRange rejects invalid ranges" {
 }
 
 test "app forward common: portToString formats port" {
-    const allocator = std.testing.allocator;
-    const port = try portToString(65535, allocator);
-    defer allocator.free(port);
+    var buf: [5]u8 = undefined;
+    const port = portToString(65535, &buf);
 
     try std.testing.expectEqualStrings("65535", port);
 }

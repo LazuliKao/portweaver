@@ -88,10 +88,10 @@ pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_sta
     }
 
     // Single-port mode
-    const listen_port_str = try common.portToString(projectHandle.cfg.listen_port, allocator);
-    defer allocator.free(listen_port_str);
-    const target_port_str = try common.portToString(projectHandle.cfg.target_port, allocator);
-    defer allocator.free(target_port_str);
+    var listen_port_buf: [5]u8 = undefined;
+    const listen_port_str = common.portToString(projectHandle.cfg.listen_port, &listen_port_buf);
+    var target_port_buf: [5]u8 = undefined;
+    const target_port_str = common.portToString(projectHandle.cfg.target_port, &target_port_buf);
 
     startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
         .protocol = projectHandle.cfg.protocol,
@@ -116,10 +116,10 @@ pub fn startForwardingWithLoopManager(allocator: std.mem.Allocator, projectHandl
         return;
     }
 
-    const listen_port_str = try common.portToString(projectHandle.cfg.listen_port, allocator);
-    defer allocator.free(listen_port_str);
-    const target_port_str = try common.portToString(projectHandle.cfg.target_port, allocator);
-    defer allocator.free(target_port_str);
+    var listen_port_buf: [5]u8 = undefined;
+    const listen_port_str = common.portToString(projectHandle.cfg.listen_port, &listen_port_buf);
+    var target_port_buf: [5]u8 = undefined;
+    const target_port_str = common.portToString(projectHandle.cfg.target_port, &target_port_buf);
     try startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
         .protocol = projectHandle.cfg.protocol,
         .listen_port = listen_port_str,
