@@ -5,7 +5,7 @@ const common = @import("app_forward/common.zig");
 const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
 const loop_manager = @import("app_forward/loop_manager.zig");
-const uv = @import("app_forward/uv.zig");
+const forwarder_runtime = @import("app_forward/forwarder_runtime.zig");
 
 pub const ForwardError = common.ForwardError;
 
@@ -25,7 +25,7 @@ const SharedTcpStartContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         const fwd = try TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
         try ctx.projectHandle.registerTcpHandle(fwd);
         errdefer {
@@ -48,7 +48,7 @@ const SharedUdpStartContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         const fwd = try UdpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
         try ctx.projectHandle.registerUdpHandle(fwd);
         errdefer {

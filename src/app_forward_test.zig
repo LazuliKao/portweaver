@@ -5,7 +5,7 @@ const types = @import("./config/types.zig");
 const app_forward = @import("./impl/app_forward.zig");
 const loop_manager = @import("./impl/app_forward/loop_manager.zig");
 const project_status = @import("./impl/project_status.zig");
-const uv = @import("./impl/app_forward/uv.zig");
+const forwarder_runtime = @import("./impl/app_forward/forwarder_runtime.zig");
 const compat = @import("./compat.zig");
 
 const run_duration_ns = 1 * std.time.ns_per_s;
@@ -119,7 +119,7 @@ const TcpCreateContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         ctx.forwarder = try app_forward.TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.handle, token, ctx.listen_port, ctx.target_port);
     }
 };
@@ -134,7 +134,7 @@ const UdpCreateContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         ctx.forwarder = try app_forward.UdpForwarder.createOnRuntimeThread(ctx.allocator, ctx.handle, token, ctx.listen_port, ctx.target_port);
     }
 };
@@ -145,7 +145,7 @@ const TcpDestroyContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         ctx.forwarder.destroyOnRuntimeThread(token);
     }
 };
@@ -156,7 +156,7 @@ const UdpDestroyContext = struct {
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        const token = uv.runtimeToken(ctx.runtime.ctx.?);
+        const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         ctx.forwarder.destroyOnRuntimeThread(token);
     }
 };
@@ -318,7 +318,7 @@ fn tcpStartThread(ctx: *TcpRunContext) void {
         .callback = struct {
             fn run(ptr: *anyopaque) !void {
                 const start_ctx: *TcpRunContext = @ptrCast(@alignCast(ptr));
-                const token = uv.runtimeToken(start_ctx.runtime.ctx.?);
+                const token = forwarder_runtime.runtimeToken(start_ctx.runtime.ctx.?);
                 try start_ctx.forwarder.startOnRuntimeThread(token, start_ctx.handle);
             }
         }.run,
@@ -336,7 +336,7 @@ fn udpStartThread(ctx: *UdpRunContext) void {
         .callback = struct {
             fn run(ptr: *anyopaque) !void {
                 const start_ctx: *UdpRunContext = @ptrCast(@alignCast(ptr));
-                const token = uv.runtimeToken(start_ctx.runtime.ctx.?);
+                const token = forwarder_runtime.runtimeToken(start_ctx.runtime.ctx.?);
                 try start_ctx.forwarder.startOnRuntimeThread(token, start_ctx.handle);
             }
         }.run,

@@ -1,10 +1,10 @@
 const std = @import("std");
 const types = @import("../../config/types.zig");
-const uv = @import("uv.zig");
+const forwarder_runtime = @import("forwarder_runtime.zig");
 const project_status = @import("../project_status.zig");
 const compat = @import("../../compat.zig");
 
-const c = uv.c;
+const c = forwarder_runtime.c;
 
 pub const LoopError = error{
     RuntimeStopped,
@@ -184,7 +184,7 @@ pub const LoopRuntime = struct {
             return;
         }
 
-        const fwd_allocator = uv.buildAllocator(&self.allocator);
+        const fwd_allocator = forwarder_runtime.buildAllocator(&self.allocator);
         const rc = c.forwarder_runtime_init(self.ctx, zigAsyncCallback, self, fwd_allocator);
         self.publishInit(rc);
         if (rc != 0) {

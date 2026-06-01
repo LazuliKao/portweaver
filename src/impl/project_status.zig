@@ -4,8 +4,8 @@ const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
 const app_forward = @import("app_forward.zig");
 const loop_manager = @import("app_forward/loop_manager.zig");
-const uv = @import("app_forward/uv.zig");
-const c = uv.c;
+const forwarder_runtime = @import("app_forward/forwarder_runtime.zig");
+const c = forwarder_runtime.c;
 const compat = @import("../compat.zig");
 const build_options = @import("build_options");
 const nft_fw = if (build_options.nftables_mode) @import("nft_firewall.zig") else void;
@@ -217,7 +217,7 @@ pub const ProjectHandle = struct {
     /// Runs on the owning runtime thread during runtime shutdown, after backend
     /// close callbacks have drained and before the runtime itself is closed.
     pub fn destroySharedForwarderCResourcesForRuntime(self: *ProjectHandle, runtime: *c.forwarder_runtime_t) void {
-        const token = uv.runtimeToken(runtime);
+        const token = forwarder_runtime.runtimeToken(runtime);
         self.lock.lockUncancelable(compat.io());
         const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
             self.lock.unlock(compat.io());

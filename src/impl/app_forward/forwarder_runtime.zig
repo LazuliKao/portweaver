@@ -21,11 +21,15 @@ const AllocationHeader = extern struct {
     len: usize,
 };
 
-pub fn versionString() [:0]const u8 {
+/// Backend-specific diagnostic helper kept isolated in the runtime adapter.
+/// The current forwarder runtime backend is libuv, so this calls the libuv C API.
+pub fn backendVersion() [:0]const u8 {
     return std.mem.span(c.uv_get_version_string());
 }
-pub inline fn printVersion() void {
-    std.log.debug("libuv version: {s}", .{versionString()});
+
+/// Backend-specific version logging for the currently linked runtime backend.
+pub inline fn logBackendVersion() void {
+    std.log.debug("forwarder runtime backend version: {s}", .{backendVersion()});
 }
 
 export fn forwarder_c_malloc(ctx: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {

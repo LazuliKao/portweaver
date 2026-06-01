@@ -740,6 +740,53 @@ fn addCombinedGoLib(
     };
 }
 
+const ForwardBackend = enum { libuv, asio };
+
+fn addForwarderBackend(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    backend: ForwardBackend,
+    root_module: *std.Build.Module,
+) void {
+    root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+
+    switch (backend) {
+        .libuv => {
+            const uv = addLibuv(b, target, optimize);
+            root_module.linkLibrary(uv);
+            root_module.addIncludePath(b.path("deps/libuv/include"));
+            root_module.addIncludePath(b.path("deps/libuv/src"));
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+            });
+        },
+        .asio => {
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_asio/runtime.cpp"),
+                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_asio/tcp_forwarder.cpp"),
+                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_asio/udp_forwarder.cpp"),
+                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+            });
+            root_module.linkSystemLibrary("c++", .{});
+        },
+    }
+}
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -766,6 +813,9 @@ pub fn build(b: *std.Build) void {
 
     const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
     options.addOption(bool, "nftables_mode", nftables);
+
+    const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv or asio)") orelse .libuv;
+    options.addOption(ForwardBackend, "forward_backend", forward_backend);
 
     const options_mod = options.createModule();
 
@@ -899,27 +949,8 @@ pub fn build(b: *std.Build) void {
         exe.step.dependOn(libgolibs_build_step.step);
     }
 
-    // Add C forwarder implementation
-    // Build and link libuv from deps/libuv.
-    const uv = addLibuv(b, target, optimize);
-    exe.root_module.linkLibrary(uv);
-    exe.root_module.addIncludePath(b.path("deps/libuv/include"));
-    exe.root_module.addIncludePath(b.path("deps/libuv/src"));
-
-    // Add C forwarder implementation
-    exe.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
+    // Add C/C++ forwarder implementation (selected via -Dforward_backend)
+    addForwarderBackend(b, target, optimize, forward_backend, exe.root_module);
 
     // Add C include paths for UCI library headers
     exe.root_module.addIncludePath(b.path("deps/uci"));
@@ -1028,23 +1059,7 @@ pub fn build(b: *std.Build) void {
         mod_tests.step.dependOn(libgolibs_build_step.step);
     }
 
-    const uv_mod_tests = addLibuv(b, target, optimize);
-    mod_tests.root_module.linkLibrary(uv_mod_tests);
-    mod_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
-    mod_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
-    mod_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    mod_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    mod_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    mod_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
+    addForwarderBackend(b, target, optimize, forward_backend, mod_tests.root_module);
     mod_tests.root_module.addIncludePath(b.path("deps/uci"));
     mod_tests.root_module.addIncludePath(b.path("deps/fix"));
     mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
@@ -1105,23 +1120,7 @@ pub fn build(b: *std.Build) void {
         exe_tests.root_module.addObjectFile(libgolibs_path);
         exe_tests.step.dependOn(libgolibs_build_step.step);
     }
-    const uv_exe_tests = addLibuv(b, target, optimize);
-    exe_tests.root_module.linkLibrary(uv_exe_tests);
-    exe_tests.root_module.addIncludePath(b.path("deps/libuv/include"));
-    exe_tests.root_module.addIncludePath(b.path("deps/libuv/src"));
-    exe_tests.root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
-    exe_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    exe_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
-    exe_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
-        .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
-    });
+    addForwarderBackend(b, target, optimize, forward_backend, exe_tests.root_module);
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));
     exe_tests.root_module.addIncludePath(b.path("deps/fix"));
     exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));

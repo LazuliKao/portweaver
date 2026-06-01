@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
 
     const cfg = &result;
 
-    @import("impl/app_forward/uv.zig").printVersion();
+    @import("impl/app_forward/forwarder_runtime.zig").logBackendVersion();
     std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
     if (build_options.frpc_mode) {
         std.log.info("FRPC client mode enabled (build flag)", .{});

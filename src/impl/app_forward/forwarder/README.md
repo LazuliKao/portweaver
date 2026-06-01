@@ -123,40 +123,59 @@ Important: `*_destroy(...)` must never tear down `forwarder_runtime_t`.
 
 ## Current ABI Status
 
-`forwarder.h` is the **target ABI contract** for the refactor.
+`forwarder.h` is the **authoritative ABI contract**.
 
-At the moment, the reverted legacy `forwarder.c` still implements an older self-owned-loop model. That means the header is intentionally ahead of the current C implementation.
-
-So during this phase:
-
-- `forwarder.h` describes the architecture we are moving to
-- Zig is being aligned to that contract
-- C implementation will later be rewritten to satisfy that contract
+The libuv implementation (`impl_libuv/`) fully satisfies this contract. An Asio
+implementation (`impl_asio/`) will also satisfy the same contract. Both backends
+are behind the same C ABI boundary — Zig only imports `forwarder.h`, never
+backend-specific headers.
 
 ## Backend Replaceability
 
-This API is already much better than exposing raw libuv types to Zig, but it is best viewed as:
+This API is **backend neutral**:
 
-- **backend hidden**
-- not yet fully **backend neutral**
-
-What helps replaceability today:
-
-- Zig does not import `uv.h`
-- runtime state is opaque
+- Zig does not import `uv.h` or any backend header
+- runtime state is opaque (Zig only sees `forwarder_runtime_t *`)
 - forwarders use semantic operations (`create`, `start`, `request_stop`, `destroy`, `get_stats`)
 
-What still reflects current backend assumptions:
+Design assumptions that are intentional, not limitations:
 
-- exported names still assume a runtime/executor model
-- the contract assumes a dedicated runtime thread and a wake mechanism
-- `uv_get_version_string()` is still a backend-specific utility leak
+- exported names use a runtime/executor model — this reflects the architectural
+  contract, not a specific backend
+- the contract assumes a dedicated runtime thread and a wake mechanism — this
+  keeps Zig-side orchestration simple and ownership clear
 
-That is acceptable for now. The important part is to preserve the ownership and lifecycle split:
+The ownership and lifecycle split is the core invariant:
 
 - runtime owns execution
 - forwarder owns listener state
 - caller owns forwarder pointer lifetime
+
+## Implementation Structure
+
+| Directory | Backend | Status |
+|-----------|---------|--------|
+| `impl_libuv/` | libuv | Active implementation |
+| `impl_asio/` | Boost.Asio (C++) | Planned |
+
+Both backends implement the same `forwarder.h` contract.
+
+### Public ABI vs impl-internal helpers
+
+The functions declared in `forwarder.h` are the public ABI. In addition,
+each backend may expose its own impl-internal helpers that are NOT part of
+the public contract:
+
+- `forwarder_runtime_get_loop(forwarder_runtime_t *)` — libuv-only, returns
+  `uv_loop_t *`. Used by TCP/UDP forwarders within `impl_libuv/` to access
+  the backend event loop.
+- `forwarder_runtime_get_allocator(forwarder_runtime_t *)` — libuv-only,
+  returns the stored `forwarder_allocator_t`. Used by forwarders to allocate
+  through the runtime's allocator bridge.
+
+These helpers are internal to `impl_libuv/` and must not be called from
+Zig or from any code outside the implementation directory. An Asio backend
+will provide its own equivalent helpers as needed.
 
 ## Stats Semantics
 
