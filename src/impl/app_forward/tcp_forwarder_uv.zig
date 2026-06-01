@@ -23,7 +23,7 @@ pub const TcpForwarder = struct {
             .forwarder = null,
         };
 
-        fwd.setup(runtime, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_stats, &error_code) catch |err| {
+        fwd.setup(runtime, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;

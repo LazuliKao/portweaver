@@ -9,6 +9,7 @@ const c = uv.c;
 const compat = @import("../compat.zig");
 const build_options = @import("build_options");
 const nft_fw = if (build_options.nftables_mode) @import("nft_firewall.zig") else void;
+const nft_mod = if (build_options.nftables_mode) @import("../nftables/mod.zig") else void;
 pub const TcpForwarder = tcp_uv.TcpForwarder;
 pub const UdpForwarder = udp_uv.UdpForwarder;
 
@@ -339,6 +340,10 @@ pub const ProjectHandle = struct {
 
         const total_count = self.tcp_forwarders.items.len + self.udp_forwarders.items.len;
         if (total_count == 0) {
+            // No app-layer forwarders — try nftables counters for pure firewall mode
+            if (self.shouldUseNftStats()) {
+                return self.collectNftForwarderStats(allocator);
+            }
             return &[_]ForwarderStats{};
         }
 
@@ -423,69 +428,142 @@ pub const ProjectHandle = struct {
         return self.cfg.add_firewall_forward;
     }
 
-    /// Collect nftables counter stats by creating a temporary NftablesContext,
-    /// enabling JSON output, and reading the counters for each port+proto combination.
+    /// Collect nftables counter stats by running a single batch `reset counters`
+    /// command. This avoids output buffer accumulation bugs from sequential reads.
     /// Must be called while lock is held.
     fn collectNftStatsLocked(self: *ProjectHandle) !TrafficStats {
         var stats = TrafficStats{ .bytes_in = 0, .bytes_out = 0, .listen_port = 0, .active_sessions = 0 };
         if (build_options.nftables_mode) {
-            var ctx = try nft_fw.NftablesContext.init(self.allocator);
+            var ctx = try nft_mod.NftablesContext.init(self.allocator);
             defer ctx.deinit();
             try ctx.setJsonOutput();
 
+            // Batch reset ALL counters in one command — single kernel round-trip,
+            // no output buffer accumulation between reads.
+            const cmd: [*:0]const u8 = "reset counters table inet portweaver";
+            ctx.runCommand(cmd) catch return stats;
+            const batch_output = ctx.getOutputMsg() orelse return stats;
+
             if (self.cfg.port_mappings.len > 0) {
                 for (self.cfg.port_mappings) |mapping| {
-                    collectNftCountersForPorts(&ctx, self.allocator, mapping.listen_port, mapping.protocol, &stats);
+                    collectNftCountersFromBatch(batch_output, mapping.listen_port, mapping.protocol, &stats);
                 }
             } else {
                 var port_buf: [5]u8 = undefined;
                 const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{self.cfg.listen_port}) catch unreachable;
-                collectNftCountersForPorts(&ctx, self.allocator, port_str, self.cfg.protocol, &stats);
+                collectNftCountersFromBatch(batch_output, port_str, self.cfg.protocol, &stats);
             }
         }
         return stats;
     }
+
+    /// Generate per-port ForwarderStats from nftables counters when no app-layer
+    /// forwarders exist (pure firewall mode). Must be called while lock is held.
+    fn collectNftForwarderStats(self: *ProjectHandle, allocator: std.mem.Allocator) ![]ForwarderStats {
+        if (!build_options.nftables_mode) return &[_]ForwarderStats{};
+
+        var ctx = try nft_mod.NftablesContext.init(allocator);
+        defer ctx.deinit();
+        try ctx.setJsonOutput();
+        const cmd: [*:0]const u8 = "reset counters table inet portweaver";
+        ctx.runCommand(cmd) catch return &[_]ForwarderStats{};
+        const batch = ctx.getOutputMsg() orelse return &[_]ForwarderStats{};
+
+        var stats_list: std.ArrayList(ForwarderStats) = .empty;
+        errdefer stats_list.deinit(allocator);
+
+        if (self.cfg.port_mappings.len > 0) {
+            for (self.cfg.port_mappings) |mapping| {
+                const port = parsePortPrefix(mapping.listen_port);
+                for (protocolNames(mapping.protocol)) |proto| {
+                    const entry = try buildNftForwarderStats(allocator, batch, mapping.listen_port, proto, port);
+                    try stats_list.append(allocator, entry);
+                }
+            }
+        } else {
+            var port_buf: [5]u8 = undefined;
+            const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{self.cfg.listen_port}) catch unreachable;
+            for (protocolNames(self.cfg.protocol)) |proto| {
+                const entry = try buildNftForwarderStats(allocator, batch, port_str, proto, self.cfg.listen_port);
+                try stats_list.append(allocator, entry);
+            }
+        }
+
+        return stats_list.toOwnedSlice(allocator);
+    }
 };
 
-/// Reads nftables counter stats for a given port string and protocol.
-/// Uses `anytype` for the context to avoid compile-time issues when nftables_mode is false.
+/// Reads nftables counter stats from a batch JSON output for a given port+protocol.
 /// dstnat counter → bytes_in (inbound traffic), srcnat counter → bytes_out (outbound traffic).
-fn collectNftCountersForPorts(
-    ctx: anytype,
-    allocator: std.mem.Allocator,
+/// No allocations — counter names are constructed on the stack.
+fn collectNftCountersFromBatch(
+    batch_json: []const u8,
     port_str: []const u8,
     protocol: types.Protocol,
     stats: *TrafficStats,
 ) void {
-    if (build_options.nftables_mode) {
-        const protos: [2][]const u8 = switch (protocol) {
-            .tcp => .{ "tcp", "tcp" },
-            .udp => .{ "udp", "udp" },
-            .both => .{ "tcp", "udp" },
-        };
-        const count: usize = if (protocol == .both) 2 else 1;
+    if (!build_options.nftables_mode) return;
 
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            const proto = protos[i];
-            // Read dstnat counter (inbound traffic)
-            if (std.fmt.allocPrint(allocator, "pw_{s}_{s}_dstnat", .{ port_str, proto })) |dstnat_name| {
-                defer allocator.free(dstnat_name);
-                if (nft_fw.getCounterStats(ctx, allocator, dstnat_name)) |dstnat| {
-                    stats.bytes_in += dstnat.bytes;
-                } else |_| {}
-            } else |_| {}
+    for (protocolNames(protocol)) |proto| {
+        // dstnat counter → bytes_in
+        var dstnat_buf: [64]u8 = undefined;
+        const dstnat_name = std.fmt.bufPrint(&dstnat_buf, "pw_{s}_{s}_dstnat", .{ port_str, proto }) catch continue;
+        if (nft_fw.parseNamedCounter(batch_json, dstnat_name)) |cnt| {
+            stats.bytes_in += cnt.bytes;
+        }
 
-            // Read srcnat counter (outbound traffic)
-            if (std.fmt.allocPrint(allocator, "pw_{s}_{s}_srcnat", .{ port_str, proto })) |srcnat_name| {
-                defer allocator.free(srcnat_name);
-                if (nft_fw.getCounterStats(ctx, allocator, srcnat_name)) |srcnat| {
-                    stats.bytes_out += srcnat.bytes;
-                } else |_| {}
-            } else |_| {}
+        // srcnat counter → bytes_out
+        var srcnat_buf: [64]u8 = undefined;
+        const srcnat_name = std.fmt.bufPrint(&srcnat_buf, "pw_{s}_{s}_srcnat", .{ port_str, proto }) catch continue;
+        if (nft_fw.parseNamedCounter(batch_json, srcnat_name)) |cnt| {
+            stats.bytes_out += cnt.bytes;
         }
     }
 }
+
+/// Build a single ForwarderStats entry from nftables counters.
+fn buildNftForwarderStats(
+    allocator: std.mem.Allocator,
+    batch_json: []const u8,
+    port_str: []const u8,
+    proto: []const u8,
+    local_port: u16,
+) !ForwarderStats {
+    var entry = ForwarderStats{
+        .protocol = proto,
+        .local_port = local_port,
+        .bytes_in = 0,
+        .bytes_out = 0,
+        .active_sessions = 0,
+    };
+    const dstnat_name = try std.fmt.allocPrint(allocator, "pw_{s}_{s}_dstnat", .{ port_str, proto });
+    defer allocator.free(dstnat_name);
+    if (nft_fw.parseNamedCounter(batch_json, dstnat_name)) |cnt| entry.bytes_in = cnt.bytes;
+
+    const srcnat_name = try std.fmt.allocPrint(allocator, "pw_{s}_{s}_srcnat", .{ port_str, proto });
+    defer allocator.free(srcnat_name);
+    if (nft_fw.parseNamedCounter(batch_json, srcnat_name)) |cnt| entry.bytes_out = cnt.bytes;
+
+    return entry;
+}
+
+/// Returns the protocol name strings for a Protocol enum value.
+fn protocolNames(protocol: types.Protocol) []const []const u8 {
+    return switch (protocol) {
+        .tcp => &[_][]const u8{"tcp"},
+        .udp => &[_][]const u8{"udp"},
+        .both => &[_][]const u8{ "tcp", "udp" },
+    };
+}
+
+/// Parses the first port number from a port string (e.g. "8080-8090" → 8080, "80" → 80).
+fn parsePortPrefix(port_str: []const u8) u16 {
+    if (std.mem.indexOf(u8, port_str, "-")) |dash| {
+        return std.fmt.parseInt(u16, port_str[0..dash], 10) catch 0;
+    }
+    return std.fmt.parseInt(u16, port_str, 10) catch 0;
+}
+
 pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {
     for (handles.items) |*handle| {
         handle.deinit();

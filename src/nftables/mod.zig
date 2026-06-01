@@ -72,8 +72,17 @@ pub const NftablesContext = struct {
         try libnftables.nft_ctx_set_debug(self.ctx, level);
     }
 
+    /// Sets output flags on the nftables context.
     pub fn setOutputFlags(self: *Self, flags: u32) !void {
         try libnftables.nft_ctx_output_set_flags(self.ctx, flags);
+    }
+
+    /// Enables JSON output mode for the nftables context.
+    /// When enabled, commands like `list counters` return JSON instead of text.
+    pub fn setJsonOutput(self: *Self) !void {
+        // NFT_CTX_OUTPUT_JSON = 1 << 4 = 16
+        const NFT_CTX_OUTPUT_JSON: u32 = 1 << 4;
+        try self.setOutputFlags(NFT_CTX_OUTPUT_JSON);
     }
 
     pub fn listRules(self: *Self) ?[:0]const u8 {

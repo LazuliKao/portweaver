@@ -413,8 +413,12 @@
           "$ref": "#/definitions/LoopMode",
           "description": "Application-forward loop sharing override. Inherits global app_forward_loop_mode if omitted."
         },
-        "enable_stats": {
-          "description": "Enable traffic statistics (only when enable_app_forward=true)",
+        "enable_app_stats": {
+          "description": "Enable application-layer traffic statistics (only when enable_app_forward=true)",
+          "type": "boolean"
+        },
+        "enable_firewall_stats": {
+          "description": "Enable firewall traffic statistics using nftables kernel counters (only effective with nftables backend)",
           "type": "boolean"
         },
         "enabled": {

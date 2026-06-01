@@ -510,6 +510,8 @@ const ProjectStatusInfo = struct {
     active_sessions: u32,
     last_changed: u64,
     error_code: ?i32 = null,
+    enable_app_stats: bool,
+    enable_firewall_stats: bool,
     forwarders: []const ForwarderStatsInfo,
 };
 
@@ -699,6 +701,8 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
             .active_sessions = info.active_sessions,
             .last_changed = state.last_changed[i],
             .error_code = if (info.startup_status == .failed and info.error_code != 0) info.error_code else null,
+            .enable_app_stats = project.cfg.enable_app_stats,
+            .enable_firewall_stats = project.cfg.enable_firewall_stats,
             .forwarders = try forwarders_list.toOwnedSlice(allocator),
         });
     }
@@ -1043,7 +1047,6 @@ fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNfta
     const rules = ctx.listRules() orelse "No rules found or table does not exist";
     return .{ .rules = rules };
 }
-
 
 fn currentTs() u64 {
     const seconds = std.Io.Timestamp.now(compat.io(), .real).toSeconds();

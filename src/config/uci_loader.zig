@@ -101,8 +101,10 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             project.preserve_source_ip = try types.parseBool(opt_val);
         } else if (std.mem.eql(u8, opt_name, "enable_app_forward")) {
             project.enable_app_forward = try types.parseBool(opt_val);
-        } else if (std.mem.eql(u8, opt_name, "enable_stats")) {
-            project.enable_stats = try types.parseBool(opt_val);
+        } else if (std.mem.eql(u8, opt_name, "enable_app_stats")) {
+            project.enable_app_stats = try types.parseBool(opt_val);
+        } else if (std.mem.eql(u8, opt_name, "enable_firewall_stats")) {
+            project.enable_firewall_stats = try types.parseBool(opt_val);
         } else if (std.mem.eql(u8, opt_name, "app_forward_loop_mode")) {
             project.app_forward_loop_mode = try types.parseLoopMode(opt_val);
         }

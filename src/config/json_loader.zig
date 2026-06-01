@@ -449,8 +449,12 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             if (parseJsonBool(v, ec.fieldPath("{s}.enable_app_forward", .{prefix}), ec)) |b| project.enable_app_forward = b;
         }
 
-        if (obj.get("enable_stats")) |v| {
-            if (parseJsonBool(v, ec.fieldPath("{s}.enable_stats", .{prefix}), ec)) |b| project.enable_stats = b;
+        if (obj.get("enable_app_stats")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("{s}.enable_app_stats", .{prefix}), ec)) |b| project.enable_app_stats = b;
+        }
+
+        if (obj.get("enable_firewall_stats")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("{s}.enable_firewall_stats", .{prefix}), ec)) |b| project.enable_firewall_stats = b;
         }
 
         if (obj.get("app_forward_loop_mode")) |v| {

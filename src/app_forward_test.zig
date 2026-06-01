@@ -246,7 +246,7 @@ fn makeSinglePortHandleWithOptions(
     listen_port: u16,
     target_address_input: []const u8,
     target_port: u16,
-    enable_stats: bool,
+    enable_app_stats: bool,
 ) !project_status.ProjectHandle {
     const remark = try allocator.dupe(u8, "forwarder leak test");
     errdefer allocator.free(remark);
@@ -262,7 +262,7 @@ fn makeSinglePortHandleWithOptions(
         .target_address = target_address,
         .target_port = target_port,
         .enable_app_forward = true,
-        .enable_stats = enable_stats,
+        .enable_app_stats = enable_app_stats,
         .reuseaddr = true,
     });
 }
@@ -308,7 +308,7 @@ fn makeRangeMappingHandle(
         .target_port = 0,
         .port_mappings = mappings,
         .enable_app_forward = true,
-        .enable_stats = false,
+        .enable_app_stats = false,
         .reuseaddr = true,
     });
 }
@@ -936,6 +936,122 @@ test "app forward: udp single datagram with data transfer" {
     try testing.expect(echo_ctx.start_error == null);
 }
 
+test "app forward: udp 10 packets from same client" {
+    const alloc = testing.allocator;
+    const listen_port: u16 = 43161;
+    const target_port: u16 = 53161;
+
+    var handle = try makeSinglePortHandle(alloc, 35, .udp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
+
+    var echo_ctx = UdpEchoServerContext{ .port = target_port, .max_messages = 10 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&echo_ctx});
+    defer echo_thread.join();
+
+    var forwarder_ctx = UdpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    for (1..11) |i| {
+        var buf: [64]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, "udp packet {d}", .{i}) catch unreachable;
+        const response = try udpClientTest(listen_port, message, std.time.ns_per_s);
+        defer alloc.free(response);
+        try testing.expectEqualStrings(message, response);
+    }
+
+    try testing.expect(echo_ctx.start_error == null);
+}
+
+test "app forward: udp client sends and closes immediately" {
+    const alloc = testing.allocator;
+    const listen_port: u16 = 43162;
+    const target_port: u16 = 53162;
+
+    var handle = try makeSinglePortHandle(alloc, 36, .udp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
+
+    var echo_ctx = UdpEchoServerContext{ .port = target_port, .max_messages = 1 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&echo_ctx});
+    defer echo_thread.join();
+
+    var forwarder_ctx = UdpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    try udpSendOnly(listen_port, "send and forget");
+    // Give the echo server a moment to process
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expect(echo_ctx.start_error == null);
+}
+
+test "app forward: tcp 64KB data transfer" {
+    const alloc = testing.allocator;
+    const listen_port: u16 = 43154;
+    const target_port: u16 = 53154;
+
+    var handle = try makeSinglePortHandle(alloc, 37, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+
+    var echo_ctx = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_ctx});
+    defer echo_thread.join();
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    // Build 64KB payload: 'a' + (idx % 26)
+    const data_len = 65536;
+    const payload = try alloc.alloc(u8, data_len);
+    defer alloc.free(payload);
+    for (payload, 0..) |*byte, idx| {
+        byte.* = @intCast('a' + (idx % 26));
+    }
+
+    const response = try tcpClientTest(listen_port, payload, std.time.ns_per_s);
+    defer alloc.free(response);
+
+    try testing.expectEqual(data_len, response.len);
+    try testing.expectEqualSlices(u8, payload, response);
+
+    try testing.expect(echo_ctx.start_error == null);
+}
+
 test "app forward: udp session timeout and garbage collection" {
     const alloc = testing.allocator;
     const listen_port = testListenPort(70, 0);
@@ -1100,7 +1216,7 @@ test "app forward: tcp concurrent clients with large payload" {
     const alloc = testing.allocator;
     const listen_port: u16 = 43153;
     const target_port: u16 = 53153;
-    const client_count = 8;
+    const client_count = 10;
     const payload_len = 8192;
 
     var handle = try makeSinglePortHandle(alloc, 34, .tcp, listen_port, target_port);
@@ -1413,6 +1529,16 @@ fn udpEchoServerThread(ctx: *UdpEchoServerContext) void {
     }
 
     ctx.start_error = null;
+}
+
+fn udpSendOnly(port: u16, message: []const u8) !void {
+    const io = compat.io();
+    var server_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var local_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const socket = try local_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(io);
+
+    try socket.send(io, &server_addr, message);
 }
 
 fn udpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {

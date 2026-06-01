@@ -203,8 +203,10 @@ export interface Project {
   app_forward_loop_mode?: LoopMode;
   /** Reuse address when binding */
   reuseaddr?: boolean;
-  /** Enable traffic statistics (only when enable_app_forward=true) */
-  enable_stats?: boolean;
+  /** Enable application-layer traffic statistics (only when enable_app_forward=true) */
+  enable_app_stats?: boolean;
+  /** Enable firewall traffic statistics using nftables kernel counters (only effective with nftables backend) */
+  enable_firewall_stats?: boolean;
 }
 
 /**

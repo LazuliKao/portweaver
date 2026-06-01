@@ -339,7 +339,7 @@ fn startForwarding(
     handle: *project_status.ProjectHandle,
     frpc_nodes: *const std.StringHashMap(config.FrpcNode),
 ) void {
-    std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_stats });
+    std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, app_stats={}, firewall_stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_app_stats, handle.cfg.enable_firewall_stats });
     // 启动应用层转发
     if (handle.cfg.enable_app_forward) {
         app_forward.startForwarding(allocator, handle) catch |err| {
