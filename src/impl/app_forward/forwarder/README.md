@@ -79,9 +79,11 @@ Typical sequence:
 4. runtime continues running and drives traffic
 5. from any thread, call `*_request_stop(...)` to request shutdown
 6. runtime thread drains close callbacks and backend teardown
-7. only after teardown has fully drained, call `*_destroy(...)`
+7. call `*_destroy(...)` to initiate cleanup (can be called before teardown completes)
 
-Rule: **request_stop is a shutdown request; destroy is final memory release**.
+Rule: **request_stop is a shutdown request; destroy initiates deferred cleanup**.
+
+**Deferred destruction**: `*_destroy(...)` can be called at any time after `*_request_stop(...)`. It sets a flag and posts cleanup work to the runtime thread. The actual memory release happens only after all pending async operations have completed. This matches the libuv close-callback pattern where handles are closed asynchronously and the final free occurs when all close callbacks fire.
 
 ## Threading Rules
 
@@ -117,7 +119,7 @@ Allocator note:
 ### Caller owns
 
 - the returned forwarder pointer lifetime
-- the decision of when stop has fully drained and destroy is allowed
+- the decision of when to call `*_destroy(...)` (can be called early; cleanup is deferred)
 
 Important: `*_destroy(...)` must never tear down `forwarder_runtime_t`.
 
@@ -125,10 +127,12 @@ Important: `*_destroy(...)` must never tear down `forwarder_runtime_t`.
 
 `forwarder.h` is the **authoritative ABI contract**.
 
-The libuv implementation (`impl_libuv/`) fully satisfies this contract. An Asio
-implementation (`impl_asio/`) will also satisfy the same contract. Both backends
-are behind the same C ABI boundary — Zig only imports `forwarder.h`, never
-backend-specific headers.
+Both backends fully satisfy this contract:
+
+- The libuv implementation (`impl_libuv/`) is the reference implementation.
+- The Asio implementation (`impl_asio/`) implements the same contract using standalone Asio (not Boost).
+
+Both backends are behind the same C ABI boundary — Zig only imports `forwarder.h`, never backend-specific headers.
 
 ## Backend Replaceability
 
@@ -156,10 +160,9 @@ The ownership and lifecycle split is the core invariant:
 | Directory | Backend | Status |
 |-----------|---------|--------|
 | `impl_libuv/` | libuv | Active implementation |
-| `impl_asio/` | Boost.Asio (C++) | Planned |
+| `impl_asio/` | Asio (standalone C++) | Active implementation |
 
 Both backends implement the same `forwarder.h` contract.
-
 ### Public ABI vs impl-internal helpers
 
 The functions declared in `forwarder.h` are the public ABI. In addition,
@@ -169,13 +172,15 @@ the public contract:
 - `forwarder_runtime_get_loop(forwarder_runtime_t *)` — libuv-only, returns
   `uv_loop_t *`. Used by TCP/UDP forwarders within `impl_libuv/` to access
   the backend event loop.
-- `forwarder_runtime_get_allocator(forwarder_runtime_t *)` — libuv-only,
-  returns the stored `forwarder_allocator_t`. Used by forwarders to allocate
-  through the runtime's allocator bridge.
+- `forwarder_runtime_get_allocator(forwarder_runtime_t *)` — returns the stored
+  `forwarder_allocator_t`. Used by both backends to allocate through the
+  runtime's allocator bridge.
+- `forwarder_runtime_get_io_context(forwarder_runtime_t *)` — Asio-only, returns
+  `asio::io_context &`. Used by TCP/UDP forwarders within `impl_asio/` to access
+  the backend event loop.
 
-These helpers are internal to `impl_libuv/` and must not be called from
-Zig or from any code outside the implementation directory. An Asio backend
-will provide its own equivalent helpers as needed.
+These helpers are internal to `impl_libuv/` / `impl_asio/` and must not be
+called from Zig or from any code outside the implementation directory.
 
 ## Stats Semantics
 
@@ -186,3 +191,34 @@ will provide its own equivalent helpers as needed.
 - multi-field reads are not guaranteed to represent one atomic transaction unless the backend explicitly provides that guarantee later
 
 Currently `listen_port` remains part of `traffic_stats_t`, which makes the stats struct itself the query path for per-forwarder port identity.
+
+## Build Matrix
+
+The backend is selected at build time via `-Dforward_backend=<backend>`:
+
+```bash
+# Default (libuv)
+zig build
+
+# Asio backend (native)
+zig build -Dforward_backend=asio
+
+# Asio backend (Linux musl cross-compile)
+zig build -Dforward_backend=asio -Dtarget=aarch64-linux-musl
+zig build -Dforward_backend=asio -Dtarget=x86_64-linux-musl
+```
+
+| Target | libuv | Asio |
+|--------|-------|------|
+| native (Windows) | ✅ | ✅ |
+| aarch64-linux-musl | ✅ | ✅ |
+| x86_64-linux-musl | ✅ | ✅ |
+
+## Backend-Dependent Utilities
+
+`uv_get_version_string()` is retained as ABI compatibility but returns a backend-dependent value:
+
+- **libuv backend**: returns the actual libuv version string (e.g., `"1.48.0"`)
+- **Asio backend**: returns `"asio-standalone"` to indicate standalone Asio is in use
+
+This allows code to detect which backend is active at runtime if needed, while maintaining ABI compatibility.

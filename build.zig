@@ -771,6 +771,7 @@ fn addForwarderBackend(
             });
         },
         .asio => {
+            root_module.addIncludePath(b.path("deps/asio/asio/include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/runtime.cpp"),
                 .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
@@ -784,6 +785,10 @@ fn addForwarderBackend(
                 .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
             });
             root_module.linkSystemLibrary("c++", .{});
+            if (target.result.os.tag == .windows) {
+                root_module.linkSystemLibrary("ws2_32", .{});
+                root_module.linkSystemLibrary("mswsock", .{});
+            }
         },
     }
 }

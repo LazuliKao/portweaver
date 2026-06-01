@@ -81,9 +81,11 @@ extern "C"
      * 6. `*_request_stop(...)` is the cross-thread stop entry point: it may be invoked
      *    from outside the runtime thread only if the implementation routes the
      *    stop onto the owning runtime safely.
-     * 7. `*_destroy(...)` is only valid after stop/close processing has fully
-     *    drained on the runtime thread; callers must not destroy a forwarder
-     *    while backend close callbacks may still touch it.
+     * 7. `*_destroy(...)` initiates deferred cleanup: it sets an internal flag
+     *    and posts cleanup work to the runtime thread. The actual memory release
+     *    happens only after all pending async operations complete. Callers may
+     *    invoke destroy before teardown has fully drained; the implementation
+     *    handles ordering internally.
      * 8. `*_get_stats(...)` should behave as a read-only snapshot API and be
      *    safe to call without extra caller locking.
      *
@@ -119,9 +121,9 @@ extern "C"
     // Cross-thread stop request entry point. Stop may be asynchronous: returning
     // from this function does not imply close callbacks have finished.
     void tcp_forwarder_request_stop(tcp_forwarder_t *forwarder);
-    // Must be called on the owning runtime thread after stop/close has fully
-    // drained for this forwarder. Do not call destroy concurrently with
-    // start/stop/get_stats on the same object.
+    // Initiates deferred cleanup: sets an internal flag and posts cleanup work to the
+    // runtime thread. Memory is released only when all pending async operations complete.
+    // Do not call destroy concurrently with start/stop/get_stats on the same object.
     void tcp_forwarder_destroy(tcp_forwarder_t *forwarder);
     // Returns a read-only stats snapshot.
     traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder);
@@ -150,9 +152,9 @@ extern "C"
     // Cross-thread stop request entry point. Stop may be asynchronous: returning
     // from this function does not imply close callbacks have finished.
     void udp_forwarder_request_stop(udp_forwarder_t *forwarder);
-    // Must be called on the owning runtime thread after stop/close has fully
-    // drained for this forwarder. Do not call destroy concurrently with
-    // start/stop/get_stats on the same object.
+    // Initiates deferred cleanup: sets an internal flag and posts cleanup work to the
+    // runtime thread. Memory is released only when all pending async operations complete.
+    // Do not call destroy concurrently with start/stop/get_stats on the same object.
     void udp_forwarder_destroy(udp_forwarder_t *forwarder);
     // Returns a read-only stats snapshot.
     traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder);
