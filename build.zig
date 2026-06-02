@@ -740,7 +740,40 @@ fn addCombinedGoLib(
     };
 }
 
-const ForwardBackend = enum { libuv, asio };
+const ForwardBackend = enum { libuv, asio, io_uring };
+
+fn addLiburing(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const is_mips = switch (target.result.cpu.arch) {
+        .mips, .mipsel, .mips64, .mips64el => true,
+        else => false,
+    };
+    const lib = b.addLibrary(.{
+        .name = "uring",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .link_libc = true,
+            .target = target,
+            .optimize = optimize,
+            .pic = if (is_mips) true else null,
+        }),
+    });
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "deps/liburing/src/setup.c",
+            "deps/liburing/src/queue.c",
+            "deps/liburing/src/register.c",
+            "deps/liburing/src/syscall.c",
+        },
+        .flags = &.{ "-D_GNU_SOURCE", "-D_LARGEFILE_SOURCE", "-D_FILE_OFFSET_BITS=64" },
+    });
+    lib.root_module.addIncludePath(b.path("deps/liburing/src/include"));
+    lib.root_module.addIncludePath(b.path("deps/liburing/src"));
+    return lib;
+}
 
 fn addForwarderBackend(
     b: *std.Build,
@@ -789,6 +822,26 @@ fn addForwarderBackend(
                 root_module.linkSystemLibrary("ws2_32", .{});
                 root_module.linkSystemLibrary("mswsock", .{});
             }
+        },
+        .io_uring => {
+            if (target.result.os.tag != .linux) {
+                @panic("io_uring backend requires Linux target. Use -Dforward_backend=libuv or asio for non-Linux targets.");
+            }
+            const liburing = addLiburing(b, target, optimize);
+            root_module.linkLibrary(liburing);
+            root_module.addIncludePath(b.path("deps/liburing/src/include"));
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/runtime.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/tcp_forwarder.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/udp_forwarder.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+            });
         },
     }
 }
