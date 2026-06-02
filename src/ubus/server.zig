@@ -149,6 +149,10 @@ const ddns_info_policy = [_]c.blobmsg_policy{
     .{ .name = "name", .type = c.BLOBMSG_TYPE_STRING },
 };
 
+const restart_project_policy = [_]c.blobmsg_policy{
+    .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
@@ -166,6 +170,8 @@ const method_names = struct {
     pub const get_ddns_info: [:0]const u8 = "get_ddns_info";
     pub const clear_ddns_logs: [:0]const u8 = "clear_ddns_logs";
     pub const get_full_status: [:0]const u8 = "get_full_status";
+    pub const reload_config: [:0]const u8 = "reload_config";
+    pub const restart_project: [:0]const u8 = "restart_project";
     pub const get_nftables_rules: [:0]const u8 = "get_nftables_rules";
     pub const object_name: [:0]const u8 = "portweaver";
 };
@@ -343,6 +349,22 @@ fn ubusThread(state: *RuntimeState) void {
             .tags = 0,
             .policy = null,
             .n_policy = 0,
+        },
+        .{
+            .name = method_names.reload_config,
+            .handler = wrapHandler(handleReloadConfig, void, null),
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
+        .{
+            .name = method_names.restart_project,
+            .handler = wrapHandler(handleRestartProject, RestartProjectArgs, &restart_project_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &restart_project_policy,
+            .n_policy = @intCast(restart_project_policy.len),
         },
     };
     const nftablesMethods = if (build_options.nftables_mode) [_]c.ubus_method{
@@ -529,6 +551,21 @@ const SetEnabledResponse = struct {
     enabled: bool,
     status: []const u8,
     last_changed: u64,
+};
+
+const RestartProjectArgs = struct {
+    id: u32,
+};
+
+const RestartProjectResponse = struct {
+    id: u32,
+    status: []const u8,
+};
+
+const ReloadConfigResponse = struct {
+    success: bool,
+    changes: u32,
+    message: []const u8,
 };
 
 const FrpcStatusInfo = struct {
@@ -1046,6 +1083,66 @@ fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNfta
 
     const rules = ctx.listRules() orelse "No rules found or table does not exist";
     return .{ .rules = rules };
+}
+
+fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args: RestartProjectArgs) !RestartProjectResponse {
+    const idx: usize = @intCast(args.id);
+
+    state.mutex.lockUncancelable(compat.io());
+    defer state.mutex.unlock(compat.io());
+
+    if (idx >= state.projects.items.len) {
+        return error.InvalidArgument;
+    }
+
+    var project = &state.projects.items[idx];
+    if (!project.cfg.enabled) {
+        return error.InvalidArgument;
+    }
+
+    // Tear down forwarders only, keep config alive
+    project.teardownForwarders();
+
+    // Re-start forwarding
+    app_forward.startForwarding(allocator, project) catch |err| {
+        std.log.warn("ubus: failed to restart project {d}: {any}", .{ args.id, err });
+        project.setStartupFailedCode(-1);
+    };
+
+    // Log the restart
+    event_log.logEventFmt(.project_started, @intCast(args.id), "Project {d} restarted via UBUS", .{args.id + 1});
+
+    return .{
+        .id = args.id,
+        .status = STATUS_RUNNING,
+    };
+}
+
+fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !ReloadConfigResponse {
+    state.mutex.lockUncancelable(compat.io());
+    defer state.mutex.unlock(compat.io());
+
+    var restarted: u32 = 0;
+    for (state.projects.items, 0..) |*project, idx| {
+        if (!project.cfg.enabled) continue;
+        if (project.startup_status != .success and project.startup_status != .disabled) continue;
+
+        project.teardownForwarders();
+        app_forward.startForwarding(allocator, project) catch |err| {
+            std.log.warn("ubus: failed to restart project {d} during reload: {any}", .{ idx, err });
+            project.setStartupFailedCode(-1);
+            continue;
+        };
+        restarted += 1;
+    }
+
+    event_log.logEventFmt(.info, -1, "Config reloaded: {d} project(s) restarted", .{restarted});
+
+    return .{
+        .success = true,
+        .changes = restarted,
+        .message = "Config reloaded successfully",
+    };
 }
 
 fn currentTs() u64 {

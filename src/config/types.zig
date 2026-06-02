@@ -151,6 +151,16 @@ pub const FrpcNode = struct {
         if (self.log_level.len != 0) allocator.free(self.log_level);
         self.* = undefined;
     }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.server, b.server) and
+            a.port == b.port and
+            std.mem.eql(u8, a.token, b.token) and
+            std.mem.eql(u8, a.log_level, b.log_level) and
+            a.use_encryption == b.use_encryption and
+            a.use_compression == b.use_compression;
+    }
 };
 
 /// FRP 服务器节点配置
@@ -199,6 +209,28 @@ pub const FrpsNode = struct {
         if (self.dashboard_pwd) |s| allocator.free(s);
         self.* = undefined;
     }
+
+    fn eqlOptionalSlices(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return std.mem.eql(u8, a.?, b.?);
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            a.bind_port == b.bind_port and
+            eqlOptionalSlices(a.bind_addr, b.bind_addr) and
+            eqlOptionalSlices(a.auth_token, b.auth_token) and
+            eqlOptionalSlices(a.log_level, b.log_level) and
+            eqlOptionalSlices(a.allow_ports, b.allow_ports) and
+            a.max_pool_count == b.max_pool_count and
+            a.max_ports_per_client == b.max_ports_per_client and
+            a.tcp_mux == b.tcp_mux and
+            eqlOptionalSlices(a.dashboard_addr, b.dashboard_addr) and
+            a.dashboard_port == b.dashboard_port and
+            eqlOptionalSlices(a.dashboard_user, b.dashboard_user) and
+            eqlOptionalSlices(a.dashboard_pwd, b.dashboard_pwd);
+    }
 };
 
 /// FRP 转发配置（节点名称:远程端口）
@@ -211,6 +243,10 @@ pub const FrpcForward = struct {
     pub fn deinit(self: *FrpcForward, allocator: std.mem.Allocator) void {
         allocator.free(self.node_name);
         self.* = undefined;
+    }
+    pub fn eql(a: @This(), b: @This()) bool {
+        return std.mem.eql(u8, a.node_name, b.node_name) and
+            a.remote_port == b.remote_port;
     }
 };
 
@@ -233,6 +269,21 @@ pub const PortMapping = struct {
             allocator.free(self.frpc);
         }
         self.* = undefined;
+    }
+
+    fn eqlSlice(comptime T: type, a: []const T, b: []const T) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |ea, eb| {
+            if (!ea.eql(eb)) return false;
+        }
+        return true;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return std.mem.eql(u8, a.listen_port, b.listen_port) and
+            std.mem.eql(u8, a.target_port, b.target_port) and
+            a.protocol == b.protocol and
+            eqlSlice(FrpcForward, a.frpc, b.frpc);
     }
 };
 
@@ -312,6 +363,35 @@ pub const Project = struct {
     pub fn effectiveAppForwardLoopMode(self: *const Project, default_mode: LoopMode) LoopMode {
         return self.app_forward_loop_mode orelse default_mode;
     }
+
+    fn eqlStringSlices(a: []const []const u8, b: []const []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |sa, sb| {
+            if (!std.mem.eql(u8, sa, sb)) return false;
+        }
+        return true;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            eqlStringSlices(a.src_zones, b.src_zones) and
+            eqlStringSlices(a.dest_zones, b.dest_zones) and
+            a.family == b.family and
+            a.protocol == b.protocol and
+            a.listen_port == b.listen_port and
+            std.mem.eql(u8, a.target_address, b.target_address) and
+            a.target_port == b.target_port and
+            PortMapping.eqlSlice(PortMapping, a.port_mappings, b.port_mappings) and
+            a.open_firewall_port == b.open_firewall_port and
+            a.add_firewall_forward == b.add_firewall_forward and
+            a.preserve_source_ip == b.preserve_source_ip and
+            a.enable_app_forward == b.enable_app_forward and
+            a.reuseaddr == b.reuseaddr and
+            a.enable_app_stats == b.enable_app_stats and
+            a.enable_firewall_stats == b.enable_firewall_stats and
+            a.app_forward_loop_mode == b.app_forward_loop_mode and
+            a.connect_timeout_ms == b.connect_timeout_ms;
+    }
 };
 
 /// DDNS IP 获取方式
@@ -353,6 +433,15 @@ pub const DdnsIpv4Config = struct {
         if (self.domains.len != 0) allocator.free(self.domains);
         self.* = undefined;
     }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enable == b.enable and
+            a.get_type == b.get_type and
+            std.mem.eql(u8, a.url, b.url) and
+            std.mem.eql(u8, a.net_interface, b.net_interface) and
+            std.mem.eql(u8, a.cmd, b.cmd) and
+            std.mem.eql(u8, a.domains, b.domains);
+    }
 };
 
 /// DDNS IPv6 配置
@@ -372,6 +461,16 @@ pub const DdnsIpv6Config = struct {
         if (self.reg.len != 0) allocator.free(self.reg);
         if (self.domains.len != 0) allocator.free(self.domains);
         self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enable == b.enable and
+            a.get_type == b.get_type and
+            std.mem.eql(u8, a.url, b.url) and
+            std.mem.eql(u8, a.net_interface, b.net_interface) and
+            std.mem.eql(u8, a.cmd, b.cmd) and
+            std.mem.eql(u8, a.reg, b.reg) and
+            std.mem.eql(u8, a.domains, b.domains);
     }
 };
 
@@ -423,6 +522,24 @@ pub const DdnsConfig = struct {
         if (self.webhook_headers.len != 0) allocator.free(self.webhook_headers);
         self.* = undefined;
     }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.name, b.name) and
+            std.mem.eql(u8, a.dns_provider, b.dns_provider) and
+            std.mem.eql(u8, a.dns_id, b.dns_id) and
+            std.mem.eql(u8, a.dns_secret, b.dns_secret) and
+            std.mem.eql(u8, a.dns_ext_param, b.dns_ext_param) and
+            a.ttl == b.ttl and
+            a.ipv4.eql(b.ipv4) and
+            a.ipv6.eql(b.ipv6) and
+            a.not_allow_wan_access == b.not_allow_wan_access and
+            std.mem.eql(u8, a.username, b.username) and
+            std.mem.eql(u8, a.password, b.password) and
+            std.mem.eql(u8, a.webhook_url, b.webhook_url) and
+            std.mem.eql(u8, a.webhook_body, b.webhook_body) and
+            std.mem.eql(u8, a.webhook_headers, b.webhook_headers);
+    }
 };
 
 pub const Config = struct {
@@ -462,6 +579,26 @@ pub const Config = struct {
         allocator.free(self.ddns_configs);
 
         self.* = undefined;
+    }
+
+    fn eqlNodeHashMap(comptime V: type, a: std.StringHashMap(V), b: std.StringHashMap(V)) bool {
+        if (a.count() != b.count()) return false;
+        var it = a.iterator();
+        while (it.next()) |entry| {
+            const other_val = b.get(entry.key_ptr.*) orelse return false;
+            if (!entry.value_ptr.eql(other_val)) return false;
+        }
+        return true;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.app_forward_loop_mode == b.app_forward_loop_mode and
+            a.use_nftables == b.use_nftables and
+            a.log_config.eql(b.log_config) and
+            PortMapping.eqlSlice(Project, a.projects, b.projects) and
+            eqlNodeHashMap(FrpcNode, a.frpc_nodes, b.frpc_nodes) and
+            eqlNodeHashMap(FrpsNode, a.frps_nodes, b.frps_nodes) and
+            PortMapping.eqlSlice(DdnsConfig, a.ddns_configs, b.ddns_configs);
     }
 };
 
@@ -588,4 +725,142 @@ test "config: app forward loop mode defaults and effective override" {
     try std.testing.expectEqual(LoopMode.per_project, config.app_forward_loop_mode);
     try std.testing.expectEqual(LoopMode.per_project, inherited.effectiveAppForwardLoopMode(config.app_forward_loop_mode));
     try std.testing.expectEqual(LoopMode.per_listener, overridden.effectiveAppForwardLoopMode(config.app_forward_loop_mode));
+}
+
+test "config: eql methods" {
+    // FrpcNode
+    const node_a = FrpcNode{ .server = "frp.example.com", .port = 7000, .token = "tok123" };
+    const node_b = FrpcNode{ .server = "frp.example.com", .port = 7000, .token = "tok123" };
+    const node_c = FrpcNode{ .server = "frp.example.com", .port = 7001, .token = "tok123" };
+    try std.testing.expect(node_a.eql(node_b));
+    try std.testing.expect(!node_a.eql(node_c));
+
+    // FrpsNode
+    const frps_a = FrpsNode{ .bind_port = 7000, .bind_addr = "0.0.0.0", .auth_token = "secret" };
+    const frps_b = FrpsNode{ .bind_port = 7000, .bind_addr = "0.0.0.0", .auth_token = "secret" };
+    const frps_c = FrpsNode{ .bind_port = 7000 };
+    try std.testing.expect(frps_a.eql(frps_b));
+    try std.testing.expect(!frps_a.eql(frps_c));
+
+    // FrpcForward
+    const fwd_a = FrpcForward{ .node_name = "node1", .remote_port = 8080 };
+    const fwd_b = FrpcForward{ .node_name = "node1", .remote_port = 8080 };
+    const fwd_c = FrpcForward{ .node_name = "node2", .remote_port = 8080 };
+    try std.testing.expect(fwd_a.eql(fwd_b));
+    try std.testing.expect(!fwd_a.eql(fwd_c));
+
+    // PortMapping
+    const pm_a = PortMapping{ .listen_port = "8080", .target_port = "80" };
+    const pm_b = PortMapping{ .listen_port = "8080", .target_port = "80" };
+    const pm_c = PortMapping{ .listen_port = "8081", .target_port = "80" };
+    try std.testing.expect(pm_a.eql(pm_b));
+    try std.testing.expect(!pm_a.eql(pm_c));
+
+    // PortMapping with frpc slice
+    var frpc_d = [_]FrpcForward{fwd_a};
+    var frpc_e = [_]FrpcForward{fwd_b};
+    var frpc_f = [_]FrpcForward{fwd_c};
+    const pm_d = PortMapping{ .listen_port = "8080", .target_port = "80", .frpc = &frpc_d };
+    const pm_e = PortMapping{ .listen_port = "8080", .target_port = "80", .frpc = &frpc_e };
+    const pm_f = PortMapping{ .listen_port = "8080", .target_port = "80", .frpc = &frpc_f };
+    try std.testing.expect(pm_d.eql(pm_e));
+    try std.testing.expect(!pm_d.eql(pm_f));
+
+    // Project (excludes remark)
+    const proj_a = Project{ .listen_port = 1000, .target_address = "192.168.1.1", .target_port = 80, .remark = "first" };
+    const proj_b = Project{ .listen_port = 1000, .target_address = "192.168.1.1", .target_port = 80, .remark = "second" };
+    const proj_c = Project{ .listen_port = 1001, .target_address = "192.168.1.1", .target_port = 80, .remark = "first" };
+    try std.testing.expect(proj_a.eql(proj_b)); // remark differs but is ignored
+    try std.testing.expect(!proj_a.eql(proj_c));
+
+    // DdnsIpv4Config
+    const ipv4_a = DdnsIpv4Config{ .url = "https://api.ipify.org", .domains = "a.com" };
+    const ipv4_b = DdnsIpv4Config{ .url = "https://api.ipify.org", .domains = "a.com" };
+    const ipv4_c = DdnsIpv4Config{ .url = "https://other.com", .domains = "a.com" };
+    try std.testing.expect(ipv4_a.eql(ipv4_b));
+    try std.testing.expect(!ipv4_a.eql(ipv4_c));
+
+    // DdnsIpv6Config
+    const ipv6_a = DdnsIpv6Config{ .enable = true, .url = "https://6.ipify.io", .domains = "b.com" };
+    const ipv6_b = DdnsIpv6Config{ .enable = true, .url = "https://6.ipify.io", .domains = "b.com" };
+    const ipv6_c = DdnsIpv6Config{ .enable = false, .url = "https://6.ipify.io", .domains = "b.com" };
+    try std.testing.expect(ipv6_a.eql(ipv6_b));
+    try std.testing.expect(!ipv6_a.eql(ipv6_c));
+
+    // DdnsConfig (nested ipv4/ipv6)
+    const ddns_a = DdnsConfig{
+        .name = "myddns",
+        .dns_provider = "cloudflare",
+        .ttl = 300,
+        .ipv4 = ipv4_a,
+        .ipv6 = ipv6_a,
+    };
+    const ddns_b = DdnsConfig{
+        .name = "myddns",
+        .dns_provider = "cloudflare",
+        .ttl = 300,
+        .ipv4 = ipv4_b,
+        .ipv6 = ipv6_b,
+    };
+    const ddns_c = DdnsConfig{
+        .name = "myddns",
+        .dns_provider = "cloudflare",
+        .ttl = 600,
+        .ipv4 = ipv4_a,
+        .ipv6 = ipv6_a,
+    };
+    try std.testing.expect(ddns_a.eql(ddns_b));
+    try std.testing.expect(!ddns_a.eql(ddns_c));
+}
+
+test "config: Config.eql with hashmaps" {
+    const allocator = std.testing.allocator;
+
+    var frpc_a = std.StringHashMap(FrpcNode).init(allocator);
+    try frpc_a.put("node1", FrpcNode{ .server = "frp.example.com", .port = 7000 });
+    var frps_a = std.StringHashMap(FrpsNode).init(allocator);
+    try frps_a.put("srv1", FrpsNode{ .bind_port = 7000 });
+
+    var frpc_b = std.StringHashMap(FrpcNode).init(allocator);
+    try frpc_b.put("node1", FrpcNode{ .server = "frp.example.com", .port = 7000 });
+    var frps_b = std.StringHashMap(FrpsNode).init(allocator);
+    try frps_b.put("srv1", FrpsNode{ .bind_port = 7000 });
+
+    var frpc_c = std.StringHashMap(FrpcNode).init(allocator);
+    try frpc_c.put("node1", FrpcNode{ .server = "frp.example.com", .port = 9999 });
+    var frps_c = std.StringHashMap(FrpsNode).init(allocator);
+    try frps_c.put("srv1", FrpsNode{ .bind_port = 7000 });
+
+    var cfg_a = Config{
+        .log_config = .{ .file_path = "/tmp/test.log" },
+        .projects = &[_]Project{},
+        .frpc_nodes = frpc_a,
+        .frps_nodes = frps_a,
+        .ddns_configs = &[_]DdnsConfig{},
+    };
+    var cfg_b = Config{
+        .log_config = .{ .file_path = "/tmp/test.log" },
+        .projects = &[_]Project{},
+        .frpc_nodes = frpc_b,
+        .frps_nodes = frps_b,
+        .ddns_configs = &[_]DdnsConfig{},
+    };
+    var cfg_c = Config{
+        .log_config = .{ .file_path = "/tmp/test.log" },
+        .projects = &[_]Project{},
+        .frpc_nodes = frpc_c,
+        .frps_nodes = frps_c,
+        .ddns_configs = &[_]DdnsConfig{},
+    };
+
+    try std.testing.expect(cfg_a.eql(cfg_b));
+    try std.testing.expect(!cfg_a.eql(cfg_c));
+
+    // Clean up HashMap internals (keys are comptime literals, no free needed)
+    cfg_a.frpc_nodes.deinit();
+    cfg_a.frps_nodes.deinit();
+    cfg_b.frpc_nodes.deinit();
+    cfg_b.frps_nodes.deinit();
+    cfg_c.frpc_nodes.deinit();
+    cfg_c.frps_nodes.deinit();
 }
