@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     if (@import("builtin").os.tag != .windows) {
         const act = std.posix.Sigaction{
             .handler = .{ .handler = handleSighup },
-            .mask = std.posix.empty_sigset,
+            .mask = std.mem.zeroes(std.posix.sigset_t),
             .flags = 0,
         };
         std.posix.sigaction(std.posix.SIG.HUP, &act, null);
