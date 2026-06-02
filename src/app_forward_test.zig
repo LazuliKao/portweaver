@@ -871,28 +871,31 @@ test "app forward: architecture test with three concurrent loop modes" {
 
 test "app forward: tcp single connection with data transfer" {
     const alloc = testing.allocator;
+    const listen_port = testListenPort(8, 0);
+    const target_port = testTargetPort(8, 0);
 
-    var handle = try makeSinglePortHandle(alloc, 8, .tcp, 43150, 53150);
+    var handle = try makeSinglePortHandle(alloc, 8, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
     var runtime = loop_manager.LoopRuntime.init(alloc);
     try runtime.start();
     defer runtime.deinit();
 
-    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, 43150, 53150);
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
     defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
-    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpEchoServerThread, .{53150});
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpEchoServerThread, .{target_port});
     defer echo_thread.join();
 
     var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
     const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
     defer forwarder_thread.join();
 
+    compat.sleepNanos(forwarder_ready_ns);
     try testing.expect(forwarder_ctx.start_error == null);
 
     const message = "Hello, PortWeaver!";
-    const response = try tcpClientTest(43150, message, std.time.ns_per_s);
+    const response = try tcpClientTest(listen_port, message, std.time.ns_per_s);
     defer alloc.free(response);
 
     try testing.expectEqualStrings(message, response);
@@ -902,8 +905,8 @@ test "app forward: tcp single connection with data transfer" {
 
 test "app forward: udp single datagram with data transfer" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43160;
-    const target_port: u16 = 53160;
+    const listen_port = testListenPort(32, 0);
+    const target_port = testTargetPort(32, 0);
 
     var handle = try makeSinglePortHandle(alloc, 32, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
@@ -938,8 +941,8 @@ test "app forward: udp single datagram with data transfer" {
 
 test "app forward: udp 10 packets from same client" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43161;
-    const target_port: u16 = 53161;
+    const listen_port = testListenPort(35, 0);
+    const target_port = testTargetPort(35, 0);
 
     var handle = try makeSinglePortHandle(alloc, 35, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
@@ -976,8 +979,8 @@ test "app forward: udp 10 packets from same client" {
 
 test "app forward: udp client sends and closes immediately" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43162;
-    const target_port: u16 = 53162;
+    const listen_port = testListenPort(36, 0);
+    const target_port = testTargetPort(36, 0);
 
     var handle = try makeSinglePortHandle(alloc, 36, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
@@ -1010,8 +1013,8 @@ test "app forward: udp client sends and closes immediately" {
 
 test "app forward: tcp 64KB data transfer" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43154;
-    const target_port: u16 = 53154;
+    const listen_port = testListenPort(37, 0);
+    const target_port = testTargetPort(37, 0);
 
     var handle = try makeSinglePortHandle(alloc, 37, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
@@ -1111,8 +1114,10 @@ test "app forward: udp session timeout and garbage collection" {
 
 test "app forward: tcp 5 sequential clients" {
     const alloc = testing.allocator;
+    const listen_port = testListenPort(9, 0);
+    const target_port = testTargetPort(9, 0);
 
-    var handle = try makeSinglePortHandle(alloc, 9, .tcp, 43151, 53151);
+    var handle = try makeSinglePortHandle(alloc, 9, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
     const EchoServer = struct {
@@ -1149,10 +1154,10 @@ test "app forward: tcp 5 sequential clients" {
     try runtime.start();
     defer runtime.deinit();
 
-    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, 43151, 53151);
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
     defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
 
-    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{53151});
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), EchoServer.tcpEchoServerThread, .{target_port});
     defer echo_thread.join();
 
     var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
@@ -1160,16 +1165,18 @@ test "app forward: tcp 5 sequential clients" {
     defer forwarder_thread.join();
     defer forwarder.requestStop();
 
+    compat.sleepNanos(forwarder_ready_ns);
     try testing.expect(forwarder_ctx.start_error == null);
 
     for (0..5) |idx| {
         var message_buffer: [32]u8 = undefined;
         const message = try std.fmt.bufPrint(&message_buffer, "client {}", .{idx + 1});
 
-        const response = try tcpClientTest(43151, message, std.time.ns_per_s);
+        const response = try tcpClientTest(listen_port, message, std.time.ns_per_s);
         defer alloc.free(response);
 
         try testing.expectEqualStrings(message, response);
+        compat.sleepNanos(50 * std.time.ns_per_ms);
     }
 
     forwarder.requestStop();
@@ -1177,8 +1184,8 @@ test "app forward: tcp 5 sequential clients" {
 
 test "app forward: tcp target can disconnect abruptly" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43152;
-    const target_port: u16 = 53152;
+    const listen_port = testListenPort(33, 0);
+    const target_port = testTargetPort(33, 0);
 
     var handle = try makeSinglePortHandle(alloc, 33, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
@@ -1214,8 +1221,8 @@ test "app forward: tcp target can disconnect abruptly" {
 
 test "app forward: tcp concurrent clients with large payload" {
     const alloc = testing.allocator;
-    const listen_port: u16 = 43153;
-    const target_port: u16 = 53153;
+    const listen_port = testListenPort(34, 0);
+    const target_port = testTargetPort(34, 0);
     const client_count = 10;
     const payload_len = 8192;
 
@@ -1339,6 +1346,7 @@ fn tcpClientThread(ctx: *TcpClientContext) void {
 
 fn tcpPeerCloseClientThread(ctx: *TcpPeerCloseClientContext) void {
     tcpClientExpectPeerClose(ctx.port) catch |err| {
+        std.debug.print("\n=== tcpClientExpectPeerClose error: {any} ===\n", .{err});
         ctx.err = err;
     };
     ctx.completed = true;
@@ -1443,11 +1451,19 @@ fn tcpCloseServerThread(ctx: *TcpCloseServerContext) void {
 
 fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     const allocator = testing.allocator;
-    _ = timeout_ns;
 
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    const timeout = std.Io.Timeout{
+        .duration = .{
+            .raw = std.Io.Duration.fromNanoseconds(timeout_ns),
+            .clock = .real,
+        },
+    };
+    const stream = try address.connect(io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+    });
     defer stream.close(io);
 
     var write_buf: [1024]u8 = undefined;
@@ -1457,22 +1473,22 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 
     stream.shutdown(io, .send) catch return error.ConnectionResetByPeer;
 
-    var read_buf: [1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buf);
     var response = try allocator.alloc(u8, message.len);
     errdefer allocator.free(response);
     var response_len: usize = 0;
-    while (true) {
-        var chunk: [1024]u8 = undefined;
-        const read_len = try reader.interface.readSliceShort(&chunk);
+    while (response_len < response.len) {
+        const remaining = response[response_len..];
+        const result = try io.operateTimeout(.{ .file_read_streaming = .{
+            .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = true } },
+            .data = &[_][]u8{remaining},
+        } }, timeout);
 
+        const read_len = result.file_read_streaming catch |err| switch (err) {
+            error.EndOfStream => @as(usize, 0),
+            else => return err,
+        };
         if (read_len == 0) break;
-        const end = response_len + read_len;
-        if (end > response.len) return error.MessageTooBig;
-        @memcpy(response[response_len..end], chunk[0..read_len]);
-        response_len = end;
-
-        if (response_len >= message.len) break;
+        response_len += read_len;
     }
 
     if (response_len != response.len) {
@@ -1484,7 +1500,16 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 fn tcpClientExpectPeerClose(port: u16) !void {
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    const timeout = std.Io.Timeout{
+        .duration = .{
+            .raw = std.Io.Duration.fromSeconds(2),
+            .clock = .real,
+        },
+    };
+    const stream = try address.connect(io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+    });
     defer stream.close(io);
 
     var write_buf: [64]u8 = undefined;
@@ -1492,10 +1517,16 @@ fn tcpClientExpectPeerClose(port: u16) !void {
     try writer.interface.writeAll("peer-close");
     try writer.interface.flush();
 
-    var read_buf: [64]u8 = undefined;
-    var reader = stream.reader(io, &read_buf);
     var chunk: [64]u8 = undefined;
-    const read_len = try reader.interface.readSliceShort(&chunk);
+    const result = try io.operateTimeout(.{ .file_read_streaming = .{
+        .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = true } },
+        .data = &[_][]u8{chunk[0..]},
+    } }, timeout);
+
+    const read_len = result.file_read_streaming catch |err| switch (err) {
+        error.EndOfStream, error.ConnectionResetByPeer => @as(usize, 0),
+        else => return err,
+    };
     try testing.expectEqual(@as(usize, 0), read_len);
 }
 
@@ -1514,8 +1545,15 @@ fn udpEchoServerThread(ctx: *UdpEchoServerContext) void {
     var buffer: [65507]u8 = undefined;
     var messages: usize = 0;
 
+    const timeout = std.Io.Timeout{
+        .duration = .{
+            .raw = std.Io.Duration.fromSeconds(10),
+            .clock = .real,
+        },
+    };
+
     while (messages < ctx.max_messages) {
-        const incoming = socket.receive(io, buffer[0..]) catch |err| {
+        const incoming = socket.receiveTimeout(io, buffer[0..], timeout) catch |err| {
             ctx.start_error = err;
             return;
         };
@@ -1552,8 +1590,14 @@ fn udpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     try socket.send(io, &server_addr, message);
 
     var response: [1024]u8 = undefined;
-    _ = timeout_ns;
-    const incoming = try socket.receive(io, response[0..]);
+    const timeout = std.Io.Timeout{
+        .duration = .{
+            .raw = std.Io.Duration.fromNanoseconds(timeout_ns),
+            .clock = .real,
+        },
+    };
+    const incoming = try socket.receiveTimeout(io, response[0..], timeout);
 
     return try allocator.dupe(u8, incoming.data);
 }
+
