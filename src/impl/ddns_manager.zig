@@ -332,10 +332,20 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !v
             continue;
         }
 
-        if (map.get(cfg.name)) |_| {
-            // Check if config changed and restart if needed
-            std.log.debug("[DDNS] Instance {s} already exists", .{cfg.name});
-            // TODO: Check if config changed and restart if needed
+        if (map.get(cfg.name)) |existing| {
+            if (!existing.config.eql(cfg)) {
+                std.log.info("[DDNS] Config changed for {s}, restarting instance", .{cfg.name});
+                const kv = map.fetchRemove(cfg.name).?;
+                kv.value.deinit(allocator);
+                allocator.destroy(kv.value);
+                allocator.free(kv.key);
+                const holder = try createInstance(allocator, cfg);
+                const key = try allocator.dupe(u8, cfg.name);
+                try map.put(key, holder);
+                holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
+            } else {
+                std.log.debug("[DDNS] Instance {s} already exists (unchanged)", .{cfg.name});
+            }
         } else {
             std.log.info("[DDNS] Creating new instance: {s}", .{cfg.name});
             const holder = try createInstance(allocator, cfg);

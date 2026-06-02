@@ -16,6 +16,14 @@ pub const LogConfig = struct {
         allocator.free(self.file_path);
         self.* = undefined;
     }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.file_path, b.file_path) and
+            a.max_size == b.max_size and
+            a.max_files == b.max_files and
+            a.flush_interval_ms == b.flush_interval_ms;
+    }
 };
 
 pub fn defaultLogConfig(allocator: std.mem.Allocator) !LogConfig {

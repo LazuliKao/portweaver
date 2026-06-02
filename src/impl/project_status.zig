@@ -109,6 +109,47 @@ pub const ProjectHandle = struct {
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
     }
+    /// Tears down runtime and forwarders without releasing cfg.
+    /// After this call the handle is in a clean state suitable for
+    /// re-starting forwarding with the same configuration.
+    pub fn teardownForwarders(self: *ProjectHandle) void {
+        self.shutting_down.store(true, .seq_cst);
+
+        if (self.runtime_manager) |*manager| {
+            manager.releaseProjectRuntime(self) catch |err| {
+                std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
+                self.stopSharedForwarders() catch |stop_err| {
+                    std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, stop_err });
+                };
+            };
+            manager.deinit();
+            self.runtime_manager = null;
+        } else {
+            self.stopSharedForwarders() catch |err| {
+                std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, err });
+            };
+        }
+
+        self.destroySharedForwardersAfterRuntimeStop() catch |err| {
+            std.log.err("Failed to free forwarder wrappers for project {d}: {}", .{ self.id, err });
+        };
+
+        // Clear lists — destroy deregistered everything, but clear
+        // defensively in case of partial failure to avoid stale pointers.
+        {
+            self.lock.lockUncancelable(compat.io());
+            defer self.lock.unlock(compat.io());
+            self.tcp_forwarders.clearRetainingCapacity();
+            self.udp_forwarders.clearRetainingCapacity();
+        }
+
+        // Reset runtime state so caller can re-start forwarding.
+        self.startup_status = .disabled;
+        self.error_code = 0;
+        self.active_ports = 0;
+        self.runtime_enabled.store(false, .seq_cst);
+        self.shutting_down.store(false, .seq_cst);
+    }
     pub inline fn setStartupFailedCode(self: *ProjectHandle, err_code: i32) void {
         self.startup_status = .failed;
         self.error_code = err_code;

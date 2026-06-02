@@ -23,7 +23,7 @@ pub const TcpForwarder = struct {
             .forwarder = null,
         };
 
-        fwd.setup(runtime_ctx, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, &error_code) catch |err| {
+        fwd.setup(runtime_ctx, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, projectHandle.cfg.connect_timeout_ms orelse 0, projectHandle.cfg.max_connections orelse 0, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;
@@ -39,6 +39,8 @@ pub const TcpForwarder = struct {
         target_port: u16,
         family: common.AddressFamily,
         enable_stats: bool,
+        connect_timeout_ms: u32,
+        max_connections: u32,
         out_error_code: *i32,
     ) !void {
         const target_z = try self.allocator.dupeZ(u8, target_address);
@@ -57,6 +59,8 @@ pub const TcpForwarder = struct {
             target_port,
             c_family,
             if (enable_stats) 1 else 0,
+            connect_timeout_ms,
+            max_connections,
             out_error_code,
         );
 

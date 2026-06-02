@@ -131,6 +131,7 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
     bool closing;
     bool target_write_pending;
     bool client_write_pending;
+    std::shared_ptr<asio::steady_timer> connect_timer;
 };
 
 struct tcp_forwarder
@@ -143,6 +144,8 @@ struct tcp_forwarder
     uint16_t target_port;
     addr_family_t family;
     int enable_stats;
+    uint32_t connect_timeout_ms;
+    uint32_t max_connections;
     int started;
     std::atomic<int> stop_requested{0};
     std::atomic<int> destroy_requested{0};
@@ -156,7 +159,7 @@ struct tcp_forwarder
 
     tcp_forwarder(forwarder_runtime_t *runtime_value, asio::io_context &io_ctx_value)
         : runtime(runtime_value), acceptor(io_ctx_value), io_ctx(io_ctx_value), target_address(nullptr), listen_port(0),
-          target_port(0), family(ADDR_FAMILY_IPV4), enable_stats(0), started(0), stop_requested(0), destroy_requested(0),
+          target_port(0), family(ADDR_FAMILY_IPV4), enable_stats(0), connect_timeout_ms(0), max_connections(0), started(0), stop_requested(0), destroy_requested(0),
           pending_close_count(0), bytes_in(0), bytes_out(0), active_sessions(0), cached_dest_addr()
     {
     }
@@ -183,13 +186,21 @@ struct tcp_forwarder
         acceptor.async_accept(conn->client_socket, [this, conn](const asio::error_code &ec) {
             if (!ec)
             {
+                if (max_connections > 0 && active_sessions.load(std::memory_order_relaxed) >= max_connections)
                 {
-                    std::lock_guard<std::mutex> lock(sessions_mutex);
-                    active_conns.push_back(conn);
+                    asio::error_code ignored;
+                    conn->client_socket.close(ignored);
                 }
-                active_sessions.fetch_add(1u, std::memory_order_relaxed);
-                pending_close_count.fetch_add(1, std::memory_order_release);
-                conn->async_connect_to_target();
+                else
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(sessions_mutex);
+                        active_conns.push_back(conn);
+                    }
+                    active_sessions.fetch_add(1u, std::memory_order_relaxed);
+                    pending_close_count.fetch_add(1, std::memory_order_release);
+                    conn->async_connect_to_target();
+                }
             }
 
             pending_close_count.fetch_sub(1, std::memory_order_release);
@@ -277,7 +288,25 @@ std::shared_ptr<tcp_conn_ctx> tcp_conn_ctx::create(tcp_forwarder *owner_forwarde
 void tcp_conn_ctx::async_connect_to_target()
 {
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
+
+    if (owner->connect_timeout_ms > 0)
+    {
+        connect_timer = std::make_shared<asio::steady_timer>(target_socket.get_executor());
+        connect_timer->expires_after(std::chrono::milliseconds(owner->connect_timeout_ms));
+        connect_timer->async_wait([self](const asio::error_code &ec) {
+            if (ec || self->closing)
+                return;
+            self->target_socket.close();
+        });
+    }
+
     target_socket.async_connect(owner->cached_dest_addr, [self](const asio::error_code &ec) {
+        if (self->connect_timer)
+        {
+            asio::error_code cancel_ec;
+            self->connect_timer->cancel(cancel_ec);
+            self->connect_timer.reset();
+        }
         if (ec)
         {
             self->force_close();
@@ -472,6 +501,13 @@ void tcp_conn_ctx::close_internal()
 
     closing = true;
 
+    if (connect_timer)
+    {
+        asio::error_code cancel_ec;
+        connect_timer->cancel(cancel_ec);
+        connect_timer.reset();
+    }
+
     asio::error_code ec;
     client_socket.cancel(ec);
     target_socket.cancel(ec);
@@ -498,6 +534,8 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     if (!runtime || !target_address)
@@ -534,6 +572,8 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
         forwarder->target_port = target_port;
         forwarder->family = family;
         forwarder->enable_stats = enable_stats;
+        forwarder->connect_timeout_ms = connect_timeout_ms;
+        forwarder->max_connections = max_connections;
 
         asio::error_code ec;
         forwarder->cached_dest_addr = make_target_endpoint(family, forwarder->target_address, target_port, ec);

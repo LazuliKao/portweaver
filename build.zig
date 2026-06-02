@@ -1033,17 +1033,14 @@ pub fn build(b: *std.Build) void {
             // Framework paths need manual sysroot prefix, unlike library paths.
             const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
             exe.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
-
             // Only add /usr/lib, build system appends it to sysroot automatically
             exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-
             exe.root_module.linkFramework("CoreFoundation", .{});
             exe.root_module.linkFramework("Security", .{});
             exe.root_module.linkFramework("IOKit", .{});
         }
     }
-
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
         exe.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 
@@ -1144,7 +1141,7 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
         mod_tests.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 
@@ -1205,7 +1202,7 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
         exe_tests.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
     }
 

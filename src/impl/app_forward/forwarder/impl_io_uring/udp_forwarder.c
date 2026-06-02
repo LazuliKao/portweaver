@@ -74,6 +74,7 @@ struct udp_forwarder {
     addr_family_t family;
     struct sockaddr_storage cached_dest_addr;
     int enable_stats;
+    uint32_t max_connections;
     int started;
     int stop_requested;
     int destroy_requested;
@@ -427,6 +428,7 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t max_connections,
     int *out_error)
 {
     if (!runtime) {
@@ -456,6 +458,7 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     fwd->family = family;
     fwd->listen_port = listen_port;
     fwd->enable_stats = enable_stats;
+    fwd->max_connections = max_connections;
     fwd->listener_recv_op.base.callback = on_listener_recv_cqe;
     fwd->listener_recv_op.forwarder = fwd;
 

@@ -166,6 +166,42 @@ pub fn stopAll() void {
     std.log.info("[FRPS] All {d} FRPS servers stopped and cleaned up", .{count});
 }
 
+/// Stop a server, deinit it, and remove it from the servers map.
+/// Idempotent — no-op if the node is not found.
+pub fn removeServer(node_name: []const u8) void {
+    std.log.info("[FRPS] Removing server {s}...", .{node_name});
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
+
+    if (servers) |*map| {
+        if (map.fetchRemove(node_name)) |kv| {
+            const holder = kv.value;
+            const allocator = servers_allocator orelse std.heap.c_allocator;
+            defer allocator.free(kv.key);
+            defer allocator.destroy(holder);
+
+            holder.lock.lockUncancelable(compat.io());
+            defer holder.lock.unlock(compat.io());
+
+            if (holder.started) {
+                holder.server.stop() catch |err| {
+                    std.log.err("[FRPS] Failed to stop server {s}: {any}", .{ node_name, err });
+                };
+                holder.started = false;
+                std.log.info("[FRPS] Server {s} stopped", .{node_name});
+            }
+            holder.server.deinit();
+            std.log.info("[FRPS] Server {s} removed", .{node_name});
+        }
+    }
+}
+
+/// Remove the existing server instance (if any), then start a fresh one.
+pub fn restartServer(allocator: std.mem.Allocator, node_name: []const u8, node: types.FrpsNode) !void {
+    removeServer(node_name);
+    try startServer(allocator, node_name, node);
+}
+
 /// FRPS server status
 pub const FrpsServerStatus = struct {
     status: []const u8,
