@@ -40,6 +40,7 @@ struct tcp_forwarder
     int destroy_requested;
     int closed_handles;
     int expected_closed_handles;
+    int ref_count;
 };
 
 typedef struct tcp_conn_ctx
@@ -68,6 +69,28 @@ typedef struct fwd_write_req
     struct tcp_forwarder *fwd;
     tcp_conn_ctx_t *ctx;
 } fwd_write_req_t;
+
+static void tcp_forwarder_ref(struct tcp_forwarder *fwd)
+{
+    if (fwd)
+    {
+        fwd->ref_count++;
+    }
+}
+
+static void tcp_forwarder_unref(struct tcp_forwarder *fwd)
+{
+    if (fwd)
+    {
+        fwd->ref_count--;
+        if (fwd->ref_count == 0)
+        {
+            DATA_FREE(fwd, fwd->target_address);
+            fwd->target_address = NULL;
+            DATA_FREE(fwd, fwd);
+        }
+    }
+}
 
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
 static void tcp_conn_close_cb(uv_handle_t *handle);
@@ -287,9 +310,11 @@ static void tcp_conn_close_cb(uv_handle_t *handle)
     ctx->close_count++;
     if (ctx->close_count >= ctx->expected_close_count)
     {
+        struct tcp_forwarder *fwd = ctx->forwarder;
         if (ctx->active_counted)
-            __atomic_fetch_sub(&ctx->forwarder->active_sessions, 1u, __ATOMIC_RELAXED);
-        DATA_FREE(ctx->forwarder, ctx);
+            __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+        DATA_FREE(fwd, ctx);
+        tcp_forwarder_unref(fwd);
     }
 }
 
@@ -376,6 +401,7 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     
     memset(ctx, 0, sizeof(*ctx));
     ctx->forwarder = fwd;
+    tcp_forwarder_ref(fwd);
     ctx->closed = 0;
     ctx->close_count = 0;
     ctx->expected_close_count = 0;
@@ -387,6 +413,7 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     {
         fprintf(stderr, "[tcp_on_new_connection] uv_tcp_init(client) failed: %s\n", uv_strerror(init_rc));
         DATA_FREE(fwd, ctx);
+        tcp_forwarder_unref(fwd);
         return;
     }
     ctx->client.data = ctx;
@@ -427,15 +454,7 @@ static void tcp_forwarder_close_cb(uv_handle_t *handle)
     struct tcp_forwarder *fwd = (struct tcp_forwarder *)handle->data;
     if (!fwd)
         return;
-    fwd->closed_handles++;
-    if (fwd->closed_handles >= fwd->expected_closed_handles)
-    {
-        if (fwd->destroy_requested)
-        {
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-        }
-    }
+    tcp_forwarder_unref(fwd);
 }
 
 static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
@@ -446,6 +465,7 @@ static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
 
     if (handle == (uv_handle_t *)&fwd->server || handle == (uv_handle_t *)&fwd->stop_handle)
     {
+        tcp_forwarder_ref(fwd);
         uv_close(handle, tcp_forwarder_close_cb);
         return;
     }
@@ -635,6 +655,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     fwd->destroy_requested = 0;
     fwd->closed_handles = 0;
     fwd->expected_closed_handles = 2;
+    fwd->ref_count = 1;
     fwd->enable_stats = enable_stats;
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
@@ -692,16 +713,24 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder)
     forwarder->destroy_requested = 1;
     
     if (!uv_is_closing((uv_handle_t *)&forwarder->server))
-        uv_close((uv_handle_t *)&forwarder->server, tcp_forwarder_close_cb);
-    if (!uv_is_closing((uv_handle_t *)&forwarder->stop_handle))
-        uv_close((uv_handle_t *)&forwarder->stop_handle, tcp_forwarder_close_cb);
-        
-    if (forwarder->closed_handles >= forwarder->expected_closed_handles)
     {
-        DATA_FREE(forwarder, forwarder->target_address);
-        forwarder->target_address = NULL;
-        DATA_FREE(forwarder, forwarder);
+        tcp_forwarder_ref(forwarder);
+        uv_close((uv_handle_t *)&forwarder->server, tcp_forwarder_close_cb);
     }
+    if (!uv_is_closing((uv_handle_t *)&forwarder->stop_handle))
+    {
+        tcp_forwarder_ref(forwarder);
+        uv_close((uv_handle_t *)&forwarder->stop_handle, tcp_forwarder_close_cb);
+    }
+    
+    uv_loop_t *loop = forwarder_runtime_get_loop(forwarder->runtime);
+    if (loop)
+    {
+        uv_walk(loop, tcp_close_walk_cb, forwarder);
+    }
+        
+    // Release the owner reference
+    tcp_forwarder_unref(forwarder);
 }
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)

@@ -55,6 +55,7 @@ struct udp_forwarder
     int destroy_requested;
     int closed_handles;
     int expected_closed_handles;
+    int ref_count;
 };
 
 typedef struct udp_client_session
@@ -118,6 +119,28 @@ static inline uint32_t sockaddr_hash(const struct sockaddr *addr)
     return hash % UDP_SESSION_HASH_SIZE;
 }
 
+static void udp_forwarder_ref(struct udp_forwarder *fwd)
+{
+    if (fwd)
+    {
+        fwd->ref_count++;
+    }
+}
+
+static void udp_forwarder_unref(struct udp_forwarder *fwd)
+{
+    if (fwd)
+    {
+        fwd->ref_count--;
+        if (fwd->ref_count == 0)
+        {
+            DATA_FREE(fwd, fwd->target_address);
+            fwd->target_address = NULL;
+            DATA_FREE(fwd, fwd);
+        }
+    }
+}
+
 static void udp_session_remove(struct udp_forwarder *fwd, udp_client_session_t *session)
 {
     udp_client_session_t **pp = &fwd->sessions;
@@ -153,12 +176,14 @@ static void udp_session_close_cb(uv_handle_t *handle)
     session->close_count++;
     if (session->close_count >= session->expected_close_count)
     {
+        struct udp_forwarder *fwd = session->fwd;
         if (session->tracked_in_forwarder)
         {
-            udp_session_remove(session->fwd, session);
-            __atomic_fetch_sub(&session->fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+            udp_session_remove(fwd, session);
+            __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         }
-        DATA_FREE(session->fwd, session);
+        DATA_FREE(fwd, session);
+        udp_forwarder_unref(fwd);
     }
 }
 
@@ -293,6 +318,7 @@ static udp_client_session_t *udp_session_create(struct udp_forwarder *fwd, const
     memset(s, 0, sizeof(*s));
 
     s->fwd = fwd;
+    udp_forwarder_ref(fwd);
     s->client_addr_len = addr_len;
     s->close_count = 0;
     s->expected_close_count = 0;
@@ -304,6 +330,7 @@ static udp_client_session_t *udp_session_create(struct udp_forwarder *fwd, const
     if (r < 0)
     {
         DATA_FREE(fwd, s);
+        udp_forwarder_unref(fwd);
         return NULL;
     }
     s->expected_close_count = 1;
@@ -479,15 +506,7 @@ static void udp_forwarder_close_cb(uv_handle_t *handle)
     struct udp_forwarder *fwd = (struct udp_forwarder *)handle->data;
     if (!fwd)
         return;
-    fwd->closed_handles++;
-    if (fwd->closed_handles >= fwd->expected_closed_handles)
-    {
-        if (fwd->destroy_requested)
-        {
-            DATA_FREE(fwd, fwd->target_address);
-            DATA_FREE(fwd, fwd);
-        }
-    }
+    udp_forwarder_unref(fwd);
 }
 
 static void udp_stop_cb(uv_async_t *handle)
@@ -497,9 +516,15 @@ static void udp_stop_cb(uv_async_t *handle)
         return;
 
     if (!uv_is_closing((uv_handle_t *)&fwd->server))
+    {
+        udp_forwarder_ref(fwd);
         uv_close((uv_handle_t *)&fwd->server, udp_forwarder_close_cb);
+    }
     if (!uv_is_closing((uv_handle_t *)&fwd->stop_handle))
+    {
+        udp_forwarder_ref(fwd);
         uv_close((uv_handle_t *)&fwd->stop_handle, udp_forwarder_close_cb);
+    }
 
     // Iterating linked list instead of uv_walk to be safe in shared loop
     udp_client_session_t *session = fwd->sessions;
@@ -655,6 +680,7 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     fwd->closed_handles = 0;
     fwd->expected_closed_handles = 2;
     fwd->sessions = NULL;
+    fwd->ref_count = 1;
     fwd->enable_stats = enable_stats;
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
@@ -713,17 +739,33 @@ void udp_forwarder_destroy(udp_forwarder_t *forwarder)
     
     forwarder->destroy_requested = 1;
     
-    if (!uv_is_closing((uv_handle_t *)&forwarder->server))
-        uv_close((uv_handle_t *)&forwarder->server, udp_forwarder_close_cb);
-    if (!uv_is_closing((uv_handle_t *)&forwarder->stop_handle))
-        uv_close((uv_handle_t *)&forwarder->stop_handle, udp_forwarder_close_cb);
-        
-    if (forwarder->closed_handles >= forwarder->expected_closed_handles)
+    // Also close any active sessions if not already closing
+    udp_client_session_t *session = forwarder->sessions;
+    while (session)
     {
-        DATA_FREE(forwarder, forwarder->target_address);
-        forwarder->target_address = NULL;
-        DATA_FREE(forwarder, forwarder);
+        if (!uv_is_closing((uv_handle_t *)&session->sock))
+        {
+            uv_udp_recv_stop(&session->sock);
+            uv_close((uv_handle_t *)&session->sock, udp_session_close_cb);
+        }
+        if (!uv_is_closing((uv_handle_t *)&session->timeout_timer))
+            uv_close((uv_handle_t *)&session->timeout_timer, udp_session_close_cb);
+        session = session->list_next;
     }
+
+    if (!uv_is_closing((uv_handle_t *)&forwarder->server))
+    {
+        udp_forwarder_ref(forwarder);
+        uv_close((uv_handle_t *)&forwarder->server, udp_forwarder_close_cb);
+    }
+    if (!uv_is_closing((uv_handle_t *)&forwarder->stop_handle))
+    {
+        udp_forwarder_ref(forwarder);
+        uv_close((uv_handle_t *)&forwarder->stop_handle, udp_forwarder_close_cb);
+    }
+        
+    // Release the owner reference
+    udp_forwarder_unref(forwarder);
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder)
