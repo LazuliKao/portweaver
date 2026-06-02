@@ -29,7 +29,7 @@ pub const LogCallback = *const fn (instance_id: i32, level: LogLevel, message: [
 
 var global_log_callback: ?LogCallback = null;
 
-fn logCallbackBridge(instance_id: c_int, level: c_int, message: [*c]const u8) callconv(.C) void {
+fn logCallbackBridge(instance_id: c_int, level: c_int, message: [*c]const u8) callconv(.c) void {
     if (global_log_callback) |callback| {
         const msg_len = std.mem.len(message);
         const msg_slice = message[0..msg_len];

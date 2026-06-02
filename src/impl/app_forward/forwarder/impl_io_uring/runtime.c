@@ -179,6 +179,11 @@ void forwarder_runtime_close_wake(forwarder_runtime_t *runtime) {
         io_uring_prep_cancel(sqe, &runtime->eventfd_op, 0);
         sqe->user_data = 0; /* Don't care about cancel result */
     }
+    // Decrement active_ops to account for the cancel SQE's CQE which has
+    // user_data=0 and will be silently ignored by the CQE processing loop.
+    // The original poll's CQE (ECANCELED) will be handled by on_eventfd_cqe
+    // and decrement active_ops a second time, correctly reaching zero.
+    forwarder_runtime_dec_active(runtime);
 }
 
 void forwarder_runtime_close_owned_handles(forwarder_runtime_t *runtime) {
