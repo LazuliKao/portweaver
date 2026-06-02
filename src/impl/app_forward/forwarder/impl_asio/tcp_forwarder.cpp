@@ -303,8 +303,7 @@ void tcp_conn_ctx::async_connect_to_target()
     target_socket.async_connect(owner->cached_dest_addr, [self](const asio::error_code &ec) {
         if (self->connect_timer)
         {
-            asio::error_code cancel_ec;
-            self->connect_timer->cancel(cancel_ec);
+            self->connect_timer->cancel();
             self->connect_timer.reset();
         }
         if (ec)
@@ -503,8 +502,7 @@ void tcp_conn_ctx::close_internal()
 
     if (connect_timer)
     {
-        asio::error_code cancel_ec;
-        connect_timer->cancel(cancel_ec);
+        connect_timer->cancel();
         connect_timer.reset();
     }
 
