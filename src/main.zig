@@ -18,7 +18,11 @@ const event_log = @import("event_log.zig");
 const process_lock = @import("process_lock.zig");
 const file_log = @import("file_log.zig");
 const compat = @import("compat.zig");
+const reload = @import("reload.zig");
 
+fn handleSighup(_: c_int) callconv(.C) void {
+    process_lock.requestReload();
+}
 var global_log_level: std.log.Level = .info;
 
 pub const std_options: std.Options = .{
@@ -58,9 +62,25 @@ pub fn main(init: std.process.Init) !void {
     event_log.initGlobal(allocator);
     defer event_log.deinitGlobal();
 
+    // 注册 SIGHUP 信号处理器（非 Windows）
+    if (@import("builtin").os.tag != .windows) {
+        const act = std.posix.Sigaction{
+            .handler = .{ .handler = handleSighup },
+            .mask = std.posix.empty_sigset,
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.HUP, &act, null);
+    }
+
+    // Determine config source for initial load and future reloads
+    const cfg_source: reload.ConfigSource = if (build_options.uci_mode) .uci else .json;
+    const cfg_path: ?[]const u8 = if (build_options.uci_mode) null else parseConfigFile(args) catch |err| {
+        std.log.err("Failed to parse config file argument: {any}", .{err});
+        return err;
+    };
+
     // 加载配置
-    var result = try loadConfig(allocator, args);
-    defer result.deinit(allocator);
+    var result = try loadConfigFrom(allocator, cfg_source, cfg_path);
 
     if (result.log_config.enabled) {
         file_log.initGlobalFileLogger(allocator, result.log_config);
@@ -101,11 +121,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // 初始化重载模块（接管 config 所有权，之后不要 deinit result）
+    reload.init(allocator, &handles, result, cfg_source, cfg_path);
+    defer reload.deinit();
+
     // 应用配置并启动服务
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
 
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, &handles) catch |err| {
+        ubus_server.start(allocator, &handles, &cfg.frpc_nodes) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
         };
     }
@@ -117,25 +141,36 @@ pub fn main(init: std.process.Init) !void {
         const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
 
-        process_lock.waitForShutdown();
-        if (process_lock.shouldExitForTakeover()) {
-            std.log.info("PortWeaver takeover requested. Stopping services cleanly...", .{});
+        while (true) {
+            const event = process_lock.waitForEvent();
+            switch (event) {
+                .shutdown => {
+                    if (process_lock.shouldExitForTakeover()) {
+                        std.log.info("PortWeaver takeover requested. Stopping services cleanly...", .{});
+                    }
+                    break;
+                },
+                .reload => {
+                    std.log.info("Configuration reload requested...", .{});
+                    reload.apply();
+                },
+            }
         }
     }
 }
-/// 根据编译选项和命令行参数加载配置
-fn loadConfig(allocator: std.mem.Allocator, args: []const []const u8) !config.Config {
-    if (build_options.uci_mode) {
-        // UCI 模式：直接从 UCI 加载配置
+/// 根据配置源类型加载配置
+fn loadConfigFrom(allocator: std.mem.Allocator, source: reload.ConfigSource, path: ?[]const u8) !config.Config {
+    if (build_options.uci_mode and source == .uci) {
         std.log.info("Loading configuration from UCI...", .{});
         var uci_ctx = try uci.UciContext.alloc();
         defer uci_ctx.free();
         return config.loadFromUci(allocator, uci_ctx, "portweaver");
-    } else {
-        // JSON 模式：需要通过 -c 参数指定配置文件
-        const config_file = try parseConfigFile(args);
+    } else if (source == .json) {
+        const config_file = path orelse "config.json";
         std.log.info("Loading configuration from JSON file: {s}", .{config_file});
         return config.loadFromJsonFile(allocator, config_file);
+    } else {
+        return config.ConfigError.UnsupportedFeature;
     }
 }
 

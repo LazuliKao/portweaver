@@ -436,6 +436,123 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
     }
 }
 
+const upx_version = "5.1.1";
+
+fn ensureUpx(b: *std.Build) ?[]const u8 {
+    const host_os = b.graph.host.result.os.tag;
+    const host_arch = b.graph.host.result.cpu.arch;
+
+    // Only x86_64 and aarch64 hosts are supported
+    if (host_arch != .x86_64 and host_arch != .aarch64) {
+        return null;
+    }
+    // Only Linux and Windows hosts
+    if (host_os != .linux and host_os != .windows) {
+        return null;
+    }
+
+    const upx_root = b.cache_root.join(b.allocator, &.{"portweaver-upx"}) catch @panic("OOM");
+    const upx_root_path = b.path(upx_root).getPath(b);
+
+    // Check for cached binary
+    const upx_bin = if (host_os == .windows)
+        b.pathJoin(&.{ upx_root_path, "upx.exe" })
+    else
+        b.pathJoin(&.{ upx_root_path, "upx" });
+
+    if (pathExists(b, upx_bin)) {
+        std.debug.print("Using cached UPX: {s}\n", .{upx_bin});
+        return upx_bin;
+    }
+
+    {
+        std.debug.print("Downloading UPX {s}...\n", .{upx_version});
+        std.Io.Dir.cwd().deleteTree(b.graph.io, upx_root_path) catch |err| {
+            std.debug.print("Warning: failed to clean incomplete UPX cache: {}\n", .{err});
+        };
+
+        // Determine download URL based on host OS and arch
+        const arch_suffix = switch (host_arch) {
+            .x86_64 => "amd64",
+            .aarch64 => "arm64",
+            else => return null,
+        };
+        const url = switch (host_os) {
+            .linux => b.fmt(
+                "https://github.com/upx/upx/releases/download/v{s}/upx-{s}-{s}_linux.tar.xz",
+                .{ upx_version, upx_version, arch_suffix },
+            ),
+            .windows => b.fmt(
+                "https://github.com/upx/upx/releases/download/v{s}/upx-{s}-win64.zip",
+                .{ upx_version, upx_version },
+            ),
+            else => return null,
+        };
+
+        const is_zip = (host_os == .windows);
+        const archive_ext = if (is_zip) ".zip" else ".tar.xz";
+        const temp_archive = b.cache_root.join(b.allocator, &.{b.fmt("portweaver-upx{s}", .{archive_ext})}) catch @panic("OOM");
+        const temp_archive_path = b.path(temp_archive).getPath(b);
+
+        downloadFileWithFallback(b, host_os, url, temp_archive_path);
+
+        // Create upx_root directory
+        std.Io.Dir.cwd().createDirPath(b.graph.io, upx_root_path) catch @panic("Failed to create UPX cache directory");
+
+        // Extract based on file type
+        if (is_zip) {
+            const unzip_argv = [_][]const u8{
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                b.fmt("Expand-Archive -Path '{s}' -DestinationPath '{s}' -Force", .{ temp_archive_path, upx_root_path }),
+            };
+            const result = std.process.run(b.allocator, b.graph.io, .{ .argv = &unzip_argv }) catch @panic("Failed to run PowerShell");
+            defer b.allocator.free(result.stdout);
+            defer b.allocator.free(result.stderr);
+            if (result.term != .exited or result.term.exited != 0) {
+                @panic("UPX zip extraction failed");
+            }
+            // UPX win64 zip extracts with a version-prefixed directory — move files up
+            const nested = b.pathJoin(&.{ upx_root_path, b.fmt("upx-{s}-win64", .{upx_version}) });
+            if (pathExists(b, nested)) {
+                const io = b.graph.io;
+                var src_dir = std.Io.Dir.cwd().openDir(io, nested, .{ .iterate = true }) catch @panic("Failed to open nested UPX dir");
+                defer src_dir.close(io);
+                const upx_name = "upx.exe";
+                // Use cross-directory rename: from nested/upx.exe → upx_root/upx.exe
+                var dst_dir = std.Io.Dir.cwd().openDir(io, upx_root_path, .{}) catch @panic("Failed to open UPX cache dir");
+                defer dst_dir.close(io);
+                src_dir.rename(upx_name, dst_dir, upx_name, io) catch {};
+            }
+        } else {
+            // Linux/macOS: tar.xz
+            const tar_argv = [_][]const u8{
+                "tar",
+                "xJf",
+                temp_archive_path,
+                "-C",
+                upx_root_path,
+                "--strip-components=1",
+            };
+            const result = std.process.run(b.allocator, b.graph.io, .{ .argv = &tar_argv }) catch @panic("Failed to run tar");
+            defer b.allocator.free(result.stdout);
+            defer b.allocator.free(result.stderr);
+            if (result.term != .exited or result.term.exited != 0) {
+                @panic("UPX tar extraction failed");
+            }
+        }
+
+        // Remove archive
+        std.Io.Dir.cwd().deleteFile(b.graph.io, temp_archive_path) catch {};
+
+        if (!pathExists(b, upx_bin)) {
+            @panic("Downloaded UPX but binary was not found");
+        }
+        return upx_bin;
+    }
+}
+
 fn addGoLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -798,6 +915,10 @@ fn addForwarderBackend(
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
                 .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
             });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/file_watcher.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+            });
         },
         .asio => {
             root_module.addIncludePath(b.path("deps/asio/asio/include"));
@@ -867,6 +988,8 @@ pub fn build(b: *std.Build) void {
 
     const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
     options.addOption(bool, "nftables_mode", nftables);
+
+    const upx = b.option(bool, "upx", "Compress executable with UPX (auto-downloads if not cached)") orelse false;
 
     const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv, asio or io_uring)") orelse .libuv;
     options.addOption(ForwardBackend, "forward_backend", forward_backend);
@@ -1051,7 +1174,20 @@ pub fn build(b: *std.Build) void {
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
+    if (upx) {
+        // Chain: compile → install artifact → UPX compress → install step
+        if (ensureUpx(b)) |upx_bin| {
+            const install_artifact = b.addInstallArtifact(exe, .{});
+            const upx_cmd = b.addSystemCommand(&.{upx_bin, "--best"});
+            upx_cmd.addArg(b.pathJoin(&.{ b.exe_dir, exe.out_filename }));
+            upx_cmd.step.dependOn(&install_artifact.step);
+            b.getInstallStep().dependOn(&upx_cmd.step);
+        } else {
+            @panic("UPX requested (-Dupx=true) but not available for this host platform");
+        }
+    } else {
+        b.installArtifact(exe);
+    }
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).

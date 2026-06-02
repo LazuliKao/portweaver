@@ -17,6 +17,7 @@ const event_log = @import("../event_log.zig");
 const serialization = @import("serialization.zig");
 const RawJson = serialization.RawJson;
 const wrapHandler = serialization.wrapHandler;
+const reload = @import("../reload.zig");
 
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
@@ -35,11 +36,11 @@ const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
     projects: *std.array_list.Managed(project_status.ProjectHandle),
+    frpc_nodes: *const std.StringHashMap(types.FrpcNode),
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Io.Mutex = .init,
-
-    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         errdefer allocator.destroy(state);
 
@@ -54,6 +55,7 @@ const RuntimeState = struct {
             .allocator = allocator,
             .start_ts = now,
             .projects = projects,
+            .frpc_nodes = frpc_nodes,
             .enabled = enabled,
             .last_changed = last_changed,
         };
@@ -225,12 +227,12 @@ const field_names = struct {
     pub const active_sessions: [:0]const u8 = "active_sessions";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle)) !void {
+pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode)) !void {
     g_lifecycle_mutex.lockUncancelable(compat.io());
     defer g_lifecycle_mutex.unlock(compat.io());
 
     if (g_state != null) return;
-    const state = try RuntimeState.init(allocator, projects);
+    const state = try RuntimeState.init(allocator, projects, frpc_nodes);
     g_state = state;
     errdefer {
         g_state = null;
@@ -1103,11 +1105,18 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
     // Tear down forwarders only, keep config alive
     project.teardownForwarders();
 
-    // Re-start forwarding
+    // Re-start application layer forwarding
     app_forward.startForwarding(allocator, project) catch |err| {
         std.log.warn("ubus: failed to restart project {d}: {any}", .{ args.id, err });
         project.setStartupFailedCode(-1);
     };
+
+    // Re-start FRPC forwarding (if enabled)
+    if (build_options.frpc_mode) {
+        frpc_forward.startForwarding(allocator, project, state.frpc_nodes) catch |err| {
+            std.log.warn("ubus: failed to restart FRPC for project {d}: {any}", .{ args.id, err });
+        };
+    }
 
     // Log the restart
     event_log.logEventFmt(.project_started, @intCast(args.id), "Project {d} restarted via UBUS", .{args.id + 1});
@@ -1119,29 +1128,17 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
 }
 
 fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !ReloadConfigResponse {
-    state.mutex.lockUncancelable(compat.io());
-    defer state.mutex.unlock(compat.io());
+    _ = allocator;
+    _ = state;
 
-    var restarted: u32 = 0;
-    for (state.projects.items, 0..) |*project, idx| {
-        if (!project.cfg.enabled) continue;
-        if (project.startup_status != .success and project.startup_status != .disabled) continue;
-
-        project.teardownForwarders();
-        app_forward.startForwarding(allocator, project) catch |err| {
-            std.log.warn("ubus: failed to restart project {d} during reload: {any}", .{ idx, err });
-            project.setStartupFailedCode(-1);
-            continue;
-        };
-        restarted += 1;
-    }
-
-    event_log.logEventFmt(.info, -1, "Config reloaded: {d} project(s) restarted", .{restarted});
+    // Delegate to the shared reload module — it handles config re-reading,
+    // diff comparison, teardown, restart, firewall refresh, and sub-service reload.
+    reload.apply();
 
     return .{
         .success = true,
-        .changes = restarted,
-        .message = "Config reloaded successfully",
+        .changes = 0, // Individual counts are logged by reload.apply()
+        .message = "Config reload triggered successfully",
     };
 }
 

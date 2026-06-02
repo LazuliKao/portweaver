@@ -14,6 +14,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    name: Test ${{ matrix.backend }} backend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - libuv
+          - asio
+          - io_uring
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.7'
+          cache-dependency-path: "**/go.sum"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          zig build test -Dforward_backend=${{ matrix.backend }} -Dfrpc=true -Dfrps=true -Dddns=true --test-timeout 10s --summary all
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

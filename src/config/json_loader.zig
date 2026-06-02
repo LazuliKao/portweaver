@@ -246,6 +246,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     errdefer log_config.deinit(a);
     var app_forward_loop_mode: types.LoopMode = .per_project;
     var use_nftables: bool = false;
+    var watch: bool = false;
 
     std.Io.Dir.cwd().access(compat.io(), path, .{}) catch |err| {
         std.log.debug("File not found: {s}", .{path});
@@ -313,6 +314,11 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         if (obj.get("use_nftables")) |v| {
             if (parseJsonBool(v, ec.fieldPath("use_nftables", .{}), ec)) |b| {
                 use_nftables = b;
+            }
+        }
+        if (obj.get("watch")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("watch", .{}), ec)) |b| {
+                watch = b;
             }
         }
     }
@@ -934,6 +940,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     return .{
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
+        .watch = watch,
         .log_config = log_config,
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,

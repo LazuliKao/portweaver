@@ -108,35 +108,56 @@ pub fn shouldExitForTakeover() bool {
     };
 }
 
-/// Blocks until the process should shut down.
+/// What woke the process from `waitForEvent`.
+pub const WaitResult = enum {
+    shutdown,
+    reload,
+};
+
+/// Blocks until the process should shut down or reload configuration.
 /// On Windows, waits on the takeover event (kernel-level, no polling).
 /// On non-Windows, waits on a condition variable (signal-ready).
-pub fn waitForShutdown() void {
+pub fn waitForEvent() WaitResult {
     if (builtin.os.tag == .windows) {
         const takeover_event = windows_takeover_event orelse {
-            // No takeover event — sleep until killed externally
             while (true) {
+                if (reload_requested.swap(false, .acq_rel)) return .reload;
                 compat.sleepNanos(std.time.ns_per_s);
             }
         };
-        const wait_result = WaitForSingleObject(takeover_event, windows_infinite);
-        switch (wait_result) {
-            windows_wait_object_0, windows_wait_abandoned => {},
-            windows_wait_failed => {
-                std.log.warn("waitForShutdown: WaitForSingleObject failed: {any}", .{windows.GetLastError()});
-            },
-            else => {
-                std.log.warn("waitForShutdown: unexpected result: {d}", .{wait_result});
-            },
+        // WaitForSingleObject has no built-in way to also check reload_requested,
+        // so we use a short timeout and poll.
+        while (true) {
+            if (reload_requested.swap(false, .acq_rel)) return .reload;
+            const wait_result = WaitForSingleObject(takeover_event, 500); // 500ms timeout
+            switch (wait_result) {
+                windows_wait_object_0, windows_wait_abandoned => return .shutdown,
+                windows_wait_timeout => continue,
+                windows_wait_failed => {
+                    std.log.warn("waitForEvent: WaitForSingleObject failed: {any}", .{windows.GetLastError()});
+                    return .shutdown;
+                },
+                else => {
+                    std.log.warn("waitForEvent: unexpected result: {d}", .{wait_result});
+                    return .shutdown;
+                },
+            }
         }
     } else {
-        // Non-Windows: block until killed externally (SIGINT/SIGTERM)
         shutdown_mutex.lockUncancelable(compat.io());
         defer shutdown_mutex.unlock(compat.io());
-        while (!shutdown_requested) {
+        while (true) {
+            if (shutdown_requested) return .shutdown;
+            if (reload_requested.swap(false, .acq_rel)) return .reload;
             shutdown_cond.waitUncancelable(compat.io(), &shutdown_mutex);
         }
     }
+}
+
+/// Blocks until the process should shut down.
+/// Kept for backwards compatibility. Use `waitForEvent` for reload support.
+pub fn waitForShutdown() void {
+    _ = waitForEvent();
 }
 
 /// Signals the process to shut down. Safe to call from any thread.
@@ -147,9 +168,20 @@ pub fn requestShutdown() void {
     shutdown_mutex.unlock(compat.io());
 }
 
+/// Signals the process to reload configuration. Safe to call from a signal handler.
+pub fn requestReload() void {
+    reload_requested.store(true, .release);
+    if (builtin.os.tag != .windows) {
+        shutdown_mutex.lockUncancelable(compat.io());
+        shutdown_cond.broadcast(compat.io());
+        shutdown_mutex.unlock(compat.io());
+    }
+}
+
 var shutdown_mutex: std.Io.Mutex = .init;
 var shutdown_cond: std.Io.Condition = .init;
 var shutdown_requested: bool = false;
+var reload_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Releases the active platform lock and removes the PID file on clean exit.
 pub fn cleanup() void {
@@ -431,4 +463,32 @@ fn runProcess(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (result.term != .exited or result.term.exited != 0) {
         return error.ProcessCommandFailed;
     }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+test "requestReload sets the reload flag" {
+    // Reset state
+    reload_requested.store(false, .release);
+    try std.testing.expect(!reload_requested.load(.acquire));
+
+    requestReload();
+    try std.testing.expect(reload_requested.load(.acquire));
+
+    // Cleanup
+    reload_requested.store(false, .release);
+}
+
+test "waitForEvent returns reload when flag is pre-set" {
+    // Set the flag before waiting — should return immediately
+    reload_requested.store(true, .release);
+
+    const result = waitForEvent();
+    try std.testing.expectEqual(WaitResult.reload, result);
+    // Flag should be cleared after consuming
+    try std.testing.expect(!reload_requested.load(.acquire));
+}
+
+test "WaitResult enum values are distinct" {
+    try std.testing.expect(WaitResult.shutdown != WaitResult.reload);
 }
