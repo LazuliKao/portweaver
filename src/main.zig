@@ -20,7 +20,7 @@ const file_log = @import("file_log.zig");
 const compat = @import("compat.zig");
 const reload = @import("reload.zig");
 
-fn handleSighup(_: c_int) callconv(.c) void {
+fn handleSighup(_: std.posix.SIG) callconv(.c) void {
     process_lock.requestReload();
 }
 var global_log_level: std.log.Level = .info;
