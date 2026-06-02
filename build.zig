@@ -855,11 +855,17 @@ fn addCombinedGoLib(
 
 const ForwardBackend = enum { libuv, asio, io_uring };
 
+const LibUringResult = struct {
+    lib: *std.Build.Step.Compile,
+    compat_h: *std.Build.Step.ConfigHeader,
+    version_h: *std.Build.Step.ConfigHeader,
+};
+
 fn addLiburing(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
+) LibUringResult {
     const is_mips = switch (target.result.cpu.arch) {
         .mips, .mipsel, .mips64, .mips64el => true,
         else => false,
@@ -874,6 +880,22 @@ fn addLiburing(
             .pic = if (is_mips) true else null,
         }),
     });
+
+    const compat_h = b.addConfigHeader(.{
+        .style = .{ .cmake = b.path("src/impl/app_forward/forwarder/impl_io_uring/compat.h.in") },
+        .include_path = "liburing/compat.h",
+    }, .{});
+    lib.root_module.addConfigHeader(compat_h);
+
+    const version_h = b.addConfigHeader(.{
+        .style = .{ .cmake = b.path("src/impl/app_forward/forwarder/impl_io_uring/io_uring_version.h.in") },
+        .include_path = "liburing/io_uring_version.h",
+    }, .{
+        .IO_URING_VERSION_MAJOR = 2,
+        .IO_URING_VERSION_MINOR = 15,
+    });
+    lib.root_module.addConfigHeader(version_h);
+
     lib.root_module.addCSourceFiles(.{
         .files = &.{
             "deps/liburing/src/setup.c",
@@ -885,7 +907,11 @@ fn addLiburing(
     });
     lib.root_module.addIncludePath(b.path("deps/liburing/src/include"));
     lib.root_module.addIncludePath(b.path("deps/liburing/src"));
-    return lib;
+    return .{
+        .lib = lib,
+        .compat_h = compat_h,
+        .version_h = version_h,
+    };
 }
 
 fn addForwarderBackend(
@@ -944,8 +970,10 @@ fn addForwarderBackend(
             if (target.result.os.tag != .linux) {
                 @panic("io_uring backend requires Linux target. Use -Dforward_backend=libuv or asio for non-Linux targets.");
             }
-            const liburing = addLiburing(b, target, optimize);
-            root_module.linkLibrary(liburing);
+            const uring_res = addLiburing(b, target, optimize);
+            root_module.linkLibrary(uring_res.lib);
+            root_module.addConfigHeader(uring_res.compat_h);
+            root_module.addConfigHeader(uring_res.version_h);
             root_module.addIncludePath(b.path("deps/liburing/src/include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/runtime.c"),
@@ -1344,6 +1372,7 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    b.installArtifact(exe_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will

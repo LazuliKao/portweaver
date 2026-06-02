@@ -62,6 +62,7 @@ struct udp_session {
     struct udp_close_op close_op;
     
     int closing;
+    int pending_ops;   /* total outstanding SQEs for this session */
     int active_counted;
 };
 
@@ -81,6 +82,7 @@ struct udp_forwarder {
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
+    int ref_count;
     
     struct udp_session *session_hash[UDP_SESSION_HASH_SIZE];
     
@@ -121,11 +123,38 @@ static int addrs_equal(struct sockaddr_storage *a, struct sockaddr_storage *b) {
 static void submit_listener_recv(struct udp_forwarder *fwd);
 static void submit_target_recv(struct udp_session *session);
 
+static void udp_forwarder_unref(struct udp_forwarder *fwd) {
+    if (!fwd) return;
+    fwd->ref_count--;
+    if (fwd->ref_count <= 0) {
+        DATA_FREE(fwd, fwd->target_address);
+        DATA_FREE(fwd, fwd);
+    }
+}
+
+/* Decrement the per-session pending_ops counter and free session if it has
+ * reached zero while in the closing state. Every CQE callback must call
+ * this instead of directly calling dec_active. */
+static void udp_session_release_op(struct udp_session *session) {
+    forwarder_runtime_dec_active(session->forwarder->runtime);
+    session->pending_ops--;
+    if (session->closing && session->pending_ops <= 0) {
+        struct udp_forwarder *fwd = session->forwarder;
+        if (session->active_counted) {
+            __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+        }
+        DATA_FREE(fwd, session);
+        udp_forwarder_unref(fwd);
+    }
+}
+
 static void close_session(struct udp_session *session) {
     if (session->closing) return;
     session->closing = 1;
     
     struct udp_forwarder *fwd = session->forwarder;
+    
+    /* Remove from hash table before any async close. */
     unsigned int h = hash_addr(&session->client_addr);
     struct udp_session **p = &fwd->session_hash[h];
     while (*p) {
@@ -142,26 +171,25 @@ static void close_session(struct udp_session *session) {
         io_uring_prep_close(sqe, session->session_fd);
         sqe->user_data = (uint64_t)(uintptr_t)&session->close_op;
         forwarder_runtime_inc_active(fwd->runtime);
+        session->pending_ops++;
     } else {
+        /* Fallback: close synchronously and free if possible. */
         close(session->session_fd);
+    }
+    
+    if (session->pending_ops <= 0) {
         if (session->active_counted) {
             __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         }
         DATA_FREE(fwd, session);
+        udp_forwarder_unref(fwd);
     }
 }
 
 static void on_session_close_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
     struct udp_close_op *op = (struct udp_close_op *)ctx;
-    struct udp_session *session = op->session;
-    struct udp_forwarder *fwd = session->forwarder;
-    
-    forwarder_runtime_dec_active(fwd->runtime);
-    
-    if (session->active_counted) {
-        __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
-    }
-    DATA_FREE(fwd, session);
+    udp_session_release_op(op->session);
 }
 
 static void cleanup_expired_sessions(struct udp_forwarder *fwd) {
@@ -179,16 +207,20 @@ static void cleanup_expired_sessions(struct udp_forwarder *fwd) {
 }
 
 static void on_client_send_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
     struct udp_send_op *op = (struct udp_send_op *)ctx;
-    forwarder_runtime_dec_active(op->forwarder->runtime);
+    udp_session_release_op(op->session);
 }
 
 static void on_target_send_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
     struct udp_send_op *op = (struct udp_send_op *)ctx;
-    forwarder_runtime_dec_active(op->forwarder->runtime);
+    udp_session_release_op(op->session);
 }
 
 static void submit_target_send(struct udp_session *session, char *data, size_t len) {
+    if (session->closing) return;
+    
     struct udp_forwarder *fwd = session->forwarder;
     struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
@@ -207,9 +239,12 @@ static void submit_target_send(struct udp_session *session, char *data, size_t l
     io_uring_prep_sendmsg(sqe, session->session_fd, &op->msg, 0);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(fwd->runtime);
+    session->pending_ops++;
 }
 
 static void submit_client_send(struct udp_session *session, char *data, size_t len) {
+    if (session->closing) return;
+    
     struct udp_forwarder *fwd = session->forwarder;
     struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
@@ -230,13 +265,20 @@ static void submit_client_send(struct udp_session *session, char *data, size_t l
     io_uring_prep_sendmsg(sqe, fwd->listen_fd, &op->msg, 0);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(fwd->runtime);
+    session->pending_ops++;
 }
 
 static void on_target_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct udp_recv_op *op = (struct udp_recv_op *)ctx;
     struct udp_session *session = op->session;
     struct udp_forwarder *fwd = session->forwarder;
-    forwarder_runtime_dec_active(fwd->runtime);
+    
+    if (session->closing) {
+        udp_session_release_op(session);
+        return;
+    }
+    
+    udp_session_release_op(session);
     
     if (cqe->res <= 0) {
         if (cqe->res != -ECANCELED && !fwd->stop_requested) {
@@ -275,6 +317,7 @@ static void submit_target_recv(struct udp_session *session) {
     io_uring_prep_recvmsg(sqe, session->session_fd, &op->msg, 0);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(fwd->runtime);
+    session->pending_ops++;
 }
 
 static void on_listener_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
@@ -286,6 +329,7 @@ static void on_listener_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
         if (cqe->res != -ECANCELED && !fwd->stop_requested) {
             submit_listener_recv(fwd);
         }
+        udp_forwarder_unref(fwd);
         return;
     }
     
@@ -310,6 +354,7 @@ static void on_listener_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
             session->client_addr = op->src_addr;
             session->client_addr_len = op->msg.msg_namelen;
             session->last_activity = time(NULL);
+            session->pending_ops = 0;
             
             int domain = (fwd->family == ADDR_FAMILY_IPV6) ? AF_INET6 : AF_INET;
             session->session_fd = socket(domain, SOCK_DGRAM, 0);
@@ -318,6 +363,7 @@ static void on_listener_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
                 if (connect(session->session_fd, (struct sockaddr *)&fwd->cached_dest_addr, 
                            (fwd->family == ADDR_FAMILY_IPV6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in)) == 0) {
                     
+                    fwd->ref_count++; // Increment forwarder ref count
                     session->hash_next = fwd->session_hash[h];
                     fwd->session_hash[h] = session;
                     
@@ -353,12 +399,13 @@ static void on_listener_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
         }
     }
     
-    if (session) {
+    if (session && !session->closing) {
         session->last_activity = time(NULL);
         submit_target_send(session, op->buf, cqe->res);
     }
     
     submit_listener_recv(fwd);
+    udp_forwarder_unref(fwd);
 }
 
 static void submit_listener_recv(struct udp_forwarder *fwd) {
@@ -368,6 +415,7 @@ static void submit_listener_recv(struct udp_forwarder *fwd) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) return;
     
+    fwd->ref_count++; // Increment for in-flight listener recv
     struct udp_recv_op *op = &fwd->listener_recv_op;
     
     op->iov.iov_base = op->buf;
@@ -428,9 +476,11 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
     uint32_t max_connections,
     int *out_error)
 {
+    (void)connect_timeout_ms;
     if (!runtime) {
         set_forwarder_error(out_error, FORWARDER_ERROR_UNKNOWN);
         return NULL;
@@ -498,6 +548,7 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
         return NULL;
     }
 
+    fwd->ref_count = 1;
     set_forwarder_error(out_error, FORWARDER_OK);
     return fwd;
 }
@@ -506,6 +557,7 @@ int udp_forwarder_start(udp_forwarder_t *forwarder) {
     if (!forwarder) return -1;
     forwarder->started = 1;
     submit_listener_recv(forwarder);
+    forwarder_runtime_wake(forwarder->runtime);
     return 0;
 }
 
@@ -520,26 +572,44 @@ void udp_forwarder_request_stop(udp_forwarder_t *forwarder) {
         sqe->user_data = 0;
     }
     
+    /* Close all active sessions. Iterate carefully: close_session removes the
+     * session from the hash table, so we must capture next before calling it. */
     for (int i = 0; i < UDP_SESSION_HASH_SIZE; i++) {
         struct udp_session *session = forwarder->session_hash[i];
         while (session) {
+            struct udp_session *next = session->hash_next;
             close_session(session);
-            session = session->hash_next;
+            session = next;
         }
     }
+    
+    forwarder_runtime_wake(forwarder->runtime);
 }
 
 void udp_forwarder_destroy(udp_forwarder_t *forwarder) {
     if (!forwarder) return;
     forwarder->destroy_requested = 1;
     
+    /* Close the listen fd. Session cleanup is handled by close_session's
+     * async CQE callbacks — the memory is freed when the close CQE fires.
+     * The caller must ensure the runtime stays alive until then. */
     if (forwarder->listen_fd >= 0) {
         close(forwarder->listen_fd);
         forwarder->listen_fd = -1;
     }
     
-    DATA_FREE(forwarder, forwarder->target_address);
-    DATA_FREE(forwarder, forwarder);
+    if (!forwarder->stop_requested) {
+        forwarder->stop_requested = 1;
+        struct io_uring *ring = forwarder_runtime_get_ring(forwarder->runtime);
+        struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+        if (sqe) {
+            io_uring_prep_cancel(sqe, &forwarder->listener_recv_op, 0);
+            sqe->user_data = 0;
+            forwarder_runtime_wake(forwarder->runtime);
+        }
+    }
+    
+    udp_forwarder_unref(forwarder);
 }
 
 traffic_stats_t udp_forwarder_get_stats(udp_forwarder_t *forwarder) {

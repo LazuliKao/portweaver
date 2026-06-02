@@ -80,12 +80,16 @@ struct tcp_forwarder {
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
+    int ref_count;
+    struct tcp_conn *active_conns;
     
     struct tcp_accept_op accept_op;
 };
 
 struct tcp_conn {
     struct tcp_forwarder *forwarder;
+    struct tcp_conn *next;
+    struct tcp_conn *prev;
     int client_fd;
     int target_fd;
     int c2t_pipe[2];
@@ -94,7 +98,7 @@ struct tcp_conn {
     int client_eof;
     int target_eof;
     int closing;
-    int closed_count;
+    int pending_ops;   /* total outstanding SQEs for this connection */
     int active_counted;
     
     struct tcp_connect_op connect_op;
@@ -128,74 +132,122 @@ static void tcp_conn_close(struct tcp_conn *conn);
 static void submit_recv(struct tcp_conn *conn, int is_client);
 static void submit_splice1(struct tcp_conn *conn, int is_c2t);
 
-static void on_client_close_cqe(struct io_uring_cqe *cqe, void *ctx) {
-    struct tcp_close_op *op = (struct tcp_close_op *)ctx;
-    struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
-    conn->closed_count++;
-    if (conn->closed_count >= 2) {
-        if (conn->active_counted) {
-            __atomic_fetch_sub(&conn->forwarder->active_sessions, 1u, __ATOMIC_RELAXED);
-        }
-        DATA_FREE(conn->forwarder, conn);
+static void tcp_forwarder_unref(struct tcp_forwarder *fwd) {
+    if (!fwd) return;
+    fwd->ref_count--;
+    if (fwd->ref_count <= 0) {
+        DATA_FREE(fwd, fwd->target_address);
+        DATA_FREE(fwd, fwd);
     }
 }
 
-static void on_target_close_cqe(struct io_uring_cqe *cqe, void *ctx) {
-    struct tcp_close_op *op = (struct tcp_close_op *)ctx;
-    struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
-    conn->closed_count++;
-    if (conn->closed_count >= 2) {
-        if (conn->active_counted) {
-            __atomic_fetch_sub(&conn->forwarder->active_sessions, 1u, __ATOMIC_RELAXED);
-        }
-        DATA_FREE(conn->forwarder, conn);
+static void remove_conn_from_list(struct tcp_conn *conn) {
+    struct tcp_forwarder *fwd = conn->forwarder;
+    if (conn->prev) {
+        conn->prev->next = conn->next;
+    } else {
+        fwd->active_conns = conn->next;
     }
+    if (conn->next) {
+        conn->next->prev = conn->prev;
+    }
+    conn->next = NULL;
+    conn->prev = NULL;
+}
+
+/* Decrement the per-connection pending_ops counter and free conn if it has
+ * reached zero while in the closing state.  Every CQE callback must call
+ * this instead of directly calling dec_active. */
+static void tcp_conn_release_op(struct tcp_conn *conn) {
+    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    conn->pending_ops--;
+    if (conn->closing && conn->pending_ops <= 0) {
+        struct tcp_forwarder *fwd = conn->forwarder;
+        if (conn->active_counted) {
+            __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+        }
+        remove_conn_from_list(conn);
+        DATA_FREE(fwd, conn);
+        tcp_forwarder_unref(fwd);
+    }
+}
+
+static void on_client_close_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
+    struct tcp_close_op *op = (struct tcp_close_op *)ctx;
+    tcp_conn_release_op(op->conn);
+}
+
+static void on_target_close_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
+    struct tcp_close_op *op = (struct tcp_close_op *)ctx;
+    tcp_conn_release_op(op->conn);
 }
 
 static void tcp_conn_close(struct tcp_conn *conn) {
     if (conn->closing) return;
     conn->closing = 1;
     
-    struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
+    struct tcp_forwarder *fwd = conn->forwarder;
+    struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
     
-    if (!conn->forwarder->enable_stats) {
-        if (conn->c2t_pipe[0] != -1) close(conn->c2t_pipe[0]);
-        if (conn->c2t_pipe[1] != -1) close(conn->c2t_pipe[1]);
-        if (conn->t2c_pipe[0] != -1) close(conn->t2c_pipe[0]);
-        if (conn->t2c_pipe[1] != -1) close(conn->t2c_pipe[1]);
+    /* Close splice pipes synchronously — they are not tracked by io_uring. */
+    if (!fwd->enable_stats) {
+        if (conn->c2t_pipe[0] != -1) { close(conn->c2t_pipe[0]); conn->c2t_pipe[0] = -1; }
+        if (conn->c2t_pipe[1] != -1) { close(conn->c2t_pipe[1]); conn->c2t_pipe[1] = -1; }
+        if (conn->t2c_pipe[0] != -1) { close(conn->t2c_pipe[0]); conn->t2c_pipe[0] = -1; }
+        if (conn->t2c_pipe[1] != -1) { close(conn->t2c_pipe[1]); conn->t2c_pipe[1] = -1; }
     }
     
+    /* Close client fd via io_uring. */
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (sqe) {
         io_uring_prep_close(sqe, conn->client_fd);
         sqe->user_data = (uint64_t)(uintptr_t)&conn->client_close_op;
-        forwarder_runtime_inc_active(conn->forwarder->runtime);
+        forwarder_runtime_inc_active(fwd->runtime);
+        conn->pending_ops++;
     } else {
         close(conn->client_fd);
-        on_client_close_cqe(NULL, &conn->client_close_op); 
     }
     
+    /* Close target fd via io_uring if it's valid. */
     if (conn->target_fd >= 0) {
         sqe = io_uring_get_sqe(ring);
         if (sqe) {
             io_uring_prep_close(sqe, conn->target_fd);
             sqe->user_data = (uint64_t)(uintptr_t)&conn->target_close_op;
-            forwarder_runtime_inc_active(conn->forwarder->runtime);
+            forwarder_runtime_inc_active(fwd->runtime);
+            conn->pending_ops++;
         } else {
             close(conn->target_fd);
-            on_target_close_cqe(NULL, &conn->target_close_op);
         }
-    } else {
-        on_target_close_cqe(NULL, &conn->target_close_op);
+    }
+    
+    /* If there are still pending operations (recv, send, splice, timeout),
+     * they will be canceled by the fd closures above.  Their CQE callbacks
+     * will call tcp_conn_release_op, which decrements pending_ops.  The
+     * connection is only freed when pending_ops reaches 0. */
+    if (conn->pending_ops <= 0) {
+        /* No outstanding operations at all — free immediately. */
+        if (conn->active_counted) {
+            __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+        }
+        remove_conn_from_list(conn);
+        DATA_FREE(fwd, conn);
+        tcp_forwarder_unref(fwd);
     }
 }
 
 static void on_send_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_send_op *op = (struct tcp_send_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (cqe->res < 0) {
         tcp_conn_close(conn);
@@ -206,6 +258,8 @@ static void on_send_cqe(struct io_uring_cqe *cqe, void *ctx) {
 }
 
 static void submit_send(struct tcp_conn *conn, int is_client, int len) {
+    if (conn->closing) return;
+    
     struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) {
@@ -220,12 +274,19 @@ static void submit_send(struct tcp_conn *conn, int is_client, int len) {
     io_uring_prep_send(sqe, fd, buf, len, 0);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(conn->forwarder->runtime);
+    conn->pending_ops++;
 }
 
 static void on_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_recv_op *op = (struct tcp_recv_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (cqe->res <= 0) {
         if (op->is_client) conn->client_eof = 1;
@@ -246,6 +307,8 @@ static void on_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
 }
 
 static void submit_recv(struct tcp_conn *conn, int is_client) {
+    if (conn->closing) return;
+    
     struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) {
@@ -260,6 +323,7 @@ static void submit_recv(struct tcp_conn *conn, int is_client) {
     io_uring_prep_recv(sqe, fd, buf, TCP_BUF_SIZE, 0);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(conn->forwarder->runtime);
+    conn->pending_ops++;
 }
 
 static void submit_splice2(struct tcp_conn *conn, int is_c2t, int len);
@@ -267,7 +331,13 @@ static void submit_splice2(struct tcp_conn *conn, int is_c2t, int len);
 static void on_splice2_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_splice_op *op = (struct tcp_splice_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (cqe->res <= 0) {
         tcp_conn_close(conn);
@@ -278,6 +348,8 @@ static void on_splice2_cqe(struct io_uring_cqe *cqe, void *ctx) {
 }
 
 static void submit_splice2(struct tcp_conn *conn, int is_c2t, int len) {
+    if (conn->closing) return;
+    
     struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) {
@@ -289,12 +361,19 @@ static void submit_splice2(struct tcp_conn *conn, int is_c2t, int len) {
     io_uring_prep_splice(sqe, op->pipe_rd, -1, op->dst_fd, -1, len, SPLICE_F_MOVE);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(conn->forwarder->runtime);
+    conn->pending_ops++;
 }
 
 static void on_splice1_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_splice_op *op = (struct tcp_splice_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (cqe->res <= 0) {
         tcp_conn_close(conn);
@@ -305,6 +384,8 @@ static void on_splice1_cqe(struct io_uring_cqe *cqe, void *ctx) {
 }
 
 static void submit_splice1(struct tcp_conn *conn, int is_c2t) {
+    if (conn->closing) return;
+    
     struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) {
@@ -316,25 +397,41 @@ static void submit_splice1(struct tcp_conn *conn, int is_c2t) {
     io_uring_prep_splice(sqe, op->src_fd, -1, op->pipe_wr, -1, TCP_BUF_SIZE, SPLICE_F_MOVE);
     sqe->user_data = (uint64_t)(uintptr_t)op;
     forwarder_runtime_inc_active(conn->forwarder->runtime);
+    conn->pending_ops++;
 }
 
 static void on_connect_timeout_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    (void)cqe;
     struct tcp_timeout_op *op = (struct tcp_timeout_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (conn->connected) return;
     
     /* Closing target_fd cancels the in-flight connect with -ECANCELED.
      * The connect CQE handler will then call tcp_conn_close(). */
-    close(conn->target_fd);
-    conn->target_fd = -1;
+    if (conn->target_fd >= 0) {
+        close(conn->target_fd);
+        conn->target_fd = -1;
+    }
 }
 
 static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_connect_op *op = (struct tcp_connect_op *)ctx;
     struct tcp_conn *conn = op->conn;
-    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->closing) {
+        tcp_conn_release_op(conn);
+        return;
+    }
+    
+    tcp_conn_release_op(conn);
     
     if (cqe->res < 0) {
         tcp_conn_close(conn);
@@ -343,9 +440,8 @@ static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
     
     conn->connected = 1;
     
-    /* Cancel the pending connect timeout to prevent use-after-free.
-     * The timeout callback checks conn->connected and is a no-op,
-     * but we must ensure the timeout CQE arrives before conn is freed. */
+    /* Cancel the pending connect timeout. The timeout callback checks
+     * conn->connected and is a no-op if already connected. */
     if (conn->forwarder->connect_timeout_ms > 0) {
         struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
         struct io_uring_sqe *timeout_sqe = io_uring_get_sqe(ring);
@@ -353,6 +449,7 @@ static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
             io_uring_prep_timeout_remove(timeout_sqe, (uint64_t)(uintptr_t)&conn->timeout_op, 0);
             timeout_sqe->user_data = (uint64_t)(uintptr_t)&conn->timeout_op;
             forwarder_runtime_inc_active(conn->forwarder->runtime);
+            conn->pending_ops++;
         }
     }
     
@@ -376,6 +473,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
         if (cqe->res != -ECANCELED && !fwd->stop_requested) {
             submit_accept(fwd);
         }
+        tcp_forwarder_unref(fwd);
         return;
     }
     
@@ -383,11 +481,14 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     
     if (fwd->stop_requested) {
         close(client_fd);
+        tcp_forwarder_unref(fwd);
         return;
     }
+    
     if (fwd->max_connections > 0 && fwd->active_sessions >= fwd->max_connections) {
         close(client_fd);
         submit_accept(fwd);
+        tcp_forwarder_unref(fwd);
         return;
     }
     
@@ -395,6 +496,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     if (!conn) {
         close(client_fd);
         submit_accept(fwd);
+        tcp_forwarder_unref(fwd);
         return;
     }
     
@@ -434,9 +536,12 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     
     if (!fwd->enable_stats) {
         if (pipe(conn->c2t_pipe) < 0 || pipe(conn->t2c_pipe) < 0) {
+            if (conn->c2t_pipe[0] != -1) close(conn->c2t_pipe[0]);
+            if (conn->c2t_pipe[1] != -1) close(conn->c2t_pipe[1]);
             close(client_fd);
             DATA_FREE(fwd, conn);
             submit_accept(fwd);
+            tcp_forwarder_unref(fwd);
             return;
         }
         fcntl(conn->c2t_pipe[0], F_SETFL, O_NONBLOCK);
@@ -470,9 +575,14 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     int domain = (fwd->family == ADDR_FAMILY_IPV6) ? AF_INET6 : AF_INET;
     conn->target_fd = socket(domain, SOCK_STREAM, 0);
     if (conn->target_fd < 0) {
+        if (!fwd->enable_stats) {
+            close(conn->c2t_pipe[0]); close(conn->c2t_pipe[1]);
+            close(conn->t2c_pipe[0]); close(conn->t2c_pipe[1]);
+        }
         close(client_fd);
         DATA_FREE(fwd, conn);
         submit_accept(fwd);
+        tcp_forwarder_unref(fwd);
         return;
     }
     
@@ -484,10 +594,21 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (sqe) {
+        fwd->ref_count++; // Increment forwarder ref count
+        
+        // Add to active connections list
+        conn->next = fwd->active_conns;
+        if (fwd->active_conns) {
+            fwd->active_conns->prev = conn;
+        }
+        fwd->active_conns = conn;
+        conn->prev = NULL;
+        
         io_uring_prep_connect(sqe, conn->target_fd, (struct sockaddr *)&fwd->cached_dest_addr, 
                               (fwd->family == ADDR_FAMILY_IPV6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
         sqe->user_data = (uint64_t)(uintptr_t)&conn->connect_op;
         forwarder_runtime_inc_active(fwd->runtime);
+        conn->pending_ops++;
         
         __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         conn->active_counted = 1;
@@ -503,15 +624,21 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
                 io_uring_prep_timeout(timeout_sqe, &conn->timeout_op.ts, 0, 0);
                 timeout_sqe->user_data = (uint64_t)(uintptr_t)&conn->timeout_op;
                 forwarder_runtime_inc_active(fwd->runtime);
+                conn->pending_ops++;
             }
         }
     } else {
+        if (!fwd->enable_stats) {
+            close(conn->c2t_pipe[0]); close(conn->c2t_pipe[1]);
+            close(conn->t2c_pipe[0]); close(conn->t2c_pipe[1]);
+        }
         close(client_fd);
         close(conn->target_fd);
         DATA_FREE(fwd, conn);
     }
     
     submit_accept(fwd);
+    tcp_forwarder_unref(fwd);
 }
 
 static void submit_accept(struct tcp_forwarder *fwd) {
@@ -521,6 +648,7 @@ static void submit_accept(struct tcp_forwarder *fwd) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
     if (!sqe) return;
     
+    fwd->ref_count++; // Increment for in-flight accept
     io_uring_prep_accept(sqe, fwd->listen_fd, NULL, NULL, 0);
     sqe->user_data = (uint64_t)(uintptr_t)&fwd->accept_op;
     forwarder_runtime_inc_active(fwd->runtime);
@@ -640,6 +768,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
         return NULL;
     }
 
+    fwd->ref_count = 1;
     set_forwarder_error(out_error, FORWARDER_OK);
     return fwd;
 }
@@ -650,6 +779,7 @@ int tcp_forwarder_start(tcp_forwarder_t *forwarder) {
     
     forwarder->started = 1;
     submit_accept(forwarder);
+    forwarder_runtime_wake(forwarder->runtime);
     return 0;
 }
 
@@ -663,6 +793,16 @@ void tcp_forwarder_request_stop(tcp_forwarder_t *forwarder) {
         io_uring_prep_cancel(sqe, &forwarder->accept_op, 0);
         sqe->user_data = 0;
     }
+    
+    // Close all active connections
+    struct tcp_conn *conn = forwarder->active_conns;
+    while (conn) {
+        struct tcp_conn *next = conn->next;
+        tcp_conn_close(conn);
+        conn = next;
+    }
+    
+    forwarder_runtime_wake(forwarder->runtime);
 }
 
 void tcp_forwarder_destroy(tcp_forwarder_t *forwarder) {
@@ -674,8 +814,18 @@ void tcp_forwarder_destroy(tcp_forwarder_t *forwarder) {
         forwarder->listen_fd = -1;
     }
     
-    DATA_FREE(forwarder, forwarder->target_address);
-    DATA_FREE(forwarder, forwarder);
+    if (!forwarder->stop_requested) {
+        forwarder->stop_requested = 1;
+        struct io_uring *ring = forwarder_runtime_get_ring(forwarder->runtime);
+        struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+        if (sqe) {
+            io_uring_prep_cancel(sqe, &forwarder->accept_op, 0);
+            sqe->user_data = 0;
+            forwarder_runtime_wake(forwarder->runtime);
+        }
+    }
+    
+    tcp_forwarder_unref(forwarder);
 }
 
 traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder) {

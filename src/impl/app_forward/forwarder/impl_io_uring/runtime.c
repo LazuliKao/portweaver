@@ -108,40 +108,58 @@ int forwarder_runtime_init(forwarder_runtime_t *runtime, forwarder_runtime_wake_
     return 0;
 }
 
+/* Process all pending CQEs. Returns the number of CQEs dispatched. */
+static int dispatch_cqes(struct forwarder_runtime *runtime) {
+    struct io_uring_cqe *cqe;
+    unsigned head;
+    unsigned count = 0;
+
+    io_uring_for_each_cqe(&runtime->ring, head, cqe) {
+        if (cqe->user_data) {
+            struct uring_op *op = (struct uring_op *)(uintptr_t)cqe->user_data;
+            if (op->callback) {
+                op->callback(cqe, op);
+            }
+        }
+        count++;
+    }
+    io_uring_cq_advance(&runtime->ring, count);
+    return (int)count;
+}
+
 int forwarder_runtime_run(forwarder_runtime_t *runtime) {
     if (!runtime || !runtime->initialized) return -1;
+    fprintf(stderr, "[runtime] run loop started. active_ops=%d\n", runtime->active_ops);
     
     while (1) {
+        if (runtime->wake_closing && runtime->active_ops <= 0) {
+            fprintf(stderr, "[runtime] run loop breaking due to wake_closing and active_ops<=0\n");
+            break;
+        }
+        
+        unsigned sq_ready = io_uring_sq_ready(&runtime->ring);
+        if (runtime->active_ops <= 0 && sq_ready == 0) {
+            fprintf(stderr, "[runtime] run loop breaking due to active_ops=%d and sq_ready=0\n", runtime->active_ops);
+            break;
+        }
+        
+        fprintf(stderr, "[runtime] calling io_uring_submit_and_wait. active_ops=%d, sq_ready=%u\n", runtime->active_ops, sq_ready);
         int ret = io_uring_submit_and_wait(&runtime->ring, 1);
+        fprintf(stderr, "[runtime] io_uring_submit_and_wait returned: %d\n", ret);
         if (ret < 0) {
             if (ret == -EINTR) continue;
             break;
         }
         
-        struct io_uring_cqe *cqe;
-        unsigned head;
-        unsigned count = 0;
-        
-        io_uring_for_each_cqe(&runtime->ring, head, cqe) {
-            if (cqe->user_data) {
-                struct uring_op *op = (struct uring_op *)(uintptr_t)cqe->user_data;
-                if (op->callback) {
-                    op->callback(cqe, op);
-                }
-            }
-            count++;
-        }
-        io_uring_cq_advance(&runtime->ring, count);
-        
-        if (runtime->wake_closing && runtime->active_ops <= 0) {
-            break;
-        }
+        dispatch_cqes(runtime);
     }
+    fprintf(stderr, "[runtime] run loop exited.\n");
     return 0;
 }
 
 int forwarder_runtime_wake(forwarder_runtime_t *runtime) {
     if (!runtime || !runtime->initialized) return -1;
+    fprintf(stderr, "[runtime] waking up. eventfd=%d\n", runtime->eventfd);
     uint64_t val = 1;
     ssize_t n = write(runtime->eventfd, &val, sizeof(val));
     return n == sizeof(val) ? 0 : -1;
@@ -153,17 +171,19 @@ int forwarder_runtime_is_wake_closing(forwarder_runtime_t *runtime) {
 
 void forwarder_runtime_close_wake(forwarder_runtime_t *runtime) {
     if (!runtime || !runtime->initialized || runtime->wake_closing) return;
+    fprintf(stderr, "[runtime] close_wake called. setting wake_closing=1\n");
     runtime->wake_closing = 1;
     
     struct io_uring_sqe *sqe = io_uring_get_sqe(&runtime->ring);
     if (sqe) {
         io_uring_prep_cancel(sqe, &runtime->eventfd_op, 0);
-        sqe->user_data = 0; // Don't care about cancel result
+        sqe->user_data = 0; /* Don't care about cancel result */
     }
 }
 
 void forwarder_runtime_close_owned_handles(forwarder_runtime_t *runtime) {
     if (!runtime || !runtime->initialized) return;
+    fprintf(stderr, "[runtime] close_owned_handles called. canceling all\n");
     
     struct io_uring_sqe *sqe = io_uring_get_sqe(&runtime->ring);
     if (sqe) {
