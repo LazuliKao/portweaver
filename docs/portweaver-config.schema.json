@@ -391,6 +391,11 @@
           "description": "Add firewall forward rule",
           "type": "boolean"
         },
+        "connect_timeout_ms": {
+          "description": "TCP connect timeout in milliseconds. If null or omitted, the system default is used.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "dest_zone": {
           "anyOf": [
             {

@@ -107,6 +107,11 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             project.enable_firewall_stats = try types.parseBool(opt_val);
         } else if (std.mem.eql(u8, opt_name, "app_forward_loop_mode")) {
             project.app_forward_loop_mode = try types.parseLoopMode(opt_val);
+        } else if (std.mem.eql(u8, opt_name, "connect_timeout_ms")) {
+            const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+            if (trimmed.len != 0) {
+                project.connect_timeout_ms = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
+            }
         }
     }
 

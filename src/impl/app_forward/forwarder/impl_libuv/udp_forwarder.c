@@ -596,8 +596,10 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
     int *out_error)
 {
+    (void)connect_timeout_ms;
     if (!runtime)
     {
         set_forwarder_error(out_error, FORWARDER_ERROR_UNKNOWN);

@@ -281,7 +281,8 @@ pub const Project = struct {
     enable_firewall_stats: bool = false,
     /// Application-forward loop sharing override. Null inherits Config.app_forward_loop_mode.
     app_forward_loop_mode: ?LoopMode = null,
-
+    /// TCP connect timeout in milliseconds. Null = no timeout (OS default, typically 60-120s).
+    connect_timeout_ms: ?u32 = null,
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);
         if (self.src_zones.len != 0) {

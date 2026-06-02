@@ -57,6 +57,12 @@ struct tcp_close_op {
     int fd;
 };
 
+struct tcp_timeout_op {
+    struct uring_op base;
+    struct tcp_conn *conn;
+    struct __kernel_timespec ts;
+};
+
 struct tcp_forwarder {
     forwarder_runtime_t *runtime;
     int listen_fd;
@@ -66,6 +72,7 @@ struct tcp_forwarder {
     addr_family_t family;
     struct sockaddr_storage cached_dest_addr;
     int enable_stats;
+    uint32_t connect_timeout_ms;
     int started;
     int stop_requested;
     int destroy_requested;
@@ -102,6 +109,7 @@ struct tcp_conn {
     
     struct tcp_close_op client_close_op;
     struct tcp_close_op target_close_op;
+    struct tcp_timeout_op timeout_op;
     
     char client_recv_buf[TCP_BUF_SIZE];
     char target_recv_buf[TCP_BUF_SIZE];
@@ -309,6 +317,19 @@ static void submit_splice1(struct tcp_conn *conn, int is_c2t) {
     forwarder_runtime_inc_active(conn->forwarder->runtime);
 }
 
+static void on_connect_timeout_cqe(struct io_uring_cqe *cqe, void *ctx) {
+    struct tcp_timeout_op *op = (struct tcp_timeout_op *)ctx;
+    struct tcp_conn *conn = op->conn;
+    forwarder_runtime_dec_active(conn->forwarder->runtime);
+    
+    if (conn->connected) return;
+    
+    /* Closing target_fd cancels the in-flight connect with -ECANCELED.
+     * The connect CQE handler will then call tcp_conn_close(). */
+    close(conn->target_fd);
+    conn->target_fd = -1;
+}
+
 static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
     struct tcp_connect_op *op = (struct tcp_connect_op *)ctx;
     struct tcp_conn *conn = op->conn;
@@ -320,6 +341,19 @@ static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
     }
     
     conn->connected = 1;
+    
+    /* Cancel the pending connect timeout to prevent use-after-free.
+     * The timeout callback checks conn->connected and is a no-op,
+     * but we must ensure the timeout CQE arrives before conn is freed. */
+    if (conn->forwarder->connect_timeout_ms > 0) {
+        struct io_uring *ring = forwarder_runtime_get_ring(conn->forwarder->runtime);
+        struct io_uring_sqe *timeout_sqe = io_uring_get_sqe(ring);
+        if (timeout_sqe) {
+            io_uring_prep_timeout_remove(timeout_sqe, (uint64_t)(uintptr_t)&conn->timeout_op, 0);
+            timeout_sqe->user_data = (uint64_t)(uintptr_t)&conn->timeout_op;
+            forwarder_runtime_inc_active(conn->forwarder->runtime);
+        }
+    }
     
     if (conn->forwarder->enable_stats) {
         submit_recv(conn, 1);
@@ -451,6 +485,20 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
         
         __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         conn->active_counted = 1;
+        
+        if (fwd->connect_timeout_ms > 0) {
+            conn->timeout_op.base.callback = on_connect_timeout_cqe;
+            conn->timeout_op.conn = conn;
+            conn->timeout_op.ts.tv_sec = fwd->connect_timeout_ms / 1000;
+            conn->timeout_op.ts.tv_nsec = (fwd->connect_timeout_ms % 1000) * 1000000L;
+            
+            struct io_uring_sqe *timeout_sqe = io_uring_get_sqe(ring);
+            if (timeout_sqe) {
+                io_uring_prep_timeout(timeout_sqe, &conn->timeout_op.ts, 0, 0);
+                timeout_sqe->user_data = (uint64_t)(uintptr_t)&conn->timeout_op;
+                forwarder_runtime_inc_active(fwd->runtime);
+            }
+        }
     } else {
         close(client_fd);
         close(conn->target_fd);
@@ -514,6 +562,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
     int *out_error)
 {
     if (!runtime) {
@@ -543,6 +592,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     fwd->family = family;
     fwd->listen_port = listen_port;
     fwd->enable_stats = enable_stats;
+    fwd->connect_timeout_ms = connect_timeout_ms;
     fwd->accept_op.base.callback = on_accept_cqe;
     fwd->accept_op.forwarder = fwd;
 

@@ -112,6 +112,7 @@ extern "C"
         uint16_t target_port,
         addr_family_t family,
         int enable_stats,
+        uint32_t connect_timeout_ms,
         int *out_error);
 
     // Must be called on the owning runtime thread.
@@ -135,7 +136,6 @@ extern "C"
     // Returns a caller-owned forwarder pointer on success, NULL on failure.
     // This only creates/binds listener state; it does not run the runtime.
     // Error code written to out_error if provided.
-
     udp_forwarder_t *udp_forwarder_create_on_runtime(
         forwarder_runtime_t *runtime,
         uint16_t listen_port,
@@ -143,6 +143,7 @@ extern "C"
         uint16_t target_port,
         addr_family_t family,
         int enable_stats,
+        uint32_t connect_timeout_ms,
         int *out_error);
 
     // Must be called on the owning runtime thread.

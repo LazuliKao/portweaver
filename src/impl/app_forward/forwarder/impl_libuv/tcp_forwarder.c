@@ -33,6 +33,7 @@ struct tcp_forwarder
     int stop_requested;
     struct sockaddr_storage cached_dest_addr;
     int enable_stats;
+    uint32_t connect_timeout_ms;
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
@@ -60,6 +61,8 @@ typedef struct tcp_conn_ctx
     int target_shutdown_started;
     int client_shutdown_pending;
     int target_shutdown_pending;
+    uv_timer_t connect_timer;
+    int connect_timer_initialized;
 } tcp_conn_ctx_t;
 
 typedef struct fwd_write_req
@@ -71,6 +74,8 @@ typedef struct fwd_write_req
 
 static void tcp_terminate_connection(tcp_conn_ctx_t *ctx);
 static void tcp_conn_close_cb(uv_handle_t *handle);
+static void tcp_connect_timeout_cb(uv_timer_t *timer);
+static void tcp_connect_timer_close_cb(uv_handle_t *handle);
 
 static void tcp_on_client_write(uv_write_t *req, int status)
 {
@@ -304,6 +309,12 @@ static void tcp_terminate_connection(tcp_conn_ctx_t *ctx)
     uv_read_stop((uv_stream_t *)&ctx->client);
     uv_read_stop((uv_stream_t *)&ctx->target);
 
+    if (ctx->connect_timer_initialized && !uv_is_closing((uv_handle_t *)&ctx->connect_timer))
+    {
+        uv_timer_stop(&ctx->connect_timer);
+        uv_close((uv_handle_t *)&ctx->connect_timer, tcp_connect_timer_close_cb);
+    }
+
     if (!uv_is_closing((uv_handle_t *)&ctx->client))
     {
         uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
@@ -339,9 +350,28 @@ static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *b
     buf->len = 0;
 }
 
+static void tcp_connect_timer_close_cb(uv_handle_t *handle)
+{
+    (void)handle;
+}
+
+static void tcp_connect_timeout_cb(uv_timer_t *timer)
+{
+    tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)timer->data;
+    if (!ctx || ctx->closed)
+        return;
+    uv_cancel((uv_req_t *)&ctx->connect_req);
+}
+
+
 static void tcp_on_connect(uv_connect_t *req, int status)
 {
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)req->data;
+    if (ctx->connect_timer_initialized && !uv_is_closing((uv_handle_t *)&ctx->connect_timer))
+    {
+        uv_timer_stop(&ctx->connect_timer);
+        uv_close((uv_handle_t *)&ctx->connect_timer, tcp_connect_timer_close_cb);
+    }
     if (status == 0)
     {
         int r1 = uv_read_start((uv_stream_t *)&ctx->client, tcp_alloc_cb, tcp_on_client_read);
@@ -413,6 +443,13 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
             uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
             uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
         }
+        if (connect_rc == 0 && fwd->connect_timeout_ms > 0)
+        {
+            uv_timer_init(loop, &ctx->connect_timer);
+            ctx->connect_timer.data = ctx;
+            ctx->connect_timer_initialized = 1;
+            uv_timer_start(&ctx->connect_timer, tcp_connect_timeout_cb, fwd->connect_timeout_ms, 0);
+        }
     }
     else
     {
@@ -483,6 +520,17 @@ static void tcp_close_walk_cb(uv_handle_t *handle, void *arg)
             }
             return;
         }
+    }
+
+    if (handle->type == UV_TIMER)
+    {
+        tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)handle->data;
+        if (ctx && ctx->forwarder == fwd && ctx->connect_timer_initialized && !uv_is_closing(handle))
+        {
+            uv_timer_stop(&ctx->connect_timer);
+            uv_close(handle, tcp_connect_timer_close_cb);
+        }
+        return;
     }
 }
 
@@ -577,6 +625,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
     int *out_error)
 {
     if (!runtime)
@@ -636,6 +685,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     fwd->closed_handles = 0;
     fwd->expected_closed_handles = 2;
     fwd->enable_stats = enable_stats;
+    fwd->connect_timeout_ms = connect_timeout_ms;
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
 
