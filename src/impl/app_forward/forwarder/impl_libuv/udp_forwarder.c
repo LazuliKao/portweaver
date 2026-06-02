@@ -186,28 +186,6 @@ static void udp_session_timeout_cb(uv_timer_t *timer)
     }
 }
 
-static void udp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
-{
-    if (handle && handle->data)
-    {
-        // the handle->data is either fwd or session depending on socket type, but both lead to the same fwd runtime.
-        // Wait, fwd doesn't have a specific magic byte to differentiate.
-        // Let's look at how handle is bound.
-        // For fwd->server, handle->data is fwd. For session->sock, handle->data is session.
-        // But since this is a general alloc cb, we can't blindly cast.
-        // Wait, forwarder.c did:
-        // udp_forwarder_t *fwd = (udp_forwarder_t *)handle->data;
-        // if (handle == (uv_handle_t *)&fwd->server) ...
-        // Else session...
-        // This relies on handle->data being fwd when it's the server. If it's the session, handle->data is session.
-        // If handle->data is session, then `session->sock` would match `handle`.
-        // Let's implement it safely.
-    }
-    // We can't safely cast, so we will use two different alloc callbacks!
-    buf->base = NULL;
-    buf->len = 0;
-}
-
 static void udp_server_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
 {
     if (handle && handle->data)

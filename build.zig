@@ -102,10 +102,6 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         uv.root_module.linkSystemLibrary("advapi32", .{});
         uv.root_module.linkSystemLibrary("user32", .{});
         uv.root_module.linkSystemLibrary("shell32", .{});
-        // uv.root_module.linkSystemLibrary("advapi32");
-        // exe.linkSystemLibrary("user32");
-        // exe.linkSystemLibrary("shell32");
-        // exe.linkSystemLibrary("psapi");
         uv.root_module.addCMacro("WIN32_LEAN_AND_MEAN", "1");
         uv.root_module.addCMacro("_WIN32_WINNT", "0x0A00");
         uv.root_module.addCMacro("_CRT_DECLARE_NONSTDC_NAMES", "0");
@@ -832,15 +828,15 @@ fn addForwarderBackend(
             root_module.addIncludePath(b.path("deps/liburing/src/include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/runtime.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/tcp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/udp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG", "-D_GNU_SOURCE"} else &.{"-D_GNU_SOURCE"},
+                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
             });
         },
     }
@@ -872,7 +868,7 @@ pub fn build(b: *std.Build) void {
     const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
     options.addOption(bool, "nftables_mode", nftables);
 
-    const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv or asio)") orelse .libuv;
+    const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv, asio or io_uring)") orelse .libuv;
     options.addOption(ForwardBackend, "forward_backend", forward_backend);
 
     const options_mod = options.createModule();
@@ -1184,6 +1180,34 @@ pub fn build(b: *std.Build) void {
     exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
     exe_tests.root_module.addIncludePath(b.path("deps/ubus"));
     exe_tests.root_module.addIncludePath(b.path("deps/nftables"));
+
+    if (target.result.os.tag == .windows) {
+        exe_tests.root_module.linkSystemLibrary("ws2_32", .{});
+        exe_tests.root_module.linkSystemLibrary("advapi32", .{});
+        exe_tests.root_module.linkSystemLibrary("user32", .{});
+        exe_tests.root_module.linkSystemLibrary("shell32", .{});
+        exe_tests.root_module.linkSystemLibrary("iphlpapi", .{});
+        exe_tests.root_module.linkSystemLibrary("dbghelp", .{});
+        exe_tests.root_module.linkSystemLibrary("ole32", .{});
+        exe_tests.root_module.linkSystemLibrary("userenv", .{});
+        exe_tests.root_module.linkSystemLibrary("psapi", .{});
+    }
+
+    if (target.result.os.tag == .macos) {
+        if (b.sysroot) |sysroot| {
+            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
+            exe_tests.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
+            exe_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+
+            exe_tests.root_module.linkFramework("CoreFoundation", .{});
+            exe_tests.root_module.linkFramework("Security", .{});
+            exe_tests.root_module.linkFramework("IOKit", .{});
+        }
+    }
+
+    if (target.result.os.tag == .linux) {
+        exe_tests.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
+    }
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
