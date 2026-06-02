@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "zig-docs": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": [
+        "zig-mcp@latest",
+        "--doc-source",
+        "remote",
+        "--version",
+        "0.16.0"
+      ]
+    }
+  }
+}
