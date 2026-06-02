@@ -334,6 +334,8 @@ pub const Project = struct {
     app_forward_loop_mode: ?LoopMode = null,
     /// TCP connect timeout in milliseconds. Null = no timeout (OS default, typically 60-120s).
     connect_timeout_ms: ?u32 = null,
+    /// Maximum concurrent connections per listener. Null = unlimited.
+    max_connections: ?u32 = null,
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);
         if (self.src_zones.len != 0) {
@@ -390,7 +392,8 @@ pub const Project = struct {
             a.enable_app_stats == b.enable_app_stats and
             a.enable_firewall_stats == b.enable_firewall_stats and
             a.app_forward_loop_mode == b.app_forward_loop_mode and
-            a.connect_timeout_ms == b.connect_timeout_ms;
+            a.connect_timeout_ms == b.connect_timeout_ms and
+            a.max_connections == b.max_connections;
     }
 };
 

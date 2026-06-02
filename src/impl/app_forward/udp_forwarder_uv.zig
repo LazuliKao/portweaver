@@ -24,7 +24,7 @@ pub const UdpForwarder = struct {
             .forwarder = null,
         };
 
-        fwd.setup(runtime_ctx, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, projectHandle.cfg.connect_timeout_ms orelse 0, &error_code) catch |err| {
+        fwd.setup(runtime_ctx, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, projectHandle.cfg.connect_timeout_ms orelse 0, projectHandle.cfg.max_connections orelse 0, &error_code) catch |err| {
             allocator.destroy(fwd);
             projectHandle.setStartupFailedCode(error_code);
             return err;
@@ -41,6 +41,7 @@ pub const UdpForwarder = struct {
         family: common.AddressFamily,
         enable_stats: bool,
         connect_timeout_ms: u32,
+        max_connections: u32,
         out_error_code: *i32,
     ) !void {
         const addr_family: c.addr_family_t = switch (family) {
@@ -60,6 +61,7 @@ pub const UdpForwarder = struct {
             addr_family,
             if (enable_stats) 1 else 0,
             connect_timeout_ms,
+            max_connections,
             out_error_code,
         );
         if (forwarder == null) {

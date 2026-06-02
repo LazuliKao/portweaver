@@ -51,6 +51,7 @@ struct udp_forwarder
     unsigned long long bytes_out;
     unsigned int active_sessions;
     unsigned int max_sessions;
+    unsigned int max_connections;
     uint16_t listen_port;
     int destroy_requested;
     int closed_handles;
@@ -597,9 +598,11 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     addr_family_t family,
     int enable_stats,
     uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     (void)connect_timeout_ms;
+    (void)max_connections;
     if (!runtime)
     {
         set_forwarder_error(out_error, FORWARDER_ERROR_UNKNOWN);

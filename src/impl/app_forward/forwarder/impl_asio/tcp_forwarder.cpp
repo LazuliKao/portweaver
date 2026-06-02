@@ -145,6 +145,7 @@ struct tcp_forwarder
     addr_family_t family;
     int enable_stats;
     uint32_t connect_timeout_ms;
+    uint32_t max_connections;
     int started;
     std::atomic<int> stop_requested{0};
     std::atomic<int> destroy_requested{0};
@@ -158,7 +159,7 @@ struct tcp_forwarder
 
     tcp_forwarder(forwarder_runtime_t *runtime_value, asio::io_context &io_ctx_value)
         : runtime(runtime_value), acceptor(io_ctx_value), io_ctx(io_ctx_value), target_address(nullptr), listen_port(0),
-          target_port(0), family(ADDR_FAMILY_IPV4), enable_stats(0), connect_timeout_ms(0), started(0), stop_requested(0), destroy_requested(0),
+          target_port(0), family(ADDR_FAMILY_IPV4), enable_stats(0), connect_timeout_ms(0), max_connections(0), started(0), stop_requested(0), destroy_requested(0),
           pending_close_count(0), bytes_in(0), bytes_out(0), active_sessions(0), cached_dest_addr()
     {
     }
@@ -185,13 +186,21 @@ struct tcp_forwarder
         acceptor.async_accept(conn->client_socket, [this, conn](const asio::error_code &ec) {
             if (!ec)
             {
+                if (max_connections > 0 && active_sessions.load(std::memory_order_relaxed) >= max_connections)
                 {
-                    std::lock_guard<std::mutex> lock(sessions_mutex);
-                    active_conns.push_back(conn);
+                    asio::error_code ignored;
+                    conn->client_socket.close(ignored);
                 }
-                active_sessions.fetch_add(1u, std::memory_order_relaxed);
-                pending_close_count.fetch_add(1, std::memory_order_release);
-                conn->async_connect_to_target();
+                else
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(sessions_mutex);
+                        active_conns.push_back(conn);
+                    }
+                    active_sessions.fetch_add(1u, std::memory_order_relaxed);
+                    pending_close_count.fetch_add(1, std::memory_order_release);
+                    conn->async_connect_to_target();
+                }
             }
 
             pending_close_count.fetch_sub(1, std::memory_order_release);
@@ -526,6 +535,7 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     addr_family_t family,
     int enable_stats,
     uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     if (!runtime || !target_address)
@@ -563,6 +573,7 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
         forwarder->family = family;
         forwarder->enable_stats = enable_stats;
         forwarder->connect_timeout_ms = connect_timeout_ms;
+        forwarder->max_connections = max_connections;
 
         asio::error_code ec;
         forwarder->cached_dest_addr = make_target_endpoint(family, forwarder->target_address, target_port, ec);

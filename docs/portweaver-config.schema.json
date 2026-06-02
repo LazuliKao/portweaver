@@ -396,6 +396,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "max_connections": {
+          "description": "Maximum concurrent connections per listener. 0 or null means unlimited. When the limit is reached, new connections are rejected.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "dest_zone": {
           "anyOf": [
             {

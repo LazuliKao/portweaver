@@ -191,6 +191,7 @@ struct udp_forwarder
     std::mutex sessions_mutex;
     std::unordered_map<endpoint_key, std::shared_ptr<udp_client_session>> session_map;
     unsigned int max_sessions;
+    uint32_t max_connections;
 
     udp_forwarder(forwarder_runtime_t *runtime_in, asio::io_context &ctx)
         : runtime(runtime_in),
@@ -212,6 +213,7 @@ struct udp_forwarder
           sessions_mutex(),
           session_map(),
           max_sessions(UDP_MAX_SESSIONS),
+          max_connections(0),
           server_recv_from_endpoint(),
           server_recv_buffer{}
     {
@@ -663,6 +665,8 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     uint16_t target_port,
     addr_family_t family,
     int enable_stats,
+    uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     if (runtime == nullptr || target_address == nullptr)
@@ -712,6 +716,9 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     fwd->family = family;
     fwd->enable_stats = enable_stats;
     fwd->max_sessions = udp_compute_session_limit();
+    fwd->max_connections = max_connections;
+    if (max_connections > 0)
+        fwd->max_sessions = max_connections;
 
     if (!cache_destination_addr(&fwd->cached_dest_addr, family, fwd->target_address, target_port))
     {

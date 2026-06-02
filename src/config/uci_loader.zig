@@ -112,6 +112,11 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             if (trimmed.len != 0) {
                 project.connect_timeout_ms = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
             }
+        } else if (std.mem.eql(u8, opt_name, "max_connections")) {
+            const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+            if (trimmed.len != 0) {
+                project.max_connections = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
+            }
         }
     }
 

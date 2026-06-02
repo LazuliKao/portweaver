@@ -474,6 +474,14 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             };
         }
 
+        if (obj.get("max_connections")) |v| {
+            project.max_connections = switch (v) {
+                .integer => |i| @intCast(i),
+                .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch null,
+                else => null,
+            };
+        }
+
         // ── port_mappings ──
         if (obj.get("port_mappings")) |v| {
             if (v != .array) {

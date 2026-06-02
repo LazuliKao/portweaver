@@ -73,6 +73,7 @@ struct tcp_forwarder {
     struct sockaddr_storage cached_dest_addr;
     int enable_stats;
     uint32_t connect_timeout_ms;
+    uint32_t max_connections;
     int started;
     int stop_requested;
     int destroy_requested;
@@ -384,6 +385,11 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
         close(client_fd);
         return;
     }
+    if (fwd->max_connections > 0 && fwd->active_sessions >= fwd->max_connections) {
+        close(client_fd);
+        submit_accept(fwd);
+        return;
+    }
     
     struct tcp_conn *conn = (struct tcp_conn *)DATA_ALLOC(fwd, sizeof(struct tcp_conn));
     if (!conn) {
@@ -563,6 +569,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     addr_family_t family,
     int enable_stats,
     uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     if (!runtime) {
@@ -593,6 +600,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     fwd->listen_port = listen_port;
     fwd->enable_stats = enable_stats;
     fwd->connect_timeout_ms = connect_timeout_ms;
+    fwd->max_connections = max_connections;
     fwd->accept_op.base.callback = on_accept_cqe;
     fwd->accept_op.forwarder = fwd;
 

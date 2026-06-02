@@ -34,6 +34,7 @@ struct tcp_forwarder
     struct sockaddr_storage cached_dest_addr;
     int enable_stats;
     uint32_t connect_timeout_ms;
+    unsigned int max_connections;
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
@@ -431,6 +432,14 @@ static void tcp_on_new_connection(uv_stream_t *server, int status)
     }
     ctx->target.data = ctx;
     
+    if (fwd->max_connections > 0 && __atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED) >= fwd->max_connections)
+    {
+        uv_accept(server, (uv_stream_t *)&ctx->client);
+        ctx->expected_close_count = 2;
+        uv_close((uv_handle_t *)&ctx->client, tcp_conn_close_cb);
+        uv_close((uv_handle_t *)&ctx->target, tcp_conn_close_cb);
+        return;
+    }
     if (uv_accept(server, (uv_stream_t *)&ctx->client) == 0)
     {
         __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
@@ -626,6 +635,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     addr_family_t family,
     int enable_stats,
     uint32_t connect_timeout_ms,
+    uint32_t max_connections,
     int *out_error)
 {
     if (!runtime)
@@ -686,6 +696,7 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     fwd->expected_closed_handles = 2;
     fwd->enable_stats = enable_stats;
     fwd->connect_timeout_ms = connect_timeout_ms;
+    fwd->max_connections = max_connections;
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
 
