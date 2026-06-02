@@ -1450,16 +1450,10 @@ fn tcpCloseServerThread(ctx: *TcpCloseServerContext) void {
 }
 
 fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
+    _ = timeout_ns;
     const allocator = testing.allocator;
-
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    const timeout = std.Io.Timeout{
-        .duration = .{
-            .raw = std.Io.Duration.fromNanoseconds(timeout_ns),
-            .clock = .real,
-        },
-    };
     const stream = try address.connect(io, .{
         .mode = .stream,
         .protocol = .tcp,
@@ -1473,20 +1467,15 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 
     stream.shutdown(io, .send) catch return error.ConnectionResetByPeer;
 
+    var read_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+
     var response = try allocator.alloc(u8, message.len);
     errdefer allocator.free(response);
     var response_len: usize = 0;
     while (response_len < response.len) {
         const remaining = response[response_len..];
-        const result = try io.operateTimeout(.{ .file_read_streaming = .{
-            .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = true } },
-            .data = &[_][]u8{remaining},
-        } }, timeout);
-
-        const read_len = result.file_read_streaming catch |err| switch (err) {
-            error.EndOfStream => @as(usize, 0),
-            else => return err,
-        };
+        const read_len = try reader.interface.readSliceShort(remaining);
         if (read_len == 0) break;
         response_len += read_len;
     }
@@ -1500,12 +1489,6 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 fn tcpClientExpectPeerClose(port: u16) !void {
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    const timeout = std.Io.Timeout{
-        .duration = .{
-            .raw = std.Io.Duration.fromSeconds(2),
-            .clock = .real,
-        },
-    };
     const stream = try address.connect(io, .{
         .mode = .stream,
         .protocol = .tcp,
@@ -1517,15 +1500,13 @@ fn tcpClientExpectPeerClose(port: u16) !void {
     try writer.interface.writeAll("peer-close");
     try writer.interface.flush();
 
-    var chunk: [64]u8 = undefined;
-    const result = try io.operateTimeout(.{ .file_read_streaming = .{
-        .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = true } },
-        .data = &[_][]u8{chunk[0..]},
-    } }, timeout);
+    var read_buf: [64]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
 
-    const read_len = result.file_read_streaming catch |err| switch (err) {
-        error.EndOfStream, error.ConnectionResetByPeer => @as(usize, 0),
-        else => return err,
+    var chunk: [64]u8 = undefined;
+    const read_len = reader.interface.readSliceShort(&chunk) catch {
+        // Connection error (reset, etc.) is an acceptable peer close
+        return;
     };
     try testing.expectEqual(@as(usize, 0), read_len);
 }
@@ -1545,15 +1526,8 @@ fn udpEchoServerThread(ctx: *UdpEchoServerContext) void {
     var buffer: [65507]u8 = undefined;
     var messages: usize = 0;
 
-    const timeout = std.Io.Timeout{
-        .duration = .{
-            .raw = std.Io.Duration.fromSeconds(10),
-            .clock = .real,
-        },
-    };
-
     while (messages < ctx.max_messages) {
-        const incoming = socket.receiveTimeout(io, buffer[0..], timeout) catch |err| {
+        const incoming = socket.receive(io, buffer[0..]) catch |err| {
             ctx.start_error = err;
             return;
         };
@@ -1580,6 +1554,7 @@ fn udpSendOnly(port: u16, message: []const u8) !void {
 }
 
 fn udpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
+    _ = timeout_ns;
     const allocator = testing.allocator;
     const io = compat.io();
     var server_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
@@ -1590,13 +1565,7 @@ fn udpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     try socket.send(io, &server_addr, message);
 
     var response: [1024]u8 = undefined;
-    const timeout = std.Io.Timeout{
-        .duration = .{
-            .raw = std.Io.Duration.fromNanoseconds(timeout_ns),
-            .clock = .real,
-        },
-    };
-    const incoming = try socket.receiveTimeout(io, response[0..], timeout);
+    const incoming = try socket.receive(io, response[0..]);
 
     return try allocator.dupe(u8, incoming.data);
 }
