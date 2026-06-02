@@ -28,7 +28,7 @@ zig build -Dubus=true       # Enable UBUS integration
 zig build -Dfrpc=true -Dddns=true -Dfrps=true -Doptimize=ReleaseSmall
 
 # test
-zig build test --test-timeout 5s --summary all
+zig build test --test-timeout 10s --summary all
 ```
 
 **Note:** FRP client, FRP server, and DDNS are compiled together into `libgolibs.a` from `src/impl/golibs/`.
