@@ -5,12 +5,23 @@ const time = std.time;
 const Thread = std.Thread;
 const compat = @import("compat.zig");
 
+pub const LogFormat = enum {
+    plain,
+    json,
+
+    pub fn fromString(s: []const u8) ?LogFormat {
+        if (std.mem.eql(u8, s, "plain")) return .plain;
+        if (std.mem.eql(u8, s, "json")) return .json;
+        return null;
+    }
+};
 pub const LogConfig = struct {
     enabled: bool = true,
     file_path: []const u8 = "/tmp/portweaver.log",
     max_size: usize = 1024 * 1024,
     max_files: usize = 3,
     flush_interval_ms: u64 = 100,
+    format: LogFormat = .plain,
 
     pub fn deinit(self: *LogConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.file_path);
@@ -22,7 +33,8 @@ pub const LogConfig = struct {
             std.mem.eql(u8, a.file_path, b.file_path) and
             a.max_size == b.max_size and
             a.max_files == b.max_files and
-            a.flush_interval_ms == b.flush_interval_ms;
+            a.flush_interval_ms == b.flush_interval_ms and
+            a.format == b.format;
     }
 };
 
@@ -33,6 +45,7 @@ pub fn defaultLogConfig(allocator: std.mem.Allocator) !LogConfig {
         .max_size = 1024 * 1024,
         .max_files = 3,
         .flush_interval_ms = 100,
+        .format = .plain,
     };
 }
 
@@ -169,6 +182,38 @@ pub const FileLogger = struct {
         self.current_size = 0;
     }
 
+    fn escapeJson(out: []u8, in: []const u8) []const u8 {
+        var pos: usize = 0;
+        for (in) |c| {
+            switch (c) {
+                '\\' => {
+                    if (pos + 2 > out.len) return out[0..pos];
+                    out[pos] = '\\';
+                    out[pos + 1] = '\\';
+                    pos += 2;
+                },
+                '"' => {
+                    if (pos + 2 > out.len) return out[0..pos];
+                    out[pos] = '\\';
+                    out[pos + 1] = '"';
+                    pos += 2;
+                },
+                '\n' => {
+                    if (pos + 2 > out.len) return out[0..pos];
+                    out[pos] = '\\';
+                    out[pos + 1] = 'n';
+                    pos += 2;
+                },
+                else => {
+                    if (pos >= out.len) return out[0..pos];
+                    out[pos] = c;
+                    pos += 1;
+                },
+            }
+        }
+        return out[0..pos];
+    }
+
     pub fn log(self: *Self, level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
         if (!self.config.enabled) return;
 
@@ -195,22 +240,53 @@ pub const FileLogger = struct {
         const mins = day_seconds.getMinutesIntoHour();
         const secs = day_seconds.getSecondsIntoMinute();
 
-        const level_str = switch (level) {
-            .debug => "DEBUG",
-            .info => "INFO",
-            .warn => "WARN",
-            .err => "ERROR",
-        };
-
         const scope_str = switch (scope) {
             .default => "",
             else => @tagName(scope),
         };
 
-        const message = if (scope_str.len > 0)
-            std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} [{s}] [{s}] " ++ format ++ "\n", .{ year, month, day, hours, mins, secs, level_str, scope_str } ++ args) catch return
-        else
-            std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} [{s}] " ++ format ++ "\n", .{ year, month, day, hours, mins, secs, level_str } ++ args) catch return;
+        var json_buf: [4096]u8 = undefined;
+
+        const message = switch (self.config.format) {
+            .plain => blk: {
+                const level_str = switch (level) {
+                    .debug => "DEBUG",
+                    .info => "INFO",
+                    .warn => "WARN",
+                    .err => "ERROR",
+                };
+                break :blk if (scope_str.len > 0)
+                    std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} [{s}] [{s}] " ++ format ++ "\n", .{ year, month, day, hours, mins, secs, level_str, scope_str } ++ args) catch return
+                else
+                    std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} [{s}] " ++ format ++ "\n", .{ year, month, day, hours, mins, secs, level_str } ++ args) catch return;
+            },
+            .json => blk: {
+                const level_str = switch (level) {
+                    .debug => "debug",
+                    .info => "info",
+                    .warn => "warn",
+                    .err => "error",
+                };
+                const raw_msg = std.fmt.allocPrint(allocator, format, args) catch return;
+                var pos: usize = 0;
+                const prefix = std.fmt.bufPrint(json_buf[pos..], "{{\"ts\":\"{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}\",\"level\":\"{s}\"", .{ year, month, day, hours, mins, secs, level_str }) catch return;
+                pos += prefix.len;
+                if (scope_str.len > 0) {
+                    const scope_part = std.fmt.bufPrint(json_buf[pos..], ",\"scope\":\"{s}\"", .{scope_str}) catch return;
+                    pos += scope_part.len;
+                }
+                const msg_prefix = std.fmt.bufPrint(json_buf[pos..], ",\"msg\":\"", .{}) catch return;
+                pos += msg_prefix.len;
+                const escaped = Self.escapeJson(json_buf[pos..], raw_msg);
+                pos += escaped.len;
+                if (pos + 3 > json_buf.len) return;
+                json_buf[pos] = '"';
+                json_buf[pos + 1] = '}';
+                json_buf[pos + 2] = '\n';
+                pos += 3;
+                break :blk json_buf[0..pos];
+            },
+        };
 
         if (self.current_size + message.len > self.config.max_size) {
             self.rotate();
@@ -353,4 +429,80 @@ test "FileLogger rotation" {
         else => return err,
     };
     try std.testing.expect(file1_exists);
+}
+
+test "FileLogger JSON format" {
+    const allocator = std.testing.allocator;
+
+    const test_path = "/tmp/test_portweaver_json.log";
+    std.Io.Dir.cwd().deleteFile(compat.io(), test_path) catch {};
+
+    const config = LogConfig{
+        .enabled = true,
+        .file_path = test_path,
+        .max_size = 4096,
+        .max_files = 2,
+        .format = .json,
+    };
+
+    var logger = try FileLogger.init(allocator, config);
+    defer logger.deinit();
+
+    logger.log(.info, .FRPC, "Connected to server {s}", .{"192.168.1.1"});
+    logger.log(.err, .default, "Connection failed: \"{s}\"", .{"timeout"});
+    logger.log(.debug, .FRPC, "Line with\nnewline and \\ backslash", .{});
+
+    logger.flush();
+
+    // Read the file and verify each line is valid JSON
+    const file = try std.Io.Dir.cwd().openFile(compat.io(), test_path, .{});
+    defer file.close(compat.io());
+
+    var read_buf: [4096]u8 = undefined;
+    const bytes_read = try file.readPositionalAll(compat.io(), &read_buf, 0);
+    const content = read_buf[0..bytes_read];
+
+    // Split by newlines and validate each line
+    var line_count: usize = 0;
+    var iter = mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        line_count += 1;
+
+        // Must start with { and end with }
+        try std.testing.expect(line[0] == '{');
+        try std.testing.expect(line[line.len - 1] == '}');
+
+        // Must contain required fields
+        try std.testing.expect(mem.indexOf(u8, line, "\"ts\":") != null);
+        try std.testing.expect(mem.indexOf(u8, line, "\"level\":") != null);
+        try std.testing.expect(mem.indexOf(u8, line, "\"msg\":") != null);
+
+        // Timestamp must use ISO format with T separator
+        try std.testing.expect(mem.indexOf(u8, line, "\"ts\":\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), line_count);
+
+    // Check specific line content from the same read buffer
+    var lines = mem.splitScalar(u8, content, '\n');
+
+    // First line: .info level with FRPC scope
+    const line1 = lines.next().?;
+    try std.testing.expect(mem.indexOf(u8, line1, "\"level\":\"info\"") != null);
+    try std.testing.expect(mem.indexOf(u8, line1, "\"scope\":\"FRPC\"") != null);
+    try std.testing.expect(mem.indexOf(u8, line1, "192.168.1.1") != null);
+
+    // Second line: .err level with no scope (default)
+    const line2 = lines.next().?;
+    try std.testing.expect(mem.indexOf(u8, line2, "\"level\":\"error\"") != null);
+    try std.testing.expect(mem.indexOf(u8, line2, "\"scope\"") == null);
+    // Check that quotes in message are escaped
+    try std.testing.expect(mem.indexOf(u8, line2, "\\\"timeout\\\"") != null);
+
+    // Third line: check escaping of newline and backslash
+    const line3 = lines.next().?;
+    try std.testing.expect(mem.indexOf(u8, line3, "\\n") != null);
+    try std.testing.expect(mem.indexOf(u8, line3, "\\\\") != null);
+
+    std.Io.Dir.cwd().deleteFile(compat.io(), test_path) catch {};
 }
