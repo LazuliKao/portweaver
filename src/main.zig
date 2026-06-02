@@ -117,13 +117,9 @@ pub fn main(init: std.process.Init) !void {
         const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
 
-        while (true) {
-            if (process_lock.shouldExitForTakeover()) {
-                std.log.info("PortWeaver takeover requested. Stopping services cleanly...", .{});
-                break;
-            }
-
-            compat.sleepNanos(100 * std.time.ns_per_ms);
+        process_lock.waitForShutdown();
+        if (process_lock.shouldExitForTakeover()) {
+            std.log.info("PortWeaver takeover requested. Stopping services cleanly...", .{});
         }
     }
 }

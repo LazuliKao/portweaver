@@ -103,16 +103,11 @@ pub const LoopRuntime = struct {
         self.tail = node;
         self.condition.broadcast(compat.io());
         self.lock.unlock(compat.io());
-
         _ = c.forwarder_runtime_wake(runtime_ctx);
 
         self.lock.lockUncancelable(compat.io());
-        self.active_wakes -= 1;
-        self.condition.broadcast(compat.io());
-        self.lock.unlock(compat.io());
-
-        self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
+        self.active_wakes -= 1;
         while (self.active_jobs > 0 and self.last_job_error == null) {
             self.condition.waitUncancelable(compat.io(), &self.lock);
         }
@@ -158,7 +153,9 @@ pub const LoopRuntime = struct {
         self.active_wakes += 1;
         self.condition.broadcast(compat.io());
         self.lock.unlock(compat.io());
+
         _ = c.forwarder_runtime_wake(runtime_ctx);
+
         self.lock.lockUncancelable(compat.io());
         self.active_wakes -= 1;
         self.condition.broadcast(compat.io());

@@ -43,13 +43,17 @@ const InstanceHolder = struct {
     thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     lock: std.Io.Mutex = .init,
+    stop_cond: std.Io.Condition = .init,
     last_status: []const u8 = "starting",
     last_update: i64 = 0,
     last_ip: []const u8 = "",
     last_message: []const u8 = "",
 
     pub fn deinit(self: *InstanceHolder, allocator: std.mem.Allocator) void {
-        self.should_stop.store(true, .seq_cst);
+        self.should_stop.store(true, .release);
+        self.lock.lockUncancelable(compat.io());
+        self.stop_cond.broadcast(compat.io());
+        self.lock.unlock(compat.io());
         if (self.thread) |t| {
             t.join();
         }
@@ -85,9 +89,11 @@ fn ddnsUpdateThread(holder: *InstanceHolder) void {
     };
 
     // Wait until stop signal
-    while (!holder.should_stop.load(.seq_cst)) {
-        compat.sleepNanos(1 * std.time.ns_per_s); // Check every second
+    holder.lock.lockUncancelable(compat.io());
+    while (!holder.should_stop.load(.acquire)) {
+        holder.stop_cond.waitUncancelable(compat.io(), &holder.lock);
     }
+    holder.lock.unlock(compat.io());
 
     // Stop auto-update when thread is stopping
     holder.instance.stopAutoUpdate() catch |err| {

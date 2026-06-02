@@ -187,7 +187,7 @@ pub const ProjectHandle = struct {
         }
         return error.NotFound;
     }
-    pub inline fn deregisterTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
+    pub fn deregisterTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
@@ -197,7 +197,7 @@ pub const ProjectHandle = struct {
             self.active_ports -= 1;
         }
     }
-    pub inline fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
+    pub fn registerTcpHandle(self: *ProjectHandle, fwd: *TcpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;
@@ -205,7 +205,7 @@ pub const ProjectHandle = struct {
         self.active_ports += 1;
         try self.tcp_forwarders.append(fwd);
     }
-    pub inline fn deregisterUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
+    pub fn deregisterUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         defer self.updateRuntimeStatus();
@@ -215,7 +215,7 @@ pub const ProjectHandle = struct {
             self.active_ports -= 1;
         }
     }
-    pub inline fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
+    pub fn registerUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;

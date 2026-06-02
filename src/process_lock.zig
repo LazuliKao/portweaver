@@ -108,6 +108,49 @@ pub fn shouldExitForTakeover() bool {
     };
 }
 
+/// Blocks until the process should shut down.
+/// On Windows, waits on the takeover event (kernel-level, no polling).
+/// On non-Windows, waits on a condition variable (signal-ready).
+pub fn waitForShutdown() void {
+    if (builtin.os.tag == .windows) {
+        const takeover_event = windows_takeover_event orelse {
+            // No takeover event — sleep until killed externally
+            while (true) {
+                compat.sleepNanos(std.time.ns_per_s);
+            }
+        };
+        const wait_result = WaitForSingleObject(takeover_event, windows_infinite);
+        switch (wait_result) {
+            windows_wait_object_0, windows_wait_abandoned => {},
+            windows_wait_failed => {
+                std.log.warn("waitForShutdown: WaitForSingleObject failed: {any}", .{windows.GetLastError()});
+            },
+            else => {
+                std.log.warn("waitForShutdown: unexpected result: {d}", .{wait_result});
+            },
+        }
+    } else {
+        // Non-Windows: block until killed externally (SIGINT/SIGTERM)
+        shutdown_mutex.lockUncancelable(compat.io());
+        defer shutdown_mutex.unlock(compat.io());
+        while (!shutdown_requested) {
+            shutdown_cond.waitUncancelable(compat.io(), &shutdown_mutex);
+        }
+    }
+}
+
+/// Signals the process to shut down. Safe to call from any thread.
+pub fn requestShutdown() void {
+    shutdown_requested = true;
+    shutdown_mutex.lockUncancelable(compat.io());
+    shutdown_cond.broadcast(compat.io());
+    shutdown_mutex.unlock(compat.io());
+}
+
+var shutdown_mutex: std.Io.Mutex = .init;
+var shutdown_cond: std.Io.Condition = .init;
+var shutdown_requested: bool = false;
+
 /// Releases the active platform lock and removes the PID file on clean exit.
 pub fn cleanup() void {
     if (builtin.os.tag == .windows) {

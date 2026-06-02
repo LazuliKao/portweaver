@@ -56,10 +56,10 @@ pub const FileLogger = struct {
     file_path: []const u8,
     current_size: usize,
     lock: std.Io.Mutex,
+    flush_cond: std.Io.Condition,
     stop_thread: bool,
     thread: ?Thread,
     write_count: usize,
-
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, config: LogConfig) !*Self {
@@ -76,6 +76,7 @@ pub const FileLogger = struct {
             .file_path = file_path,
             .current_size = 0,
             .lock = .init,
+            .flush_cond = .init,
             .stop_thread = false,
             .thread = null,
             .write_count = 0,
@@ -100,6 +101,7 @@ pub const FileLogger = struct {
     pub fn deinit(self: *Self) void {
         self.lock.lockUncancelable(compat.io());
         self.stop_thread = true;
+        self.flush_cond.broadcast(compat.io());
         self.lock.unlock(compat.io());
 
         if (self.thread) |t| {
@@ -125,11 +127,9 @@ pub const FileLogger = struct {
             },
         ) catch |err| blk: {
             if (err == error.FileNotFound) {
-                var dir_path: [std.fs.max_path_bytes]u8 = undefined;
                 const path_len = mem.lastIndexOf(u8, self.file_path, "/") orelse 0;
                 if (path_len > 0) {
                     const dir = self.file_path[0..path_len];
-                    @memcpy(dir_path[0..dir.len], dir);
                     try std.Io.Dir.cwd().createDirPath(compat.io(), dir);
                 }
                 _ = try std.Io.Dir.cwd().createFile(compat.io(), self.file_path, .{});
@@ -300,27 +300,24 @@ pub const FileLogger = struct {
 
         self.current_size += message.len;
         self.write_count += 1;
+        self.flush_cond.signal(compat.io());
     }
 
     fn flushThread(self: *Self) void {
         while (true) {
             self.lock.lockUncancelable(compat.io());
-            const should_stop = self.stop_thread;
-            const should_flush = self.file != null and self.write_count > 0;
-            self.lock.unlock(compat.io());
-
-            if (should_stop) break;
-
-            if (should_flush) {
-                self.lock.lockUncancelable(compat.io());
-                if (self.file) |f| {
-                    f.sync(compat.io()) catch {};
-                    self.write_count = 0;
-                }
-                self.lock.unlock(compat.io());
+            while (!self.stop_thread and (self.file == null or self.write_count == 0)) {
+                self.flush_cond.waitUncancelable(compat.io(), &self.lock);
             }
-
-            compat.sleepNanos(self.config.flush_interval_ms * time.ns_per_ms);
+            if (self.stop_thread) {
+                self.lock.unlock(compat.io());
+                return;
+            }
+            if (self.file) |f| {
+                f.sync(compat.io()) catch {};
+                self.write_count = 0;
+            }
+            self.lock.unlock(compat.io());
         }
     }
 
