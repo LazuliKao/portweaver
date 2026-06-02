@@ -294,6 +294,14 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                 log_config.flush_interval_ms = @intCast(interval);
             }
         }
+        if (obj.get("format")) |v| {
+            if (parseJsonString(v, ec.fieldPath("format", .{}), ec)) |s| {
+                log_config.format = file_log.LogFormat.fromString(s) orelse blk: {
+                    ec.addFmt(ec.fieldPath("format", .{}), .enum_value_invalid, "plain/json", "{s}", .{s}, "invalid log format");
+                    break :blk .plain;
+                };
+            }
+        }
         if (obj.get("app_forward_loop_mode")) |v| {
             if (parseJsonString(v, ec.fieldPath("app_forward_loop_mode", .{}), ec)) |s| {
                 app_forward_loop_mode = types.parseLoopMode(s) catch blk: {

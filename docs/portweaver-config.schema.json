@@ -22,6 +22,15 @@
           "description": "Flush interval in milliseconds",
           "type": "number"
         },
+        "format": {
+          "default": "plain",
+          "description": "Log output format (plain text or JSON Lines)",
+          "enum": [
+            "plain",
+            "json"
+          ],
+          "type": "string"
+        },
         "frpc_nodes": {
           "additionalProperties": {
             "$ref": "#/definitions/FrpcNode"

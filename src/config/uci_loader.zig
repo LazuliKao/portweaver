@@ -207,6 +207,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 log_config.max_size = size_kb * 1024;
             } else if (std.mem.eql(u8, opt_name, "max_log_files")) {
                 log_config.max_files = std.fmt.parseUnsigned(usize, std.mem.trim(u8, opt_val, " \t\r\n"), 10) catch 3;
+            } else if (std.mem.eql(u8, opt_name, "format")) {
+                log_config.format = file_log.LogFormat.fromString(opt_val) orelse .plain;
             } else if (std.mem.eql(u8, opt_name, "app_forward_loop_mode")) {
                 app_forward_loop_mode = try types.parseLoopMode(opt_val);
             } else if (std.mem.eql(u8, opt_name, "use_nftables")) {
