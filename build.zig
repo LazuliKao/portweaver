@@ -206,6 +206,22 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     return uv;
 }
 
+/// Returns the CC value for a wrapper script. On Windows hosts, Go cannot find .sh files
+/// in PATH, so we use "bash <abs-path>" with forward-slash conversion. On Linux, the wrapper
+/// basename is sufficient (Go finds it via PATH and it's executable).
+fn wrapperBashCmd(b: *std.Build, wrapper: std.Build.LazyPath) []const u8 {
+    if (@import("builtin").os.tag == .windows) {
+        const raw = wrapper.getPath(b);
+        const buf = b.allocator.alloc(u8, raw.len + 5) catch @panic("OOM");
+        @memcpy(buf[0..5], "bash ");
+        for (raw, 0..) |c, i| {
+            buf[i + 5] = if (c == '\\') '/' else c;
+        }
+        return buf;
+    } else {
+        return std.fs.path.basename(wrapper.getPath(b));
+    }
+}
 fn createWrapperScript(
     b: *std.Build,
     wrapper_dir: std.Build.LazyPath,
@@ -213,23 +229,48 @@ fn createWrapperScript(
     zig_exe: []const u8,
     target_triple: ?[]const u8,
     is_cxx: bool,
+    is_msvc: bool,
 ) !std.Build.LazyPath {
     const zig_dropin = b.fmt("zig-{s}", .{script_name});
     const wrapper_path = try wrapper_dir.join(b.allocator, zig_dropin);
-
-    const script_content = if (target_triple) |triple|
-        // For CC/CXX: include target triple
-        b.fmt(
-            "#!/bin/sh\n\"{s}\" {s} -target {s} \"$@\"\n",
-            .{ zig_exe, if (is_cxx) "c++" else "cc", triple },
-        )
-    else
-        // For AR: no target triple needed
-        b.fmt(
-            "#!/bin/sh\n\"{s}\" ar \"$@\"\n",
-            .{zig_exe},
-        );
-
+    const cc_or_cxx = if (is_cxx) "c++" else "cc";
+    const is_win = @import("builtin").os.tag == .windows;
+    // Convert Windows backslash paths to forward slashes at build time.
+    // "C:\Program Files\zig\zig.exe" → "C:/Program Files/zig/zig.exe"
+    // Forward slashes work in bash and in Windows' CreateProcess.
+    const zig_fwd = if (is_win) blk: {
+        const buf = b.allocator.alloc(u8, zig_exe.len) catch @panic("OOM");
+        for (zig_exe, 0..) |c, i| {
+            buf[i] = if (c == '\\') '/' else c;
+        }
+        break :blk @as([]const u8, buf);
+    } else zig_exe;
+    const script_content = if (target_triple) |triple| blk: {
+        if (is_msvc) {
+            // Filter GCC-only flags from GOGCCFLAGS that Zig rejects for MSVC targets.
+            break :blk b.fmt(
+                "#!/bin/sh\n" ++
+                    "zig='{s}'\n" ++
+                    "\"$zig\" {s} -target {s} $(skip=0; for a in \"$@\"; do\n" ++
+                    "  if [ \"$skip\" = 1 ]; then skip=0; continue; fi\n" ++
+                    "  case \"$a\" in -mthreads|-m64|-gno-record-gcc-switches) continue;;\n" ++
+                    "  -Wl) skip=1; continue;;\n" ++
+                    "  -fmessage-length*|-ffile-prefix-map=*|-fmacro-prefix-map=*|-fdebug-prefix-map=*) continue;;\n" ++
+                    "  esac\n" ++
+                    "  printf '%s\\n' \"$a\"\n" ++
+                    "done)\n",
+                .{ zig_fwd, cc_or_cxx, triple },
+            );
+        } else {
+            break :blk b.fmt(
+                "#!/bin/sh\n'{s}' {s} -target {s} \"$@\"\n",
+                .{ zig_fwd, cc_or_cxx, triple },
+            );
+        }
+    } else b.fmt(
+        "#!/bin/sh\n'{s}' ar \"$@\"\n",
+        .{zig_fwd},
+    );
     const io = b.graph.io;
     const file = if (@import("builtin").os.tag == .windows)
         try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
@@ -242,10 +283,8 @@ fn createWrapperScript(
         });
     defer file.close(io);
     try file.writeStreamingAll(io, script_content);
-
     return wrapper_path;
 }
-
 fn detectCustomGoBin(b: *std.Build, host_os: std.Target.Os.Tag, go_root_path: []const u8) ?[]const u8 {
     const default_go_bin = if (host_os == .windows)
         b.pathJoin(&.{ go_root_path, "bin", "go.exe" })
@@ -736,35 +775,52 @@ fn addGoLibrary(
             go_cmd.setEnvironmentVariable("GOMODCACHE", gomodcache);
         } else {}
     }
-
     const zig_exe = b.graph.zig_exe;
     // 构建目标三元组
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
-
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
-    // Always set CC/CXX/AR for cross-compilation - Go needs the correct C compiler
+    const is_msvc = target.result.os.tag == .windows and target.result.abi == .msvc;
     const wrapper_dir = b.path("wrapper");
     go_cmd.addPathDir(wrapper_dir.getPath(b));
-    if (b.graph.host.result.os.tag == .windows) {
+    const is_win_host = b.graph.host.result.os.tag == .windows;
+    if (is_msvc) {
+        // MSVC targets: Go CGO adds -mthreads and GOGCCFLAGS which Zig rejects.
+        // Use bash wrapper scripts that filter out GCC-only flags.
+        const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false, true) catch @panic("Failed to create CC wrapper");
+        const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true, true) catch @panic("Failed to create CXX wrapper");
+        const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
+        go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
+        go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
+        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
+        // MSVC doesn't support GCC-style -static / -Wl flags
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", applyCOptimizationCmd(b, optimize));
+        go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", applyCOptimizationCmd(b, optimize));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "");
+    } else if (is_win_host) {
+        // Windows host compiling for non-MSVC target (e.g. linux-musl):
+        // No GCC flag filtering is needed, and we can invoke zig directly without wrapper scripts.
         const cc_cmd = b.fmt("\"{s}\" cc -target {s}", .{ zig_exe, target_triple });
         const cxx_cmd = b.fmt("\"{s}\" c++ -target {s}", .{ zig_exe, target_triple });
         const ar_cmd = b.fmt("\"{s}\" ar", .{zig_exe});
         go_cmd.setEnvironmentVariable("CC", cc_cmd);
         go_cmd.setEnvironmentVariable("CXX", cxx_cmd);
         go_cmd.setEnvironmentVariable("AR", ar_cmd);
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     } else {
-        // 为 CC、CXX 和 AR 创建临时 wrapper 脚本（Linux 交叉编译必须指向实际可执行文件）
-        const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false) catch @panic("Failed to create CC wrapper");
-        const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true) catch @panic("Failed to create CXX wrapper");
-        const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false) catch @panic("Failed to create AR wrapper");
-        go_cmd.setEnvironmentVariable("CC", std.fs.path.basename(cc_wrapper.getPath(b)));
-        go_cmd.setEnvironmentVariable("CXX", std.fs.path.basename(cxx_wrapper.getPath(b)));
+        // Non-MSVC targets on non-Windows host (e.g. compiling on Linux):
+        // Use wrapper scripts.
+        const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false, false) catch @panic("Failed to create CC wrapper");
+        const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true, false) catch @panic("Failed to create CXX wrapper");
+        const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
+        go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
+        go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
         go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     }
-
-    go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
-    go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
-    go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
     return &go_cmd.step;
 }
 
