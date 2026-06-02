@@ -17,16 +17,16 @@ PortWeaver 是一个为 OpenWrt 设计的高性能端口转发统一管理引擎
 - **端口范围映射** — 例如 8080-8090 映射到 9080-9090，自动扩展
 - **FRP 客户端 (frpc)** — 可选，静态链接 Go 库，`-Dfrpc=true`
 - **FRP 服务端 (frps)** — 可选，静态链接 Go 库，`-Dfrps=true`
-- **DDNS** — 可选，支持 25 个 DNS 提供商，`-Dddns=true`
+- **DDNS** — 可选，支持 24 个 DNS 提供商，`-Dddns=true`
 - **UCI 配置** — 可选，`-Duci=true`，从 `/etc/config/portweaver` 读取
 - **UCI 防火墙** — 自动管理 ACCEPT + DNAT/重定向规则
-- **流量统计** — `enable_stats` 为 true 时的每项目字节计数器
+- **流量统计** — 每项目字节计数器，支持 `enable_app_stats`（应用层）和 `enable_firewall_stats`（nftables 内核计数器）
 - **源 IP 保留** — `preserve_source_ip` 选项用于透明代理
 - **IPv4/IPv6/双栈** — 支持 IPv6 监听转发到 IPv4 目标（应用层转发）
 
 ### DDNS 支持的提供商
 
-alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, cloudflare, huaweicloud, callback, baiducloud, porkbun, godaddy, namecheap, namesilo, vercel, dynadot, dynv6, spaceship, nowcn, eranet, gcore, edgeone, ns1, name_com
+alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, cloudflare, huaweicloud, callback, baiducloud, porkbun, godaddy, namecheap, namesilo, vercel, dynadot, dynv6, spaceship, nowcn, eranet, gcore, edgeone, nsone, name_com
 
 ## 快速开始
 
@@ -190,7 +190,8 @@ portweaver [选项]
 | `src_zone` | 源区域（默认：wan） |
 | `dest_zone` | 目标区域（默认：lan） |
 | `preserve_source_ip` | 源 IP 保留（用于透明代理） |
-| `enable_stats` | 启用流量统计 |
+| `enable_app_stats` | 启用应用层流量统计（仅当 `enable_app_forward=true` 时有效） |
+| `enable_firewall_stats` | 启用防火墙流量统计（nftables 内核计数器，仅 nftables 后端） |
 | `port_mappings` | 端口范围映射数组（详见下方） |
 
 ### 端口范围映射

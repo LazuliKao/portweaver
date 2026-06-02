@@ -11,10 +11,10 @@ High-performance port forwarding engine for OpenWrt, written in Zig. Combines ke
 - **Port Range Mapping** — Map port ranges (e.g. `8080-8090` to `9080-9090`) with automatic expansion
 - **FRP Client (frpc)** — Statically linked Go library, reverse proxy tunneling (`-Dfrpc=true`)
 - **FRP Server (frps)** — Statically linked Go library, act as an FRP server (`-Dfrps=true`)
-- **DDNS** — 25 DNS providers (`-Dddns=true`)
+- **DDNS** — 24 DNS providers (`-Dddns=true`)
 - **UCI Config** — Native OpenWrt UCI configuration from `/etc/config/portweaver` (`-Duci=true`)
 - **UCI Firewall** — Auto-manage ACCEPT and DNAT/redirect rules via UCI
-- **Traffic Statistics** — Per-project byte counters when `enable_stats=true`
+- **Traffic Statistics** — Per-project byte counters via `enable_app_stats` (app-layer) and `enable_firewall_stats` (nftables kernel counters)
 - **Source IP Preservation** — `preserve_source_ip` option for transparent proxying
 - **IPv4/IPv6/Both** — Support IPv6 listen forwarding to IPv4 target (app-layer forwarding)
 
@@ -91,7 +91,7 @@ zig build -Doptimize=ReleaseSmall     # Optimized for embedded (LTO, stripped)
 | `-Dubus=true` | Enable UBUS RPC server |
 | `-Dfrpc=true` | Enable FRP client (statically linked Go library) |
 | `-Dfrps=true` | Enable FRP server (statically linked Go library) |
-| `-Dddns=true` | Enable DDNS support (25 providers, statically linked Go library) |
+| `-Dddns=true` | Enable DDNS support (24 providers, statically linked Go library) |
 
 All Go-based features (FRPC, FRPS, DDNS) are compiled together into a single `libgolibs.a` and statically linked into the final binary.
 
@@ -193,10 +193,11 @@ In UCI builds (`-Duci=true`), the configuration is always loaded from `/etc/conf
 | `open_firewall_port` | bool | `true` | Open firewall for listen port |
 | `add_firewall_forward` | bool | `true` | Add DNAT/redirect firewall rule |
 | `preserve_source_ip` | bool | `false` | Use redirect rules to preserve source IP |
-| `enable_stats` | bool | `false` | Enable per-project traffic byte counters |
+| `enable_app_stats` | bool | `false` | Enable app-layer traffic byte counters (only when `enable_app_forward=true`) |
+| `enable_firewall_stats` | bool | `false` | Enable firewall traffic counters via nftables kernel counters (only with nftables backend) |
+| `src_zone` | string/array | `"wan"` | Firewall source zone(s) for DNAT/redirect |
+| `dest_zone` | string/array | `"lan"` | Firewall destination zone(s) for DNAT/redirect |
 | `reuseaddr` | bool | `true` | Enable SO_REUSEADDR on listen socket |
-| `src_zones` | array | `["wan"]` | Firewall source zones for DNAT/redirect |
-| `dest_zones` | array | `["lan"]` | Firewall destination zones for DNAT/redirect |
 
 ### Port Mappings
 
@@ -227,7 +228,7 @@ The JSON configuration schema is documented at [docs/portweaver-config.schema.js
 
 ### DDNS Providers
 
-25 DNS providers are supported: `alidns`, `aliesa`, `tencentcloud`, `trafficroute`, `dnspod`, `dnsla`, `cloudflare`, `huaweicloud`, `callback`, `baiducloud`, `porkbun`, `godaddy`, `namecheap`, `namesilo`, `vercel`, `dynadot`, `dynv6`, `spaceship`, `nowcn`, `eranet`, `gcore`, `edgeone`, `nsone`, `name_com`.
+24 DNS providers are supported: `alidns`, `aliesa`, `tencentcloud`, `trafficroute`, `dnspod`, `dnsla`, `cloudflare`, `huaweicloud`, `callback`, `baiducloud`, `porkbun`, `godaddy`, `namecheap`, `namesilo`, `vercel`, `dynadot`, `dynv6`, `spaceship`, `nowcn`, `eranet`, `gcore`, `edgeone`, `nsone`, `name_com`.
 
 ## UBUS RPC API
 
@@ -295,10 +296,14 @@ src/
     app_forward.zig            # Application-layer forwarding orchestration
     app_forward/
       common.zig               # Shared forwarding utilities
-      uv.zig                   # libuv integration
+      loop_manager.zig         # Runtime event-loop manager (shared/per-project)
+      forwarder_runtime.zig    # C runtime boundary adapter
       tcp_forwarder_uv.zig     # TCP forwarder (libuv-based)
       udp_forwarder_uv.zig     # UDP forwarder (libuv-based)
+      forwarder/               # C forwarder implementation (backend-neutral ABI)
+    nft_firewall.zig           # nftables firewall rule management
     uci_firewall.zig           # UCI firewall rule management
+    frp_common.zig             # Shared FRP utilities
     frpc_forward.zig           # FRP client forwarding logic
     frps_forward.zig           # FRP server forwarding logic
     frp_status.zig             # FRP status monitoring
@@ -308,6 +313,9 @@ src/
     frps/libfrps.zig           # FRP server C API bindings
     ddns/libddns.zig           # DDNS C API bindings
     golibs/                    # Go library sources (FRPC + FRPS + DDNS)
+  nftables/
+    mod.zig                    # nftables module exports
+    libnftables.zig            # libnftables C bindings
   uci/
     mod.zig                    # UCI module exports
     types.zig                  # UCI data types
