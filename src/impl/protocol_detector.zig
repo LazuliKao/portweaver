@@ -14,71 +14,157 @@ pub const Protocol = enum {
     smb,
 };
 
+fn parseVarInt(data: []const u8, offset: usize) ?struct { value: i32, bytes: usize } {
+    var value: i32 = 0;
+    var position: usize = 0;
+    var current_offset = offset;
+
+    while (current_offset < data.len) {
+        const current_byte = data[current_offset];
+        value |= @as(i32, current_byte & 0x7F) << @as(u5, @intCast(position));
+
+        if ((current_byte & 0x80) == 0) break;
+
+        position += 7;
+        current_offset += 1;
+
+        if (position >= 32) return null;
+    }
+
+    if (current_offset >= data.len) return null;
+
+    return .{ .value = value, .bytes = current_offset - offset + 1 };
+}
+
+fn checkMinecraftHandshake(data: []const u8) bool {
+    const pkt_len = parseVarInt(data, 0) orelse return false;
+    if (pkt_len.value <= 0) return false;
+
+    var offset = pkt_len.bytes;
+    const pkt_id = parseVarInt(data, offset) orelse return false;
+    if (pkt_id.value != 0) return false;
+
+    offset += pkt_id.bytes;
+    const proto_ver = parseVarInt(data, offset) orelse return false;
+    // check passed
+
+    offset += proto_ver.bytes;
+    const str_len = parseVarInt(data, offset) orelse return false;
+    if (str_len.value < 0 or str_len.value > 255) return false;
+
+    offset += str_len.bytes + @as(usize, @intCast(str_len.value));
+    if (offset + 2 > data.len) return false;
+
+    offset += 2; // port
+    const next_state = parseVarInt(data, offset) orelse return false;
+    if (next_state.value == 1 or next_state.value == 2) {
+        return true;
+    }
+    return false;
+}
+
+fn parseMqttRemainingLength(data: []const u8) ?struct { value: usize, bytes: usize } {
+    var multiplier: usize = 1;
+    var value: usize = 0;
+    var i: usize = 1;
+
+    while (i < data.len and i <= 4) : (i += 1) {
+        const encoded = data[i];
+        value += @as(usize, encoded & 0x7F) * multiplier;
+
+        if ((encoded & 0x80) == 0) {
+            return .{ .value = value, .bytes = i };
+        }
+
+        multiplier *= 128;
+    }
+
+    return null;
+}
+
 pub fn detectProtocol(data: []const u8) ?Protocol {
     if (data.len >= 4 and std.mem.startsWith(u8, data, "SSH-")) {
         return .ssh;
     }
 
-    if (data.len >= 7 and data[0] == 0x03 and data[1] == 0x00 and data[5] == 0xE0) {
-        return .rdp;
+    if (data.len >= 11 and data[0] == 0x03 and data[1] == 0x00) {
+        const tpkt_len = (@as(usize, data[2]) << 8) | data[3];
+        if (tpkt_len >= 11 and data[5] == 0xE0) {
+            return .rdp;
+        }
     }
 
     if (data.len >= 4 and
         (std.mem.startsWith(u8, data, "GET ") or
-            std.mem.startsWith(u8, data, "POST") or
+            std.mem.startsWith(u8, data, "POST ") or
             std.mem.startsWith(u8, data, "PUT ") or
-            std.mem.startsWith(u8, data, "HEAD") or
-            std.mem.startsWith(u8, data, "DELE") or
-            std.mem.startsWith(u8, data, "OPTI") or
-            std.mem.startsWith(u8, data, "PATC")))
+            std.mem.startsWith(u8, data, "HEAD ") or
+            std.mem.startsWith(u8, data, "DELETE ") or
+            std.mem.startsWith(u8, data, "OPTIONS ") or
+            std.mem.startsWith(u8, data, "PATCH ") or
+            std.mem.startsWith(u8, data, "CONNECT ") or
+            std.mem.startsWith(u8, data, "TRACE ")))
     {
         return .http;
     }
 
-    if (data.len >= 2 and data[0] == 0x16 and data[1] == 0x03) {
-        return .tls;
+    if (data.len >= 5 and data[0] == 0x16 and data[1] == 0x03) {
+        const minor = data[2];
+        const rec_len = (@as(usize, data[3]) << 8) | data[4];
+
+        if (minor >= 0x00 and minor <= 0x04 and rec_len > 0) {
+            if (data.len < 6 or data[5] == 0x01) {
+                return .tls;
+            }
+        }
     }
 
-    if (data.len >= 4 and std.mem.startsWith(u8, data, "RFB ")) {
+    if (data.len >= 12 and std.mem.startsWith(u8, data, "RFB ")) {
         return .vnc;
     }
 
-    if (data.len >= 2 and data[0] == 0x05 and data[1] >= 0x01 and data[1] <= 0x08) {
-        return .socks5;
+    if (data.len >= 2 and data[0] == 0x05) {
+        const nmethods = data[1];
+        if (nmethods != 0 and data.len >= 2 + @as(usize, nmethods)) {
+            return .socks5;
+        }
     }
 
-    if (data.len >= 8 and
-        data[0] == 0x00 and
-        data[1] == 0x00 and
-        data[2] == 0x00 and
-        data[3] == 0x08 and
-        data[4] == 0x04 and
-        data[5] == 0xD2 and
-        data[6] == 0x16 and
-        data[7] == 0x2F)
-    {
-        return .postgresql;
+    if (data.len >= 8) {
+        const len = (@as(usize, data[0]) << 24) |
+            (@as(usize, data[1]) << 16) |
+            (@as(usize, data[2]) << 8) |
+            data[3];
+
+        const code = (@as(u32, data[4]) << 24) |
+            (@as(u32, data[5]) << 16) |
+            (@as(u32, data[6]) << 8) |
+            data[7];
+
+        if (len >= 8 and code == 0x00030000) return .postgresql;
+        if (len == 8 and code == 0x04D2162F) return .postgresql;
     }
 
-    if (data.len >= 2 and data[0] == 0xFF and data[1] >= 0xFB and data[1] <= 0xFE) {
+    if (data.len >= 3 and data[0] == 0xFF and data[1] >= 0xFB and data[1] <= 0xFE) {
         return .telnet;
     }
 
-    // Minecraft Java Edition Handshake (VarInt Length < 128, Packet ID 0x00, VarInt Protocol Version != 0)
-    // RDP starts with 0x03 0x00 0x00, so checking data[2] != 0x00 prevents collision.
-    if (data.len >= 3 and data[0] >= 0x02 and data[0] <= 0x7F and data[1] == 0x00 and data[2] != 0x00) {
+    if (checkMinecraftHandshake(data)) {
         return .minecraft;
     }
 
-    // MQTT CONNECT packet (0x10, Length, 0x00, 0x04, "MQTT")
-    if (data.len >= 8 and data[0] == 0x10 and data[2] == 0x00 and data[3] == 0x04 and std.mem.eql(u8, data[4..8], "MQTT")) {
-        return .mqtt;
+    if (data.len >= 2 and data[0] == 0x10) {
+        if (parseMqttRemainingLength(data)) |rl| {
+            const off = 1 + rl.bytes;
+            if (data.len >= off + 6 and
+                data[off] == 0x00 and data[off + 1] == 0x04 and
+                std.mem.eql(u8, data[off + 2 .. off + 6], "MQTT"))
+            {
+                return .mqtt;
+            }
+        }
     }
 
-    // SMB (NetBIOS Session Service header + SMB1/SMB2 Magic)
-    // NetBIOS header: 0x00 (Message Type), 3-byte length
-    // SMB1 Magic: 0xFF 'S' 'M' 'B'
-    // SMB2 Magic: 0xFE 'S' 'M' 'B'
     if (data.len >= 8 and data[0] == 0x00 and (data[4] == 0xFF or data[4] == 0xFE) and data[5] == 0x53 and data[6] == 0x4D and data[7] == 0x42) {
         return .smb;
     }
@@ -124,9 +210,9 @@ test "detectProtocol identifies SSH and rejects short or wrong prefixes" {
 }
 
 test "detectProtocol identifies RDP and rejects invalid handshakes" {
-    const valid = [_]u8{ 0x03, 0x00, 0x00, 0x13, 0x0E, 0xE0, 0x00 };
-    const invalid_type = [_]u8{ 0x03, 0x00, 0x00, 0x13, 0x0E, 0xD0, 0x00 };
-    const too_short = [_]u8{ 0x03, 0x00, 0x00, 0x13, 0x0E, 0xE0 };
+    const valid = [_]u8{ 0x03, 0x00, 0x00, 0x0B, 0x06, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const invalid_type = [_]u8{ 0x03, 0x00, 0x00, 0x0B, 0x06, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const too_short = [_]u8{ 0x03, 0x00, 0x00, 0x0B, 0x06, 0xE0 };
 
     try std.testing.expectEqual(Protocol.rdp, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_type));
@@ -141,6 +227,7 @@ test "detectProtocol identifies HTTP methods and rejects unknown method prefixes
     try std.testing.expectEqual(Protocol.http, detectProtocol("DELETE /item HTTP/1.1"));
     try std.testing.expectEqual(Protocol.http, detectProtocol("OPTIONS * HTTP/1.1"));
     try std.testing.expectEqual(Protocol.http, detectProtocol("PATCH /item HTTP/1.1"));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol("POSTXYZ /bad HTTP/1.1"));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol("POS /bad HTTP/1.1"));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol("CONN"));
 }
@@ -173,12 +260,14 @@ test "detectProtocol identifies SOCKS5 and rejects invalid method counts" {
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_short));
 }
 
-test "detectProtocol identifies PostgreSQL SSLRequest and rejects wrong payloads" {
-    const valid = [_]u8{ 0x00, 0x00, 0x00, 0x08, 0x04, 0xD2, 0x16, 0x2F };
+test "detectProtocol identifies PostgreSQL StartupMessage and SSLRequest and rejects wrong payloads" {
+    const valid_ssl = [_]u8{ 0x00, 0x00, 0x00, 0x08, 0x04, 0xD2, 0x16, 0x2F };
+    const valid_startup = [_]u8{ 0x00, 0x00, 0x00, 0x54, 0x00, 0x03, 0x00, 0x00 };
     const invalid_code = [_]u8{ 0x00, 0x00, 0x00, 0x08, 0x04, 0xD2, 0x16, 0x30 };
     const too_short = [_]u8{ 0x00, 0x00, 0x00, 0x08, 0x04, 0xD2, 0x16 };
 
-    try std.testing.expectEqual(Protocol.postgresql, detectProtocol(&valid));
+    try std.testing.expectEqual(Protocol.postgresql, detectProtocol(&valid_ssl));
+    try std.testing.expectEqual(Protocol.postgresql, detectProtocol(&valid_startup));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_code));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_short));
 }
@@ -206,7 +295,7 @@ test "detectProtocol identifies Minecraft Handshake and rejects invalid" {
     const valid = [_]u8{ 0x10, 0x00, 0xF2, 0x05, 0x09, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F, 0x73, 0x74, 0x63, 0xDD, 0x01 };
     const invalid_id = [_]u8{ 0x10, 0x01, 0xF2, 0x05 };
     const too_long_length = [_]u8{ 0x80, 0x00, 0xF2, 0x05 };
-    
+
     try std.testing.expectEqual(Protocol.minecraft, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_id));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_long_length));
@@ -216,7 +305,7 @@ test "detectProtocol identifies MQTT CONNECT and rejects invalid" {
     const valid = [_]u8{ 0x10, 0x12, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3C, 0x00, 0x06, 'c', 'l', 'i', 'e', 'n', 't' };
     const invalid_header = [_]u8{ 0x20, 0x12, 0x00, 0x04, 'M', 'Q', 'T', 'T' };
     const invalid_magic = [_]u8{ 0x10, 0x12, 0x00, 0x04, 'M', 'Q', 'I', 'S' };
-    
+
     try std.testing.expectEqual(Protocol.mqtt, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_header));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_magic));
@@ -226,7 +315,7 @@ test "detectProtocol identifies SMB and rejects invalid" {
     const valid_smb2 = [_]u8{ 0x00, 0x00, 0x00, 0x54, 0xFE, 0x53, 0x4D, 0x42, 0x40, 0x00, 0x00, 0x00 };
     const valid_smb1 = [_]u8{ 0x00, 0x00, 0x00, 0x2D, 0xFF, 0x53, 0x4D, 0x42, 0x72, 0x00, 0x00, 0x00 };
     const invalid_magic = [_]u8{ 0x00, 0x00, 0x00, 0x54, 0xFD, 0x53, 0x4D, 0x42 };
-    
+
     try std.testing.expectEqual(Protocol.smb, detectProtocol(&valid_smb2));
     try std.testing.expectEqual(Protocol.smb, detectProtocol(&valid_smb1));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_magic));
