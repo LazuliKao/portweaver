@@ -20,6 +20,8 @@ test {
     _ = @import("./impl/app_forward/common.zig");
     _ = @import("./reload.zig");
     _ = @import("./impl/wol.zig");
+    _ = @import("./impl/protocol_detector.zig");
+    _ = @import("./impl/first_packet_hook.zig");
 
     if (build_options.ddns_mode) {
         _ = @import("./impl/ddns_manager.zig");

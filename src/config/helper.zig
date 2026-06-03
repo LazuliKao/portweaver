@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const wol = @import("../impl/wol.zig");
-const wol_detector = @import("../impl/wol_detector.zig");
+const protocol_detector = @import("../impl/protocol_detector.zig");
 
 /// Parse a port mapping string in the format: "[listen_port][frpc_node:port]...:target_port/protocol"
 /// Examples:
@@ -190,7 +190,7 @@ pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
 
     // Validate detect_protocols
     for (project.detect_protocols) |proto_name| {
-        if (wol_detector.protocolFromString(proto_name) == null) {
+        if (protocol_detector.protocolFromString(proto_name) == null) {
             result.protocol_errors += 1;
             if (result.first_error.len == 0) {
                 result.first_error = "Invalid protocol name in detect_protocols";
@@ -200,7 +200,7 @@ pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
 
     // Validate allowed_protocols
     for (project.allowed_protocols) |proto_name| {
-        if (wol_detector.protocolFromString(proto_name) == null) {
+        if (protocol_detector.protocolFromString(proto_name) == null) {
             result.protocol_errors += 1;
             if (result.first_error.len == 0) {
                 result.first_error = "Invalid protocol name in allowed_protocols";

@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../config/types.zig");
-const wol_detector = @import("wol_detector.zig");
+const protocol_detector = @import("protocol_detector.zig");
 const forwarder_runtime = @import("app_forward/forwarder_runtime.zig");
 const c = forwarder_runtime.c;
 const wol = @import("wol.zig");
@@ -69,9 +69,9 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
     // Only inspect client→target traffic; allow server→target responses
     if (is_client_to_target == 0) return 1;
 
-    const detected = wol_detector.detectProtocol(slice);
+    const detected = protocol_detector.detectProtocol(slice);
     if (detected) |protocol| {
-        const proto_str = wol_detector.protocolToString(protocol);
+        const proto_str = protocol_detector.protocolToString(protocol);
 
         // Protocol filtering: reject if not in allowed list
         if (cfg.enable_protocol_filter) {
