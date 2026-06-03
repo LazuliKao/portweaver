@@ -424,9 +424,23 @@
           ],
           "description": "Destination firewall zone(s) - string or array of strings"
         },
+        "detect_protocols": {
+          "description": "Protocols to detect for Wake-on-LAN",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "enable_app_forward": {
           "description": "Enable application-layer forwarding (Zig network lib, like socat)",
           "type": "boolean"
+        },
+        "allowed_protocols": {
+          "description": "Allowed protocol list (when protocol filtering is enabled)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "app_forward_loop_mode": {
           "$ref": "#/definitions/LoopMode",
@@ -442,6 +456,14 @@
         },
         "enabled": {
           "description": "Whether this project is enabled",
+          "type": "boolean"
+        },
+        "enable_protocol_filter": {
+          "description": "Enable protocol filter (reject unmatched protocols)",
+          "type": "boolean"
+        },
+        "enable_wol": {
+          "description": "Enable Wake-on-LAN functionality",
           "type": "boolean"
         },
         "family": {
@@ -500,6 +522,24 @@
         "target_port": {
           "description": "Target port (single-port mode)",
           "type": "number"
+        },
+        "tls_allowed_snis": {
+          "description": "Allowed TLS SNIs (when TLS is in allowed_protocols)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "wol_cooldown_ms": {
+          "description": "Wake-on-LAN magic packet send cooldown (ms)",
+          "type": "number"
+        },
+        "wol_mac_addresses": {
+          "description": "MAC addresses for Wake-on-LAN",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

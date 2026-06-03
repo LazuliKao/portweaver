@@ -348,6 +348,9 @@ pub const Project = struct {
     enable_protocol_filter: bool = false,
     /// 允许的协议列表（当协议过滤启用时）
     allowed_protocols: []const []const u8 = &[_][]const u8{},
+    /// 允许的 TLS SNI 列表（仅当 enable_protocol_filter=true 且 allowed_protocols 包含 tls 时有效）
+    /// 支持通配符如 "*.example.com"
+    tls_allowed_snis: []const []const u8 = &[_][]const u8{},
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);
         if (self.src_zones.len != 0) {
@@ -369,6 +372,10 @@ pub const Project = struct {
         if (self.allowed_protocols.len != 0) {
             for (self.allowed_protocols) |p| allocator.free(p);
             allocator.free(self.allowed_protocols);
+        }
+        if (self.tls_allowed_snis.len != 0) {
+            for (self.tls_allowed_snis) |s| allocator.free(s);
+            allocator.free(self.tls_allowed_snis);
         }
         allocator.free(self.target_address);
         if (self.port_mappings.len != 0) {
@@ -423,7 +430,8 @@ pub const Project = struct {
             eqlStringSlices(a.wol_mac_addresses, b.wol_mac_addresses) and
             a.wol_cooldown_ms == b.wol_cooldown_ms and
             a.enable_protocol_filter == b.enable_protocol_filter and
-            eqlStringSlices(a.allowed_protocols, b.allowed_protocols);
+            eqlStringSlices(a.allowed_protocols, b.allowed_protocols) and
+            eqlStringSlices(a.tls_allowed_snis, b.tls_allowed_snis);
     }
 };
 

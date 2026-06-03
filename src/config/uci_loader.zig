@@ -50,6 +50,12 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         for (allowed_protocols_list.items) |p| allocator.free(p);
     }
 
+    var tls_allowed_snis_list = std.array_list.Managed([]const u8).init(allocator);
+    defer tls_allowed_snis_list.deinit();
+    errdefer {
+        for (tls_allowed_snis_list.items) |s| allocator.free(s);
+    }
+
     var port_mappings_list = std.array_list.Managed(types.PortMapping).init(allocator);
     defer port_mappings_list.deinit();
     errdefer {
@@ -90,16 +96,19 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         const is_detect_protocols = std.mem.eql(u8, opt_name, "detect_protocols");
         const is_wol_mac_addresses = std.mem.eql(u8, opt_name, "wol_mac_addresses");
         const is_allowed_protocols = std.mem.eql(u8, opt_name, "allowed_protocols");
+        const is_tls_allowed_snis = std.mem.eql(u8, opt_name, "tls_allowed_snis");
 
-        if (is_detect_protocols or is_wol_mac_addresses or is_allowed_protocols) {
+        if (is_detect_protocols or is_wol_mac_addresses or is_allowed_protocols or is_tls_allowed_snis) {
             if (opt.isString()) {
                 const opt_val = uci.cStr(opt.getString());
                 if (is_detect_protocols) {
                     try appendZoneString(&detect_protocols_list, allocator, opt_val);
                 } else if (is_wol_mac_addresses) {
                     try appendZoneString(&wol_mac_addresses_list, allocator, opt_val);
-                } else {
+                } else if (is_allowed_protocols) {
                     try appendZoneString(&allowed_protocols_list, allocator, opt_val);
+                } else {
+                    try appendZoneString(&tls_allowed_snis_list, allocator, opt_val);
                 }
             } else if (opt.isList()) {
                 var val_it = opt.values();
@@ -109,8 +118,10 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
                         try appendZoneString(&detect_protocols_list, allocator, s);
                     } else if (is_wol_mac_addresses) {
                         try appendZoneString(&wol_mac_addresses_list, allocator, s);
-                    } else {
+                    } else if (is_allowed_protocols) {
                         try appendZoneString(&allowed_protocols_list, allocator, s);
+                    } else {
+                        try appendZoneString(&tls_allowed_snis_list, allocator, s);
                     }
                 }
             } else {
@@ -224,6 +235,9 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
     }
     if (allowed_protocols_list.items.len != 0) {
         project.allowed_protocols = try allowed_protocols_list.toOwnedSlice();
+    }
+    if (tls_allowed_snis_list.items.len != 0) {
+        project.tls_allowed_snis = try tls_allowed_snis_list.toOwnedSlice();
     }
 
     return project;

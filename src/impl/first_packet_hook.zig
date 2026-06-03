@@ -56,10 +56,38 @@ fn containsProtocol(protocols: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
+/// Match an SNI hostname against a pattern.
+/// Supports exact case-insensitive match and wildcard patterns like "*.example.com".
+fn matchSni(sni: []const u8, pattern: []const u8) bool {
+    // Wildcard pattern: "*.example.com" matches "foo.example.com", "bar.baz.example.com"
+    if (pattern.len >= 2 and pattern[0] == '*' and pattern[1] == '.') {
+        const suffix = pattern[1..]; // ".example.com"
+        if (sni.len >= suffix.len) {
+            // Compare the suffix portion case-insensitively
+            const sni_tail = sni[sni.len - suffix.len ..];
+            if (std.ascii.eqlIgnoreCase(sni_tail, suffix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Exact case-insensitive match
+    return std.ascii.eqlIgnoreCase(sni, pattern);
+}
+
+/// Check if an SNI matches any pattern in the allowed list.
+fn matchAnySni(sni: []const u8, patterns: []const []const u8) bool {
+    for (patterns) |pattern| {
+        if (matchSni(sni, pattern)) return true;
+    }
+    return false;
+}
+
 /// C-compatible first-packet callback.
-/// - Detects protocol using wol_detector
-/// - Triggers WoL (placeholder) if protocol is in detect_protocols
+/// - Detects protocol using protocol_detector
+/// - Triggers WoL if protocol is in detect_protocols
 /// - Returns 0 (reject) if protocol filter is enabled and protocol not in allowed_protocols
+/// - For TLS: additionally checks SNI against tls_allowed_snis if configured
 /// - Returns 1 (allow) otherwise
 fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, is_client_to_target: c_int) callconv(.c) c_int {
     const ctx: *CallbackContext = @ptrCast(@alignCast(user_data orelse return 1));
@@ -76,8 +104,23 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
         // Protocol filtering: reject if not in allowed list
         if (cfg.enable_protocol_filter) {
             if (!containsProtocol(cfg.allowed_protocols, proto_str)) {
-                std.log.info("[WoL:{d}] Protocol filter: rejecting {s} (not in allowed list)", .{ ctx.project_id, proto_str });
+                std.log.info("[Hook:{d}] Protocol filter: rejecting {s} (not in allowed list)", .{ ctx.project_id, proto_str });
                 return 0;
+            }
+
+            // TLS SNI filtering: if TLS is detected and SNI filter is configured
+            if (protocol == .tls and cfg.tls_allowed_snis.len > 0) {
+                const sni = protocol_detector.extractTlsSni(slice);
+                if (sni) |hostname| {
+                    if (!matchAnySni(hostname, cfg.tls_allowed_snis)) {
+                        std.log.info("[Hook:{d}] TLS SNI filter: rejecting {s} (not in allowed SNI list)", .{ ctx.project_id, hostname });
+                        return 0;
+                    }
+                } else {
+                    // Cannot extract SNI — reject when SNI filter is enabled
+                    std.log.info("[Hook:{d}] TLS SNI filter: rejecting connection (no SNI found)", .{ctx.project_id});
+                    return 0;
+                }
             }
         }
 
@@ -94,3 +137,22 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
 
     return 1;
 }
+
+test "matchSni: exact and wildcard matching" {
+    // Exact match (case-insensitive)
+    try std.testing.expect(matchSni("example.com", "example.com"));
+    try std.testing.expect(matchSni("Example.COM", "example.com"));
+    try std.testing.expect(!matchSni("other.com", "example.com"));
+
+    // Wildcard match
+    try std.testing.expect(matchSni("foo.example.com", "*.example.com"));
+    try std.testing.expect(matchSni("bar.baz.example.com", "*.example.com"));
+    try std.testing.expect(matchSni("FOO.Example.COM", "*.example.com"));
+    try std.testing.expect(!matchSni("example.com", "*.example.com"));
+    try std.testing.expect(!matchSni("notexample.com", "*.example.com"));
+
+    // Edge cases
+    try std.testing.expect(!matchSni("", "*.example.com"));
+    try std.testing.expect(matchSni("a.b", "*.b"));
+}
+

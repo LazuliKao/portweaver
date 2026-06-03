@@ -87,6 +87,111 @@ fn parseMqttRemainingLength(data: []const u8) ?struct { value: usize, bytes: usi
     return null;
 }
 
+/// Extract the Server Name Indication (SNI) from a TLS ClientHello.
+///
+/// Returns a slice pointing into `data` containing the host name,
+/// or null if the data is not a valid TLS ClientHello or contains no SNI extension.
+/// The returned slice is NOT owned; it is a view into the input buffer.
+pub fn extractTlsSni(data: []const u8) ?[]const u8 {
+    // Minimum: 5 (record header) + 4 (handshake header) + 2 (client version) +
+    //          32 (random) + 1 (session id len) = 44 bytes
+    if (data.len < 44) return null;
+
+    // TLS record header: ContentType(1) + ProtocolVersion(2) + Length(2)
+    if (data[0] != 0x16) return null; // Not a Handshake record
+    if (data[1] != 0x03) return null; // Not TLS
+    // data[2] is the minor version (0x00..0x04)
+
+    var offset: usize = 5; // skip record header
+
+    // Handshake header: HandshakeType(1) + Length(3)
+    if (offset >= data.len) return null;
+    if (data[offset] != 0x01) return null; // Not ClientHello
+    offset += 1;
+
+    // Handshake length (3 bytes, big-endian) — we just skip it
+    if (offset + 3 > data.len) return null;
+    offset += 3;
+
+    // ClientVersion (2 bytes)
+    if (offset + 2 > data.len) return null;
+    offset += 2;
+
+    // Random (32 bytes)
+    if (offset + 32 > data.len) return null;
+    offset += 32;
+
+    // Session ID: length(1) + data
+    if (offset >= data.len) return null;
+    const session_id_len: usize = data[offset];
+    offset += 1;
+    if (offset + session_id_len > data.len) return null;
+    offset += session_id_len;
+
+    // Cipher Suites: length(2) + data
+    if (offset + 2 > data.len) return null;
+    const cipher_suites_len: usize = (@as(usize, data[offset]) << 8) | data[offset + 1];
+    offset += 2;
+    if (offset + cipher_suites_len > data.len) return null;
+    offset += cipher_suites_len;
+
+    // Compression Methods: length(1) + data
+    if (offset >= data.len) return null;
+    const compression_len: usize = data[offset];
+    offset += 1;
+    if (offset + compression_len > data.len) return null;
+    offset += compression_len;
+
+    // Extensions: total length(2) + extension data
+    if (offset + 2 > data.len) return null;
+    const extensions_len: usize = (@as(usize, data[offset]) << 8) | data[offset + 1];
+    offset += 2;
+
+    const extensions_end = offset + extensions_len;
+    if (extensions_end > data.len) return null;
+
+    // Walk through extensions looking for Server Name (type 0x0000)
+    while (offset + 4 <= extensions_end) {
+        const ext_type: u16 = (@as(u16, data[offset]) << 8) | data[offset + 1];
+        const ext_len: usize = (@as(usize, data[offset + 2]) << 8) | data[offset + 3];
+        offset += 4;
+
+        if (offset + ext_len > extensions_end) return null;
+
+        if (ext_type == 0x0000) {
+            // Server Name extension found
+            // ServerNameList: total length(2)
+            if (ext_len < 2) return null;
+            var sni_offset = offset;
+            const sni_list_len: usize = (@as(usize, data[sni_offset]) << 8) | data[sni_offset + 1];
+            sni_offset += 2;
+            _ = sni_list_len;
+
+            // Walk through ServerName entries
+            // Each entry: type(1) + length(2) + name
+            while (sni_offset + 3 <= offset + ext_len) {
+                const name_type = data[sni_offset];
+                const name_len: usize = (@as(usize, data[sni_offset + 1]) << 8) | data[sni_offset + 2];
+                sni_offset += 3;
+
+                if (sni_offset + name_len > offset + ext_len) return null;
+
+                if (name_type == 0x00) {
+                    // host_name type
+                    return data[sni_offset .. sni_offset + name_len];
+                }
+
+                sni_offset += name_len;
+            }
+            return null; // SNI extension present but no host_name entry
+        }
+
+        offset += ext_len;
+    }
+
+    return null;
+}
+
 pub fn detectProtocol(data: []const u8) ?Protocol {
     if (data.len >= 4 and std.mem.startsWith(u8, data, "SSH-")) {
         return .ssh;
@@ -360,4 +465,114 @@ test "protocolFromString matches case-insensitively and rejects unknown names" {
     try std.testing.expectEqual(Protocol.telnet, protocolFromString("TelNet"));
     try std.testing.expectEqual(@as(?Protocol, null), protocolFromString("smtp"));
     try std.testing.expectEqual(@as(?Protocol, null), protocolFromString(""));
+}
+
+test "extractTlsSni extracts SNI from valid ClientHello" {
+    // A minimal valid TLS 1.2 ClientHello with SNI extension for "example.com"
+    //
+    // Layout (byte counts after record header):
+    //   Handshake header:   1 + 3 = 4
+    //   ClientVersion:      2
+    //   Random:             32
+    //   Session ID len:     1 (value 0)
+    //   Cipher suites:      2 + 2 = 4
+    //   Compression:        1 + 1 = 2
+    //   Extensions len:     2
+    //   SNI ext:            4 (hdr) + 16 (body) = 20
+    //   Total handshake body = 2+32+1+4+2+2+20 = 63
+    //   Record payload = 4 + 63 = 67
+    const client_hello = [_]u8{
+        // TLS Record Header
+        0x16, // ContentType: Handshake
+        0x03, 0x01, // ProtocolVersion: TLS 1.0
+        0x00, 0x43, // Record Length: 67 bytes
+
+        // Handshake Header
+        0x01, // HandshakeType: ClientHello
+        0x00, 0x00, 0x3F, // Handshake Length: 63 bytes
+
+        // ClientVersion
+        0x03, 0x03, // TLS 1.2
+
+        // Random (32 bytes)
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+
+        // Session ID
+        0x00, // Length: 0
+
+        // Cipher Suites
+        0x00, 0x02, // Length: 2
+        0xC0, 0x2F, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+
+        // Compression Methods
+        0x01, // Length: 1
+        0x00, // null compression
+
+        // Extensions
+        0x00, 0x14, // Extensions Length: 20 bytes
+
+        // SNI Extension (20 bytes total: 4 header + 16 body)
+        0x00, 0x00, // Extension Type: server_name (0)
+        0x00, 0x10, // Extension Length: 16
+        0x00, 0x0E, // Server Name List Length: 14
+        0x00, // Name Type: host_name (0)
+        0x00, 0x0B, // Host Name Length: 11
+        'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', // "example.com"
+    };
+
+    const sni = extractTlsSni(&client_hello);
+    try std.testing.expect(sni != null);
+    try std.testing.expectEqualStrings("example.com", sni.?);
+}
+
+test "extractTlsSni returns null for ClientHello without SNI extension" {
+    // A minimal TLS ClientHello without any extensions
+    const client_hello_no_ext = [_]u8{
+        // TLS Record Header
+        0x16, 0x03, 0x01, 0x00, 0x2D, // 45 byte record
+
+        // Handshake Header
+        0x01, 0x00, 0x00, 0x29, // ClientHello, 41 bytes
+
+        // ClientVersion
+        0x03, 0x03,
+
+        // Random (32 bytes)
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+
+        // Session ID
+        0x00,
+
+        // Cipher Suites
+        0x00, 0x02,
+        0xC0, 0x2F,
+
+        // Compression Methods
+        0x01, 0x00,
+
+        // Extensions length = 0
+        0x00, 0x00,
+    };
+
+    try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&client_hello_no_ext));
+}
+
+test "extractTlsSni returns null for truncated and non-TLS data" {
+    // Too short
+    try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(""));
+    try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&[_]u8{0x16, 0x03, 0x01}));
+
+    // Not a Handshake record (ContentType 0x15 = Alert)
+    const alert = [_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02 } ++ [_]u8{0} ** 40;
+    try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&alert));
+
+    // Handshake but not ClientHello (HandshakeType 0x02 = ServerHello)
+    const server_hello = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x30, 0x02 } ++ [_]u8{0} ** 44;
+    try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&server_hello));
 }

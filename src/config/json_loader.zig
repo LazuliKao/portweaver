@@ -385,6 +385,10 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         defer allowed_protocols_list.deinit(a);
         errdefer for (allowed_protocols_list.items) |p| a.free(p);
 
+        var tls_allowed_snis_list: std.ArrayList([]const u8) = .empty;
+        defer tls_allowed_snis_list.deinit(a);
+        errdefer for (tls_allowed_snis_list.items) |s| a.free(s);
+
         var port_mappings_list: std.ArrayList(types.PortMapping) = .empty;
         defer port_mappings_list.deinit(a);
         errdefer for (port_mappings_list.items) |*pm| pm.deinit(a);
@@ -536,6 +540,10 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             parseJsonZones(a, v, &allowed_protocols_list, ec.fieldPath("{s}.allowed_protocols", .{prefix}), ec);
         }
 
+        if (obj.get("tls_allowed_snis")) |v| {
+            parseJsonZones(a, v, &tls_allowed_snis_list, ec.fieldPath("{s}.tls_allowed_snis", .{prefix}), ec);
+        }
+
         // ── port_mappings ──
         if (obj.get("port_mappings")) |v| {
             if (v != .array) {
@@ -612,6 +620,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             for (detect_protocols_list.items) |p| a.free(p);
             for (wol_mac_addresses_list.items) |m| a.free(m);
             for (allowed_protocols_list.items) |p| a.free(p);
+            for (tls_allowed_snis_list.items) |s| a.free(s);
             for (port_mappings_list.items) |*pm| pm.deinit(a);
             // Clear lists so errdefer doesn't double-free
             src_zones_list.clearRetainingCapacity();
@@ -620,6 +629,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             detect_protocols_list.clearRetainingCapacity();
             wol_mac_addresses_list.clearRetainingCapacity();
             allowed_protocols_list.clearRetainingCapacity();
+            tls_allowed_snis_list.clearRetainingCapacity();
             continue;
         }
 
@@ -637,6 +647,9 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         }
         if (allowed_protocols_list.items.len != 0) {
             project.allowed_protocols = allowed_protocols_list.toOwnedSlice(a) catch &[_][]const u8{};
+        }
+        if (tls_allowed_snis_list.items.len != 0) {
+            project.tls_allowed_snis = tls_allowed_snis_list.toOwnedSlice(a) catch &[_][]const u8{};
         }
         if (port_mappings_list.items.len != 0) {
             project.port_mappings = port_mappings_list.toOwnedSlice(a) catch &[_]types.PortMapping{};
@@ -2240,4 +2253,36 @@ test "json: wol and protocol filter fields" {
     try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
     try testing.expectEqualStrings("tcp", p.allowed_protocols[0]);
     try testing.expectEqualStrings("udp", p.allowed_protocols[1]);
+}
+
+test "json: tls_allowed_snis parsing" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\"projects": [{
+        \\"target_address": "192.168.1.1",
+        \\"listen_port": 443,
+        \\"target_port": 443,
+        \\"enable_protocol_filter": true,
+        \\"allowed_protocols": ["tls"],
+        \\"tls_allowed_snis": ["*.example.com", "specific.host.org"]
+        \\}]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(@as(usize, 1), cfg.projects.len);
+    const p = cfg.projects[0];
+    try testing.expect(p.enable_protocol_filter);
+    try testing.expectEqual(@as(usize, 1), p.allowed_protocols.len);
+    try testing.expectEqualStrings("tls", p.allowed_protocols[0]);
+    try testing.expectEqual(@as(usize, 2), p.tls_allowed_snis.len);
+    try testing.expectEqualStrings("*.example.com", p.tls_allowed_snis[0]);
+    try testing.expectEqualStrings("specific.host.org", p.tls_allowed_snis[1]);
 }
