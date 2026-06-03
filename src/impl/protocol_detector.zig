@@ -9,6 +9,9 @@ pub const Protocol = enum {
     socks5,
     postgresql,
     telnet,
+    minecraft,
+    mqtt,
+    smb,
 };
 
 pub fn detectProtocol(data: []const u8) ?Protocol {
@@ -61,6 +64,25 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
         return .telnet;
     }
 
+    // Minecraft Java Edition Handshake (VarInt Length < 128, Packet ID 0x00, VarInt Protocol Version != 0)
+    // RDP starts with 0x03 0x00 0x00, so checking data[2] != 0x00 prevents collision.
+    if (data.len >= 3 and data[0] >= 0x02 and data[0] <= 0x7F and data[1] == 0x00 and data[2] != 0x00) {
+        return .minecraft;
+    }
+
+    // MQTT CONNECT packet (0x10, Length, 0x00, 0x04, "MQTT")
+    if (data.len >= 8 and data[0] == 0x10 and data[2] == 0x00 and data[3] == 0x04 and std.mem.eql(u8, data[4..8], "MQTT")) {
+        return .mqtt;
+    }
+
+    // SMB (NetBIOS Session Service header + SMB1/SMB2 Magic)
+    // NetBIOS header: 0x00 (Message Type), 3-byte length
+    // SMB1 Magic: 0xFF 'S' 'M' 'B'
+    // SMB2 Magic: 0xFE 'S' 'M' 'B'
+    if (data.len >= 8 and data[0] == 0x00 and (data[4] == 0xFF or data[4] == 0xFE) and data[5] == 0x53 and data[6] == 0x4D and data[7] == 0x42) {
+        return .smb;
+    }
+
     return null;
 }
 
@@ -74,6 +96,9 @@ pub fn protocolToString(p: Protocol) [:0]const u8 {
         .socks5 => "socks5",
         .postgresql => "postgresql",
         .telnet => "telnet",
+        .minecraft => "minecraft",
+        .mqtt => "mqtt",
+        .smb => "smb",
     };
 }
 
@@ -86,6 +111,9 @@ pub fn protocolFromString(s: []const u8) ?Protocol {
     if (std.ascii.eqlIgnoreCase(s, "socks5")) return .socks5;
     if (std.ascii.eqlIgnoreCase(s, "postgresql")) return .postgresql;
     if (std.ascii.eqlIgnoreCase(s, "telnet")) return .telnet;
+    if (std.ascii.eqlIgnoreCase(s, "minecraft")) return .minecraft;
+    if (std.ascii.eqlIgnoreCase(s, "mqtt")) return .mqtt;
+    if (std.ascii.eqlIgnoreCase(s, "smb")) return .smb;
     return null;
 }
 
@@ -174,8 +202,38 @@ test "detectProtocol returns null for empty and unknown payloads" {
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&unknown));
 }
 
+test "detectProtocol identifies Minecraft Handshake and rejects invalid" {
+    const valid = [_]u8{ 0x10, 0x00, 0xF2, 0x05, 0x09, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F, 0x73, 0x74, 0x63, 0xDD, 0x01 };
+    const invalid_id = [_]u8{ 0x10, 0x01, 0xF2, 0x05 };
+    const too_long_length = [_]u8{ 0x80, 0x00, 0xF2, 0x05 };
+    
+    try std.testing.expectEqual(Protocol.minecraft, detectProtocol(&valid));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_id));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_long_length));
+}
+
+test "detectProtocol identifies MQTT CONNECT and rejects invalid" {
+    const valid = [_]u8{ 0x10, 0x12, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3C, 0x00, 0x06, 'c', 'l', 'i', 'e', 'n', 't' };
+    const invalid_header = [_]u8{ 0x20, 0x12, 0x00, 0x04, 'M', 'Q', 'T', 'T' };
+    const invalid_magic = [_]u8{ 0x10, 0x12, 0x00, 0x04, 'M', 'Q', 'I', 'S' };
+    
+    try std.testing.expectEqual(Protocol.mqtt, detectProtocol(&valid));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_header));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_magic));
+}
+
+test "detectProtocol identifies SMB and rejects invalid" {
+    const valid_smb2 = [_]u8{ 0x00, 0x00, 0x00, 0x54, 0xFE, 0x53, 0x4D, 0x42, 0x40, 0x00, 0x00, 0x00 };
+    const valid_smb1 = [_]u8{ 0x00, 0x00, 0x00, 0x2D, 0xFF, 0x53, 0x4D, 0x42, 0x72, 0x00, 0x00, 0x00 };
+    const invalid_magic = [_]u8{ 0x00, 0x00, 0x00, 0x54, 0xFD, 0x53, 0x4D, 0x42 };
+    
+    try std.testing.expectEqual(Protocol.smb, detectProtocol(&valid_smb2));
+    try std.testing.expectEqual(Protocol.smb, detectProtocol(&valid_smb1));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_magic));
+}
+
 test "protocolToString and protocolFromString round-trip all protocols" {
-    const protocols = [_]Protocol{ .ssh, .rdp, .http, .tls, .vnc, .socks5, .postgresql, .telnet };
+    const protocols = [_]Protocol{ .ssh, .rdp, .http, .tls, .vnc, .socks5, .postgresql, .telnet, .minecraft, .mqtt, .smb };
 
     for (protocols) |protocol| {
         const name = protocolToString(protocol);
