@@ -84,6 +84,8 @@ struct tcp_forwarder {
     struct tcp_conn *active_conns;
     
     struct tcp_accept_op accept_op;
+    tcp_first_packet_cb_t first_packet_cb;
+    void *first_packet_user_data;
 };
 
 struct tcp_conn {
@@ -118,6 +120,7 @@ struct tcp_conn {
     
     char client_recv_buf[TCP_BUF_SIZE];
     char target_recv_buf[TCP_BUF_SIZE];
+    int first_packet_inspected;
 };
 
 #define DATA_ALLOC(fwd, sz) (forwarder_runtime_get_allocator((fwd)->runtime).malloc_cb(forwarder_runtime_get_allocator((fwd)->runtime).ctx, (sz)))
@@ -131,6 +134,10 @@ struct tcp_conn {
 static void tcp_conn_close(struct tcp_conn *conn);
 static void submit_recv(struct tcp_conn *conn, int is_client);
 static void submit_splice1(struct tcp_conn *conn, int is_c2t);
+
+static int tcp_forwarder_use_splice(const struct tcp_forwarder *fwd) {
+    return !fwd->enable_stats && fwd->first_packet_cb == NULL;
+}
 
 static void tcp_forwarder_unref(struct tcp_forwarder *fwd) {
     if (!fwd) return;
@@ -192,7 +199,7 @@ static void tcp_conn_close(struct tcp_conn *conn) {
     struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
     
     /* Close splice pipes synchronously — they are not tracked by io_uring. */
-    if (!fwd->enable_stats) {
+    if (tcp_forwarder_use_splice(fwd)) {
         if (conn->c2t_pipe[0] != -1) { close(conn->c2t_pipe[0]); conn->c2t_pipe[0] = -1; }
         if (conn->c2t_pipe[1] != -1) { close(conn->c2t_pipe[1]); conn->c2t_pipe[1] = -1; }
         if (conn->t2c_pipe[0] != -1) { close(conn->t2c_pipe[0]); conn->t2c_pipe[0] = -1; }
@@ -293,6 +300,27 @@ static void on_recv_cqe(struct io_uring_cqe *cqe, void *ctx) {
         else conn->target_eof = 1;
         tcp_conn_close(conn);
         return;
+    }
+
+    if (!conn->first_packet_inspected) {
+        struct tcp_forwarder *fwd = conn->forwarder;
+
+        if (fwd->first_packet_cb != NULL) {
+            char *buf = op->is_client ? conn->client_recv_buf : conn->target_recv_buf;
+            int allowed = fwd->first_packet_cb(
+                fwd->first_packet_user_data,
+                (const uint8_t *)buf,
+                (size_t)cqe->res,
+                op->is_client ? 1 : 0);
+
+            conn->first_packet_inspected = 1;
+            if (!allowed) {
+                tcp_conn_close(conn);
+                return;
+            }
+        } else {
+            conn->first_packet_inspected = 1;
+        }
     }
     
     if (conn->forwarder->enable_stats) {
@@ -453,7 +481,7 @@ static void on_connect_cqe(struct io_uring_cqe *cqe, void *ctx) {
         }
     }
     
-    if (conn->forwarder->enable_stats) {
+    if (!tcp_forwarder_use_splice(conn->forwarder)) {
         submit_recv(conn, 1);
         submit_recv(conn, 0);
     } else {
@@ -534,7 +562,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     conn->target_close_op.base.callback = on_target_close_cqe;
     conn->target_close_op.conn = conn;
     
-    if (!fwd->enable_stats) {
+    if (tcp_forwarder_use_splice(fwd)) {
         if (pipe(conn->c2t_pipe) < 0 || pipe(conn->t2c_pipe) < 0) {
             if (conn->c2t_pipe[0] != -1) close(conn->c2t_pipe[0]);
             if (conn->c2t_pipe[1] != -1) close(conn->c2t_pipe[1]);
@@ -575,7 +603,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
     int domain = (fwd->family == ADDR_FAMILY_IPV6) ? AF_INET6 : AF_INET;
     conn->target_fd = socket(domain, SOCK_STREAM, 0);
     if (conn->target_fd < 0) {
-        if (!fwd->enable_stats) {
+        if (tcp_forwarder_use_splice(fwd)) {
             close(conn->c2t_pipe[0]); close(conn->c2t_pipe[1]);
             close(conn->t2c_pipe[0]); close(conn->t2c_pipe[1]);
         }
@@ -586,7 +614,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
         return;
     }
     
-    if (!fwd->enable_stats) {
+    if (tcp_forwarder_use_splice(fwd)) {
         conn->c2t_splice2_op.dst_fd = conn->target_fd;
         conn->t2c_splice1_op.src_fd = conn->target_fd;
     }
@@ -628,7 +656,7 @@ static void on_accept_cqe(struct io_uring_cqe *cqe, void *ctx) {
             }
         }
     } else {
-        if (!fwd->enable_stats) {
+        if (tcp_forwarder_use_splice(fwd)) {
             close(conn->c2t_pipe[0]); close(conn->c2t_pipe[1]);
             close(conn->t2c_pipe[0]); close(conn->t2c_pipe[1]);
         }
@@ -839,4 +867,10 @@ traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder) {
         stats.listen_port = forwarder->listen_port;
     }
     return stats;
+}
+
+void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data) {
+    if (!fwd) return;
+    fwd->first_packet_cb = cb;
+    fwd->first_packet_user_data = user_data;
 }

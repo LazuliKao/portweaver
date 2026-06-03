@@ -373,6 +373,18 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         defer dest_zones_list.deinit(a);
         errdefer for (dest_zones_list.items) |z| a.free(z);
 
+        var detect_protocols_list: std.ArrayList([]const u8) = .empty;
+        defer detect_protocols_list.deinit(a);
+        errdefer for (detect_protocols_list.items) |p| a.free(p);
+
+        var wol_mac_addresses_list: std.ArrayList([]const u8) = .empty;
+        defer wol_mac_addresses_list.deinit(a);
+        errdefer for (wol_mac_addresses_list.items) |m| a.free(m);
+
+        var allowed_protocols_list: std.ArrayList([]const u8) = .empty;
+        defer allowed_protocols_list.deinit(a);
+        errdefer for (allowed_protocols_list.items) |p| a.free(p);
+
         var port_mappings_list: std.ArrayList(types.PortMapping) = .empty;
         defer port_mappings_list.deinit(a);
         errdefer for (port_mappings_list.items) |*pm| pm.deinit(a);
@@ -496,6 +508,34 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             };
         }
 
+        if (obj.get("enable_wol")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("{s}.enable_wol", .{prefix}), ec)) |b| project.enable_wol = b;
+        }
+
+        if (obj.get("detect_protocols")) |v| {
+            parseJsonZones(a, v, &detect_protocols_list, ec.fieldPath("{s}.detect_protocols", .{prefix}), ec);
+        }
+
+        if (obj.get("wol_mac_addresses")) |v| {
+            parseJsonZones(a, v, &wol_mac_addresses_list, ec.fieldPath("{s}.wol_mac_addresses", .{prefix}), ec);
+        }
+
+        if (obj.get("wol_cooldown_ms")) |v| {
+            project.wol_cooldown_ms = switch (v) {
+                .integer => |i| @intCast(i),
+                .string => |s| std.fmt.parseUnsigned(u64, s, 10) catch 30000,
+                else => 30000,
+            };
+        }
+
+        if (obj.get("enable_protocol_filter")) |v| {
+            if (parseJsonBool(v, ec.fieldPath("{s}.enable_protocol_filter", .{prefix}), ec)) |b| project.enable_protocol_filter = b;
+        }
+
+        if (obj.get("allowed_protocols")) |v| {
+            parseJsonZones(a, v, &allowed_protocols_list, ec.fieldPath("{s}.allowed_protocols", .{prefix}), ec);
+        }
+
         // ── port_mappings ──
         if (obj.get("port_mappings")) |v| {
             if (v != .array) {
@@ -569,11 +609,17 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             }
             for (src_zones_list.items) |z| a.free(z);
             for (dest_zones_list.items) |z| a.free(z);
+            for (detect_protocols_list.items) |p| a.free(p);
+            for (wol_mac_addresses_list.items) |m| a.free(m);
+            for (allowed_protocols_list.items) |p| a.free(p);
             for (port_mappings_list.items) |*pm| pm.deinit(a);
             // Clear lists so errdefer doesn't double-free
             src_zones_list.clearRetainingCapacity();
             dest_zones_list.clearRetainingCapacity();
             port_mappings_list.clearRetainingCapacity();
+            detect_protocols_list.clearRetainingCapacity();
+            wol_mac_addresses_list.clearRetainingCapacity();
+            allowed_protocols_list.clearRetainingCapacity();
             continue;
         }
 
@@ -582,6 +628,15 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         }
         if (dest_zones_list.items.len != 0) {
             project.dest_zones = dest_zones_list.toOwnedSlice(a) catch &[_][]const u8{};
+        }
+        if (detect_protocols_list.items.len != 0) {
+            project.detect_protocols = detect_protocols_list.toOwnedSlice(a) catch &[_][]const u8{};
+        }
+        if (wol_mac_addresses_list.items.len != 0) {
+            project.wol_mac_addresses = wol_mac_addresses_list.toOwnedSlice(a) catch &[_][]const u8{};
+        }
+        if (allowed_protocols_list.items.len != 0) {
+            project.allowed_protocols = allowed_protocols_list.toOwnedSlice(a) catch &[_][]const u8{};
         }
         if (port_mappings_list.items.len != 0) {
             project.port_mappings = port_mappings_list.toOwnedSlice(a) catch &[_]types.PortMapping{};
@@ -2145,4 +2200,44 @@ test "json: no leak - port 0 and negative ports" {
     defer ec.deinit();
     _ = loadFromJsonFileWithErrors(alloc, path, &ec) catch {};
     try testing.expect(ec.hasErrors());
+}
+
+test "json: wol and protocol filter fields" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\"projects": [{
+        \\"target_address": "192.168.1.1",
+        \\"listen_port": 80,
+        \\"target_port": 80,
+        \\"enable_wol": true,
+        \\"detect_protocols": ["rdp", "ssh"],
+        \\"wol_mac_addresses": "AA:BB:CC:DD:EE:FF",
+        \\"wol_cooldown_ms": 60000,
+        \\"enable_protocol_filter": true,
+        \\"allowed_protocols": ["tcp", "udp"]
+        \\}]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(@as(usize, 1), cfg.projects.len);
+    const p = cfg.projects[0];
+    try testing.expect(p.enable_wol);
+    try testing.expectEqual(@as(usize, 2), p.detect_protocols.len);
+    try testing.expectEqualStrings("rdp", p.detect_protocols[0]);
+    try testing.expectEqualStrings("ssh", p.detect_protocols[1]);
+    try testing.expectEqual(@as(usize, 1), p.wol_mac_addresses.len);
+    try testing.expectEqualStrings("AA:BB:CC:DD:EE:FF", p.wol_mac_addresses[0]);
+    try testing.expectEqual(@as(u64, 60000), p.wol_cooldown_ms);
+    try testing.expect(p.enable_protocol_filter);
+    try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
+    try testing.expectEqualStrings("tcp", p.allowed_protocols[0]);
+    try testing.expectEqualStrings("udp", p.allowed_protocols[1]);
 }

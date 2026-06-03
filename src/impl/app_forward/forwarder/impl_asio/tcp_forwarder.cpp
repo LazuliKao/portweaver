@@ -132,6 +132,7 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
     bool target_write_pending;
     bool client_write_pending;
     std::shared_ptr<asio::steady_timer> connect_timer;
+    bool first_packet_inspected = false;
 };
 
 struct tcp_forwarder
@@ -156,6 +157,8 @@ struct tcp_forwarder
     asio::ip::tcp::endpoint cached_dest_addr;
     std::mutex sessions_mutex;
     std::vector<std::shared_ptr<tcp_conn_ctx>> active_conns;
+    tcp_first_packet_cb_t first_packet_cb = nullptr;
+    void *first_packet_user_data = nullptr;
 
     tcp_forwarder(forwarder_runtime_t *runtime_value, asio::io_context &io_ctx_value)
         : runtime(runtime_value), acceptor(io_ctx_value), io_ctx(io_ctx_value), target_address(nullptr), listen_port(0),
@@ -350,6 +353,17 @@ void tcp_conn_ctx::on_client_read(const asio::error_code &ec, std::size_t bytes_
 
     if (!ec)
     {
+        if (bytes_transferred > 0 && !first_packet_inspected && owner->first_packet_cb != nullptr)
+        {
+            const int result = owner->first_packet_cb(owner->first_packet_user_data, client_buffer.data(), bytes_transferred, 1);
+            first_packet_inspected = true;
+            if (result == 0)
+            {
+                force_close();
+                return;
+            }
+        }
+
         if (owner->enable_stats)
             owner->bytes_in.fetch_add(static_cast<unsigned long long>(bytes_transferred), std::memory_order_relaxed);
         write_to_target(bytes_transferred);
@@ -688,6 +702,14 @@ extern "C" traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
     stats.active_sessions = forwarder->active_sessions.load(std::memory_order_relaxed);
     stats.listen_port = forwarder->listen_port;
     return stats;
+}
+
+extern "C" void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data)
+{
+    if (!fwd)
+        return;
+    fwd->first_packet_cb = cb;
+    fwd->first_packet_user_data = user_data;
 }
 
 #endif

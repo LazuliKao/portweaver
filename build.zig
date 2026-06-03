@@ -1017,6 +1017,9 @@ pub fn build(b: *std.Build) void {
     const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
     options.addOption(bool, "nftables_mode", nftables);
 
+    const wol = b.option(bool, "wol", "Wake-on-LAN Support") orelse false;
+    options.addOption(bool, "wol_mode", wol);
+
     const upx = b.option(bool, "upx", "Compress executable with UPX (auto-downloads if not cached)") orelse false;
 
     const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv, asio or io_uring)") orelse .libuv;
@@ -1206,7 +1209,7 @@ pub fn build(b: *std.Build) void {
         // Chain: compile → install artifact → UPX compress → install step
         if (ensureUpx(b)) |upx_bin| {
             const install_artifact = b.addInstallArtifact(exe, .{});
-            const upx_cmd = b.addSystemCommand(&.{upx_bin, "--best"});
+            const upx_cmd = b.addSystemCommand(&.{ upx_bin, "--best" });
             upx_cmd.addArg(b.pathJoin(&.{ b.exe_dir, exe.out_filename }));
             upx_cmd.step.dependOn(&install_artifact.step);
             b.getInstallStep().dependOn(&upx_cmd.step);

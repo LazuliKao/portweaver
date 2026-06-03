@@ -6,6 +6,7 @@ const tcp_uv = @import("app_forward/tcp_forwarder_uv.zig");
 const udp_uv = @import("app_forward/udp_forwarder_uv.zig");
 const loop_manager = @import("app_forward/loop_manager.zig");
 const forwarder_runtime = @import("app_forward/forwarder_runtime.zig");
+const wol_callback = @import("wol_callback.zig");
 
 pub const ForwardError = common.ForwardError;
 
@@ -28,6 +29,10 @@ const SharedTcpStartContext = struct {
         const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         const fwd = try TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
         try ctx.projectHandle.registerTcpHandle(fwd);
+        // Register first-packet callback if WoL or protocol filter is enabled
+        if (ctx.projectHandle.cfg.enable_wol or ctx.projectHandle.cfg.enable_protocol_filter) {
+            wol_callback.registerCallback(fwd.forwarder, ctx.allocator, &ctx.projectHandle.cfg, ctx.projectHandle.id);
+        }
         errdefer {
             ctx.projectHandle.deregisterTcpHandle(fwd) catch |err| {
                 std.log.warn("Failed to deregister TCP forwarder after start failure: {}", .{err});

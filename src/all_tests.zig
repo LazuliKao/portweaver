@@ -19,6 +19,7 @@ test {
     _ = @import("./impl/frps_forward.zig");
     _ = @import("./impl/app_forward/common.zig");
     _ = @import("./reload.zig");
+    _ = @import("./impl/wol.zig");
 
     if (build_options.ddns_mode) {
         _ = @import("./impl/ddns_manager.zig");

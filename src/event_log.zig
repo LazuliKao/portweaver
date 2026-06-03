@@ -27,6 +27,14 @@ pub const EventType = enum(u8) {
     frpc_disconnected = 10,
     /// FRPC client error
     frpc_error = 11,
+    /// WoL magic packet sent successfully
+    wol_sent = 12,
+    /// WoL send failed
+    wol_failed = 13,
+    /// Protocol detected on first packet
+    protocol_detected = 14,
+    /// Connection rejected by protocol filter
+    connection_rejected = 15,
 
     pub fn toString(self: EventType) [:0]const u8 {
         return switch (self) {
@@ -42,6 +50,10 @@ pub const EventType = enum(u8) {
             .frpc_connected => "frpc_connected",
             .frpc_disconnected => "frpc_disconnected",
             .frpc_error => "frpc_error",
+            .wol_sent => "wol_sent",
+            .wol_failed => "wol_failed",
+            .protocol_detected => "protocol_detected",
+            .connection_rejected => "connection_rejected",
         };
     }
 };

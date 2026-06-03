@@ -129,6 +129,15 @@ extern "C"
     void tcp_forwarder_destroy(tcp_forwarder_t *forwarder);
     // Returns a read-only stats snapshot.
     traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder);
+    // TCP first-packet inspection callback type: called when the first data
+    // packet arrives on a new TCP connection. Return 1 to allow, 0 to reject.
+    // `is_client_to_target` is 1 if data flows client→target, 0 if target→client.
+    typedef int (*tcp_first_packet_cb_t)(void *user_data, const uint8_t *data, size_t len, int is_client_to_target);
+
+    // Set a callback to inspect the first packet of each TCP connection.
+    // `cb` receives (user_data, data, len, is_client_to_target).
+    // Return 1 to allow the connection to continue, 0 to reject/close it.
+    void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data);
 
     // UDP Forwarder API
     // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).
@@ -172,6 +181,7 @@ extern "C"
     // Runtime wake callback type: called on the owning runtime thread when the
     // context dispatches queued work.
     typedef void (*forwarder_runtime_wake_cb_t)(void *user_data);
+
 
     // Allocate a runtime context container on the heap.
     // Returns NULL on allocation failure.

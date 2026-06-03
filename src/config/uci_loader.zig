@@ -32,6 +32,24 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         for (dest_zones_list.items) |z| allocator.free(z);
     }
 
+    var detect_protocols_list = std.array_list.Managed([]const u8).init(allocator);
+    defer detect_protocols_list.deinit();
+    errdefer {
+        for (detect_protocols_list.items) |p| allocator.free(p);
+    }
+
+    var wol_mac_addresses_list = std.array_list.Managed([]const u8).init(allocator);
+    defer wol_mac_addresses_list.deinit();
+    errdefer {
+        for (wol_mac_addresses_list.items) |m| allocator.free(m);
+    }
+
+    var allowed_protocols_list = std.array_list.Managed([]const u8).init(allocator);
+    defer allowed_protocols_list.deinit();
+    errdefer {
+        for (allowed_protocols_list.items) |p| allocator.free(p);
+    }
+
     var port_mappings_list = std.array_list.Managed(types.PortMapping).init(allocator);
     defer port_mappings_list.deinit();
     errdefer {
@@ -61,6 +79,38 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
                         try appendZoneString(&src_zones_list, allocator, s);
                     } else {
                         try appendZoneString(&dest_zones_list, allocator, s);
+                    }
+                }
+            } else {
+                return types.ConfigError.InvalidValue;
+            }
+            continue;
+        }
+
+        const is_detect_protocols = std.mem.eql(u8, opt_name, "detect_protocols");
+        const is_wol_mac_addresses = std.mem.eql(u8, opt_name, "wol_mac_addresses");
+        const is_allowed_protocols = std.mem.eql(u8, opt_name, "allowed_protocols");
+
+        if (is_detect_protocols or is_wol_mac_addresses or is_allowed_protocols) {
+            if (opt.isString()) {
+                const opt_val = uci.cStr(opt.getString());
+                if (is_detect_protocols) {
+                    try appendZoneString(&detect_protocols_list, allocator, opt_val);
+                } else if (is_wol_mac_addresses) {
+                    try appendZoneString(&wol_mac_addresses_list, allocator, opt_val);
+                } else {
+                    try appendZoneString(&allowed_protocols_list, allocator, opt_val);
+                }
+            } else if (opt.isList()) {
+                var val_it = opt.values();
+                while (val_it.next()) |val| {
+                    const s = uci.cStr(val);
+                    if (is_detect_protocols) {
+                        try appendZoneString(&detect_protocols_list, allocator, s);
+                    } else if (is_wol_mac_addresses) {
+                        try appendZoneString(&wol_mac_addresses_list, allocator, s);
+                    } else {
+                        try appendZoneString(&allowed_protocols_list, allocator, s);
                     }
                 }
             } else {
@@ -117,6 +167,15 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             if (trimmed.len != 0) {
                 project.max_connections = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
             }
+        } else if (std.mem.eql(u8, opt_name, "enable_wol")) {
+            project.enable_wol = try types.parseBool(opt_val);
+        } else if (std.mem.eql(u8, opt_name, "wol_cooldown_ms")) {
+            const cd_trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+            if (cd_trimmed.len != 0) {
+                project.wol_cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch 30000;
+            }
+        } else if (std.mem.eql(u8, opt_name, "enable_protocol_filter")) {
+            project.enable_protocol_filter = try types.parseBool(opt_val);
         }
     }
 
@@ -156,6 +215,15 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
     }
     if (dest_zones_list.items.len != 0) {
         project.dest_zones = try dest_zones_list.toOwnedSlice();
+    }
+    if (detect_protocols_list.items.len != 0) {
+        project.detect_protocols = try detect_protocols_list.toOwnedSlice();
+    }
+    if (wol_mac_addresses_list.items.len != 0) {
+        project.wol_mac_addresses = try wol_mac_addresses_list.toOwnedSlice();
+    }
+    if (allowed_protocols_list.items.len != 0) {
+        project.allowed_protocols = try allowed_protocols_list.toOwnedSlice();
     }
 
     return project;

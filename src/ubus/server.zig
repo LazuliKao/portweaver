@@ -12,6 +12,7 @@ const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const nftables = if (build_options.nftables_mode) @import("../nftables/mod.zig") else struct {};
+const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {};
 const compat = @import("../compat.zig");
 const event_log = @import("../event_log.zig");
 const serialization = @import("serialization.zig");
@@ -125,6 +126,8 @@ pub var g_state: ?*RuntimeState = null;
 var g_ctx: ?*c.ubus_context = null;
 var g_thread: ?std.Thread = null;
 var g_lifecycle_mutex: std.Io.Mutex = .init;
+var g_wol_manager: ?wol.WolManager = null;
+var g_wol_manager_mutex: std.Io.Mutex = .init;
 
 const set_enabled_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
@@ -151,6 +154,10 @@ const ddns_info_policy = [_]c.blobmsg_policy{
     .{ .name = "name", .type = c.BLOBMSG_TYPE_STRING },
 };
 
+const wol_project_policy = [_]c.blobmsg_policy{
+    .{ .name = "project", .type = c.BLOBMSG_TYPE_STRING },
+};
+
 const restart_project_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
 };
@@ -175,6 +182,8 @@ const method_names = struct {
     pub const reload_config: [:0]const u8 = "reload_config";
     pub const restart_project: [:0]const u8 = "restart_project";
     pub const get_nftables_rules: [:0]const u8 = "get_nftables_rules";
+    pub const wol_wake: [:0]const u8 = "wol_wake";
+    pub const wol_status: [:0]const u8 = "wol_status";
     pub const object_name: [:0]const u8 = "portweaver";
 };
 
@@ -225,6 +234,12 @@ const field_names = struct {
     pub const instances: [:0]const u8 = "instances";
     pub const version: [:0]const u8 = "version";
     pub const active_sessions: [:0]const u8 = "active_sessions";
+    pub const success: [:0]const u8 = "success";
+    pub const sent_count: [:0]const u8 = "sent_count";
+    pub const mac_count: [:0]const u8 = "mac_count";
+    pub const cooldown_ms: [:0]const u8 = "cooldown_ms";
+    pub const detect_protocols: [:0]const u8 = "detect_protocols";
+    pub const project: [:0]const u8 = "project";
 };
 
 pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode)) !void {
@@ -272,6 +287,11 @@ pub fn stop() void {
     if (g_state) |state| {
         g_state = null;
         state.deinit();
+    }
+
+    if (g_wol_manager) |*mgr| {
+        mgr.deinit();
+        g_wol_manager = null;
     }
 
     g_ctx = null;
@@ -475,7 +495,25 @@ fn ubusThread(state: *RuntimeState) void {
             .n_policy = @intCast(ddns_info_policy.len),
         },
     } else [_]c.ubus_method{};
-    const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods;
+    const wolMethods = if (build_options.wol_mode) [_]c.ubus_method{
+        .{
+            .name = method_names.wol_wake,
+            .handler = wrapHandler(wolWake, WolProjectArgs, &wol_project_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &wol_project_policy,
+            .n_policy = @intCast(wol_project_policy.len),
+        },
+        .{
+            .name = method_names.wol_status,
+            .handler = wrapHandler(wolStatus, WolProjectArgs, &wol_project_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &wol_project_policy,
+            .n_policy = @intCast(wol_project_policy.len),
+        },
+    } else [_]c.ubus_method{};
+    const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods ++ wolMethods;
     var obj_type = c.ubus_object_type{
         .name = method_names.object_name,
         .id = 0,
@@ -686,6 +724,22 @@ const FullStatusResponse = struct {
     frp: FrpStatusSection,
     ddns: DdnsStatusSection,
     events: []const EventInfo,
+};
+
+const WolProjectArgs = struct {
+    project: []const u8,
+};
+
+const WolWakeResponse = struct {
+    success: bool,
+    sent_count: u32,
+};
+
+const WolStatusResponse = struct {
+    enabled: bool,
+    mac_count: u32,
+    cooldown_ms: u64,
+    detect_protocols: []const []const u8,
 };
 
 // === RPC handler implementation using clean native signatures ===
@@ -1139,6 +1193,50 @@ fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !Reloa
         .success = true,
         .changes = 0, // Individual counts are logged by reload.apply()
         .message = "Config reload triggered successfully",
+    };
+}
+
+fn findProjectByName(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
+    for (state.projects.items) |*project| {
+        if (std.mem.eql(u8, project.cfg.remark, name)) {
+            return project;
+        }
+    }
+    return null;
+}
+
+fn getWolManager(allocator: std.mem.Allocator) *wol.WolManager {
+    g_wol_manager_mutex.lockUncancelable(compat.io());
+    defer g_wol_manager_mutex.unlock(compat.io());
+    if (g_wol_manager == null) {
+        g_wol_manager = wol.WolManager.init(allocator);
+    }
+    return &g_wol_manager.?;
+}
+
+fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolWakeResponse {
+    const project = findProjectByName(state, args.project) orelse return error.NotFound;
+    const cfg = project.cfg;
+    if (!cfg.enable_wol) {
+        return .{ .success = false, .sent_count = 0 };
+    }
+    if (cfg.wol_mac_addresses.len == 0) {
+        return .{ .success = true, .sent_count = 0 };
+    }
+    const mgr = getWolManager(allocator);
+    wol.sendWoLWithCooldown(cfg.wol_mac_addresses, cfg.wol_cooldown_ms, mgr, @intCast(project.id));
+    return .{ .success = true, .sent_count = @intCast(cfg.wol_mac_addresses.len) };
+}
+
+fn wolStatus(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolStatusResponse {
+    _ = allocator;
+    const project = findProjectByName(state, args.project) orelse return error.NotFound;
+    const cfg = project.cfg;
+    return .{
+        .enabled = cfg.enable_wol,
+        .mac_count = @intCast(cfg.wol_mac_addresses.len),
+        .cooldown_ms = cfg.wol_cooldown_ms,
+        .detect_protocols = cfg.detect_protocols,
     };
 }
 

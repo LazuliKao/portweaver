@@ -43,6 +43,8 @@ struct tcp_forwarder
     int closed_handles;
     int expected_closed_handles;
     int ref_count;
+    tcp_first_packet_cb_t first_packet_cb;
+    void *first_packet_user_data;
 };
 
 typedef struct tcp_conn_ctx
@@ -65,6 +67,7 @@ typedef struct tcp_conn_ctx
     int target_shutdown_pending;
     uv_timer_t connect_timer;
     int connect_timer_initialized;
+    int first_packet_inspected;
 } tcp_conn_ctx_t;
 
 typedef struct fwd_write_req
@@ -197,25 +200,59 @@ static void tcp_shutdown_peer_write(tcp_conn_ctx_t *ctx, uv_stream_t *stream, uv
 static void tcp_on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 {
     tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)client->data;
+    struct tcp_forwarder *fwd = ctx->forwarder;
     if (nread > 0)
     {
         if (uv_is_closing((uv_handle_t *)&ctx->target))
         {
-            DATA_FREE(ctx->forwarder, buf->base);
+            DATA_FREE(fwd, buf->base);
             return;
         }
-        if (ctx->forwarder->enable_stats)
+        if (!buf->base)
         {
-            __atomic_fetch_add(&ctx->forwarder->bytes_in, (uint64_t)nread, __ATOMIC_RELAXED);
-        }
-        fwd_write_req_t *fw = (fwd_write_req_t *)DATA_ALLOC(ctx->forwarder, sizeof(fwd_write_req_t));
-        if (!fw)
-        {
-            DATA_FREE(ctx->forwarder, buf->base);
             tcp_terminate_connection(ctx);
             return;
         }
-        fw->fwd = ctx->forwarder;
+        if (fwd->enable_stats)
+        {
+            __atomic_fetch_add(&fwd->bytes_in, (uint64_t)nread, __ATOMIC_RELAXED);
+        }
+        if (!ctx->first_packet_inspected && fwd->first_packet_cb != NULL)
+        {
+            int result;
+
+            result = fwd->first_packet_cb(fwd->first_packet_user_data, (const uint8_t *)buf->base, (size_t)nread, 1);
+            ctx->first_packet_inspected = 1;
+            if (result == 0)
+            {
+                DATA_FREE(fwd, buf->base);
+                uv_read_stop((uv_stream_t *)&ctx->client);
+                uv_read_stop((uv_stream_t *)&ctx->target);
+                ctx->client_eof = 1;
+                ctx->target_eof = 1;
+                tcp_shutdown_peer_write(ctx,
+                                        (uv_stream_t *)&ctx->client,
+                                        &ctx->client_shutdown_req,
+                                        &ctx->client_shutdown_started,
+                                        &ctx->client_shutdown_pending,
+                                        "tcp_on_client_read");
+                tcp_shutdown_peer_write(ctx,
+                                        (uv_stream_t *)&ctx->target,
+                                        &ctx->target_shutdown_req,
+                                        &ctx->target_shutdown_started,
+                                        &ctx->target_shutdown_pending,
+                                        "tcp_on_client_read");
+                return;
+            }
+        }
+        fwd_write_req_t *fw = (fwd_write_req_t *)DATA_ALLOC(fwd, sizeof(fwd_write_req_t));
+        if (!fw)
+        {
+            DATA_FREE(fwd, buf->base);
+            tcp_terminate_connection(ctx);
+            return;
+        }
+        fw->fwd = fwd;
         fw->ctx = ctx;
         uv_buf_t wbuf = uv_buf_init(buf->base, (unsigned int)nread);
         fw->req.data = buf->base;
@@ -808,4 +845,12 @@ traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
         stats.listen_port = forwarder->listen_port;
     }
     return stats;
+}
+
+void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data)
+{
+    if (!fwd)
+        return;
+    fwd->first_packet_cb = cb;
+    fwd->first_packet_user_data = user_data;
 }

@@ -85,6 +85,12 @@ pub const TcpForwarder = struct {
         }
     }
 
+    pub fn setFirstPacketCallback(self: *TcpForwarder, cb: c.tcp_first_packet_cb_t, user_data: ?*anyopaque) void {
+        if (self.forwarder) |f| {
+            c.tcp_forwarder_set_first_packet_cb(f, cb, user_data);
+        }
+    }
+
     pub fn requestStop(self: *TcpForwarder) void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());

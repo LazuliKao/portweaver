@@ -336,6 +336,18 @@ pub const Project = struct {
     connect_timeout_ms: ?u32 = null,
     /// Maximum concurrent connections per listener. Null = unlimited.
     max_connections: ?u32 = null,
+    /// 启用 Wake-on-LAN 功能
+    enable_wol: bool = false,
+    /// 需要检测的协议名称列表
+    detect_protocols: []const []const u8 = &[_][]const u8{},
+    /// 目标设备的 MAC 地址列表（用于 WoL 唤醒）
+    wol_mac_addresses: []const []const u8 = &[_][]const u8{},
+    /// WoL 魔术包发送冷却时间（毫秒）
+    wol_cooldown_ms: u64 = 30000,
+    /// 启用协议过滤（拒绝不匹配的协议）
+    enable_protocol_filter: bool = false,
+    /// 允许的协议列表（当协议过滤启用时）
+    allowed_protocols: []const []const u8 = &[_][]const u8{},
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
         if (self.remark.len != 0) allocator.free(self.remark);
         if (self.src_zones.len != 0) {
@@ -345,6 +357,18 @@ pub const Project = struct {
         if (self.dest_zones.len != 0) {
             for (self.dest_zones) |z| allocator.free(z);
             allocator.free(self.dest_zones);
+        }
+        if (self.detect_protocols.len != 0) {
+            for (self.detect_protocols) |p| allocator.free(p);
+            allocator.free(self.detect_protocols);
+        }
+        if (self.wol_mac_addresses.len != 0) {
+            for (self.wol_mac_addresses) |m| allocator.free(m);
+            allocator.free(self.wol_mac_addresses);
+        }
+        if (self.allowed_protocols.len != 0) {
+            for (self.allowed_protocols) |p| allocator.free(p);
+            allocator.free(self.allowed_protocols);
         }
         allocator.free(self.target_address);
         if (self.port_mappings.len != 0) {
@@ -393,7 +417,13 @@ pub const Project = struct {
             a.enable_firewall_stats == b.enable_firewall_stats and
             a.app_forward_loop_mode == b.app_forward_loop_mode and
             a.connect_timeout_ms == b.connect_timeout_ms and
-            a.max_connections == b.max_connections;
+            a.max_connections == b.max_connections and
+            a.enable_wol == b.enable_wol and
+            eqlStringSlices(a.detect_protocols, b.detect_protocols) and
+            eqlStringSlices(a.wol_mac_addresses, b.wol_mac_addresses) and
+            a.wol_cooldown_ms == b.wol_cooldown_ms and
+            a.enable_protocol_filter == b.enable_protocol_filter and
+            eqlStringSlices(a.allowed_protocols, b.allowed_protocols);
     }
 };
 

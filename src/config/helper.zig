@@ -1,5 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
+const wol = @import("../impl/wol.zig");
+const wol_detector = @import("../impl/wol_detector.zig");
 
 /// Parse a port mapping string in the format: "[listen_port][frpc_node:port]...:target_port/protocol"
 /// Examples:
@@ -153,6 +155,69 @@ pub fn parseFrpcForwardString(allocator: std.mem.Allocator, s: []const u8) !type
     return .{ .node_name = try allocator.dupe(u8, trimmed), .remote_port = 0 };
 }
 
+/// Minimum cooldown in milliseconds (1 second)
+pub const WOL_COOLDOWN_MIN_MS: u64 = 1000;
+/// Maximum cooldown in milliseconds (5 minutes)
+pub const WOL_COOLDOWN_MAX_MS: u64 = 300000;
+
+/// Result of WoL config validation. Collects errors without requiring an allocator.
+pub const WolValidationResult = struct {
+    mac_errors: u32 = 0,
+    protocol_errors: u32 = 0,
+    cooldown_error: bool = false,
+    first_error: []const u8 = "",
+
+    pub fn isValid(self: WolValidationResult) bool {
+        return self.mac_errors == 0 and self.protocol_errors == 0 and !self.cooldown_error;
+    }
+};
+
+/// Validate WoL and protocol filter configuration fields.
+/// Returns a WolValidationResult indicating whether the config is valid.
+/// Empty lists are considered valid (use defaults).
+pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
+    var result = WolValidationResult{};
+
+    // Validate MAC addresses
+    for (project.wol_mac_addresses) |mac_str| {
+        if (wol.parseMac(mac_str) == null) {
+            result.mac_errors += 1;
+            if (result.first_error.len == 0) {
+                result.first_error = "Invalid MAC address";
+            }
+        }
+    }
+
+    // Validate detect_protocols
+    for (project.detect_protocols) |proto_name| {
+        if (wol_detector.protocolFromString(proto_name) == null) {
+            result.protocol_errors += 1;
+            if (result.first_error.len == 0) {
+                result.first_error = "Invalid protocol name in detect_protocols";
+            }
+        }
+    }
+
+    // Validate allowed_protocols
+    for (project.allowed_protocols) |proto_name| {
+        if (wol_detector.protocolFromString(proto_name) == null) {
+            result.protocol_errors += 1;
+            if (result.first_error.len == 0) {
+                result.first_error = "Invalid protocol name in allowed_protocols";
+            }
+        }
+    }
+
+    // Validate cooldown range
+    if (project.wol_cooldown_ms < WOL_COOLDOWN_MIN_MS or project.wol_cooldown_ms > WOL_COOLDOWN_MAX_MS) {
+        result.cooldown_error = true;
+        if (result.first_error.len == 0) {
+            result.first_error = "Cooldown out of range";
+        }
+    }
+
+    return result;
+}
 test "parsePortMapping tests" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -170,4 +235,128 @@ test "parsePortMapping tests" {
         var result = try parsePortMapping(allocator, test_str);
         defer result.deinit(allocator);
     }
+}
+
+test "validateWolConfig: valid config with all fields passes" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .enable_wol = true,
+        .wol_mac_addresses = &.{ "AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66" },
+        .detect_protocols = &.{ "rdp", "ssh" },
+        .allowed_protocols = &.{ "rdp", "ssh", "http" },
+        .wol_cooldown_ms = 30000,
+        .enable_protocol_filter = true,
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(result.isValid());
+}
+
+test "validateWolConfig: empty lists are valid (defaults)" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(result.isValid());
+}
+
+test "validateWolConfig: invalid MAC address rejected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .enable_wol = true,
+        .wol_mac_addresses = &.{ "AA:BB:CC:DD:EE:FF", "not-a-mac" },
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expectEqual(@as(u32, 1), result.mac_errors);
+}
+
+test "validateWolConfig: invalid protocol in detect_protocols rejected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .detect_protocols = &.{ "rdp", "invalidproto" },
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expectEqual(@as(u32, 1), result.protocol_errors);
+}
+
+test "validateWolConfig: invalid protocol in allowed_protocols rejected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .enable_protocol_filter = true,
+        .allowed_protocols = &.{ "rdp", "unknown" },
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expectEqual(@as(u32, 1), result.protocol_errors);
+}
+
+test "validateWolConfig: cooldown too low rejected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .wol_cooldown_ms = 500,
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expect(result.cooldown_error);
+}
+
+test "validateWolConfig: cooldown too high rejected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .wol_cooldown_ms = 400000,
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expect(result.cooldown_error);
+}
+
+test "validateWolConfig: cooldown at boundaries accepted" {
+    // At min boundary (1000)
+    const proj_min = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .wol_cooldown_ms = 1000,
+    };
+    try std.testing.expect(validateWolConfig(&proj_min).isValid());
+
+    // At max boundary (300000)
+    const proj_max = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .wol_cooldown_ms = 300000,
+    };
+    try std.testing.expect(validateWolConfig(&proj_max).isValid());
+}
+
+test "validateWolConfig: multiple errors collected" {
+    const proj = types.Project{
+        .listen_port = 3389,
+        .target_address = "192.168.1.100",
+        .target_port = 3389,
+        .wol_mac_addresses = &.{ "bad-mac1", "bad-mac2" },
+        .detect_protocols = &.{"fakeproto"},
+        .wol_cooldown_ms = 50,
+    };
+    const result = validateWolConfig(&proj);
+    try std.testing.expect(!result.isValid());
+    try std.testing.expectEqual(@as(u32, 2), result.mac_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.protocol_errors);
+    try std.testing.expect(result.cooldown_error);
 }
