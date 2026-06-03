@@ -15,25 +15,30 @@ pub const Protocol = enum {
 };
 
 fn parseVarInt(data: []const u8, offset: usize) ?struct { value: i32, bytes: usize } {
-    var value: i32 = 0;
+    var value: u32 = 0;
     var position: usize = 0;
     var current_offset = offset;
 
     while (current_offset < data.len) {
+        if (position >= 32) return null;
+
         const current_byte = data[current_offset];
-        value |= @as(i32, current_byte & 0x7F) << @as(u5, @intCast(position));
+        const bits: u32 = current_byte & 0x7F;
+
+        // At position 28 (5th byte), only 4 bits fit in u32; reject overflow.
+        if (position == 28 and bits > 0x0F) return null;
+
+        value |= bits << @as(u5, @intCast(position));
 
         if ((current_byte & 0x80) == 0) break;
 
         position += 7;
         current_offset += 1;
-
-        if (position >= 32) return null;
     }
 
     if (current_offset >= data.len) return null;
 
-    return .{ .value = value, .bytes = current_offset - offset + 1 };
+    return .{ .value = @as(i32, @bitCast(value)), .bytes = current_offset - offset + 1 };
 }
 
 fn checkMinecraftHandshake(data: []const u8) bool {
@@ -89,7 +94,7 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
 
     if (data.len >= 11 and data[0] == 0x03 and data[1] == 0x00) {
         const tpkt_len = (@as(usize, data[2]) << 8) | data[3];
-        if (tpkt_len >= 11 and data[5] == 0xE0) {
+        if (tpkt_len >= 11 and tpkt_len <= data.len and data[5] == 0xE0) {
             return .rdp;
         }
     }
@@ -112,7 +117,7 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
         const minor = data[2];
         const rec_len = (@as(usize, data[3]) << 8) | data[4];
 
-        if (minor >= 0x00 and minor <= 0x04 and rec_len > 0) {
+        if (minor <= 0x04 and rec_len > 0) {
             if (data.len < 6 or data[5] == 0x01) {
                 return .tls;
             }
@@ -125,8 +130,18 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
 
     if (data.len >= 2 and data[0] == 0x05) {
         const nmethods = data[1];
-        if (nmethods != 0 and data.len >= 2 + @as(usize, nmethods)) {
-            return .socks5;
+        if (nmethods != 0 and nmethods <= 16 and data.len >= 2 + @as(usize, nmethods)) {
+            // Require at least one well-known auth method (NoAuth/GSSAPI/UserPass)
+            // to reduce false positives from arbitrary data starting with 0x05.
+            const methods = data[2 .. 2 + @as(usize, nmethods)];
+            var has_known_method = false;
+            for (methods) |m| {
+                if (m <= 0x02) {
+                    has_known_method = true;
+                    break;
+                }
+            }
+            if (has_known_method) return .socks5;
         }
     }
 
@@ -235,10 +250,12 @@ test "detectProtocol identifies HTTP methods and rejects unknown method prefixes
 test "detectProtocol identifies TLS and rejects non-handshake records" {
     const valid = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x2A };
     const invalid_content_type = [_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02 };
+    const non_client_hello = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x2A, 0x02 };
     const too_short = [_]u8{0x16};
 
     try std.testing.expectEqual(Protocol.tls, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_content_type));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&non_client_hello));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_short));
 }
 
@@ -252,11 +269,13 @@ test "detectProtocol identifies SOCKS5 and rejects invalid method counts" {
     const valid = [_]u8{ 0x05, 0x02, 0x00, 0x02 };
     const invalid_version = [_]u8{ 0x04, 0x02, 0x00, 0x02 };
     const invalid_nmethods = [_]u8{ 0x05, 0x09, 0x00, 0x02 };
+    const unknown_methods = [_]u8{ 0x05, 0x02, 0xFE, 0xFD };
     const too_short = [_]u8{0x05};
 
     try std.testing.expectEqual(Protocol.socks5, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_version));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_nmethods));
+    try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&unknown_methods));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_short));
 }
 
