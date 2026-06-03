@@ -155,4 +155,3 @@ test "matchSni: exact and wildcard matching" {
     try std.testing.expect(!matchSni("", "*.example.com"));
     try std.testing.expect(matchSni("a.b", "*.b"));
 }
-

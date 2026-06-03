@@ -183,12 +183,12 @@ let startZigBuildWatch (config: Config) =
     printfn "🔨 Starting Zig build in watch mode..."
     printfn "   Target: %s" config.BuildTarget
     printfn "   Debounce: %dms (%.1fs)" config.WatchDebounceMs (float config.WatchDebounceMs / 1000.0)
-    printfn $"   Command: zig build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dfrps=true -Dddns=true -Dtarget=%s{config.BuildTarget}"
+    printfn $"   Command: zig build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dfrps=true -Dddns=true -Dwol=true -Dtarget=%s{config.BuildTarget}"
     printfn ""
 
     let psi = ProcessStartInfo()
     psi.FileName <- "zig"
-    psi.Arguments <- $"build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dfrps=true -Dddns=true -Dtarget=%s{config.BuildTarget}"
+    psi.Arguments <- $"build --watch --debounce %d{config.WatchDebounceMs} -Duci=true -Dubus=true -Dfrpc=true -Dfrps=true -Dddns=true -Dwol=true -Dtarget=%s{config.BuildTarget}"
     psi.WorkingDirectory <- config.ProjectRoot
     psi.UseShellExecute <- false
     psi.CreateNoWindow <- false

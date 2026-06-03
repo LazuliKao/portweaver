@@ -12,7 +12,23 @@ const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const nftables = if (build_options.nftables_mode) @import("../nftables/mod.zig") else struct {};
-const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {};
+const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {
+    pub const WolManager = struct {
+        pub fn init(allocator: std.mem.Allocator) WolManager {
+            _ = allocator;
+            return .{};
+        }
+        pub fn deinit(self: *WolManager) void {
+            _ = self;
+        }
+    };
+    pub fn sendWoLWithCooldown(macs: []const []const u8, cooldown: u64, mgr: *WolManager, id: u32) void {
+        _ = macs;
+        _ = cooldown;
+        _ = mgr;
+        _ = id;
+    }
+};
 const compat = @import("../compat.zig");
 const event_log = @import("../event_log.zig");
 const serialization = @import("serialization.zig");
@@ -163,6 +179,7 @@ const restart_project_policy = [_]c.blobmsg_policy{
 };
 
 const method_names = struct {
+    pub const get_version: [:0]const u8 = "get_version";
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
     pub const set_enabled: [:0]const u8 = "set_enabled";
@@ -332,6 +349,14 @@ fn ubusThread(state: *RuntimeState) void {
     }
 
     const commonMethods = [_]c.ubus_method{
+        .{
+            .name = method_names.get_version,
+            .handler = wrapHandler(getVersion, void, null),
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
         .{
             .name = method_names.get_status,
             .handler = wrapHandler(getStatus, void, null),
@@ -544,6 +569,21 @@ fn ubusThread(state: *RuntimeState) void {
 
 // === RPC argument & response structures ===
 
+const GetVersionResponse = struct {
+    version: []const u8,
+    uci_mode: bool,
+    ubus_mode: bool,
+    frpc_mode: bool,
+    frps_mode: bool,
+    ddns_mode: bool,
+    nftables_mode: bool,
+    wol_mode: bool,
+    forward_backend: []const u8,
+    frp_version: ?[]const u8 = null,
+    ddns_version: ?[]const u8 = null,
+    backend_version: []const u8,
+};
+
 const GetStatusResponse = struct {
     status: []const u8,
     total_projects: u32,
@@ -743,6 +783,51 @@ const WolStatusResponse = struct {
 };
 
 // === RPC handler implementation using clean native signatures ===
+
+fn getVersion(allocator: std.mem.Allocator, state: *RuntimeState) !GetVersionResponse {
+    _ = state;
+    var frp_version: ?[]const u8 = null;
+    if (build_options.frpc_mode) {
+        const libfrpc = @import("../impl/frpc/libfrpc.zig");
+        frp_version = libfrpc.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get FRPC version: {any}", .{err});
+            break :blk null;
+        };
+    } else if (build_options.frps_mode) {
+        const libfrps = @import("../impl/frps/libfrps.zig");
+        frp_version = libfrps.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get FRPS version: {any}", .{err});
+            break :blk null;
+        };
+    }
+
+    var ddns_version: ?[]const u8 = null;
+    if (build_options.ddns_mode) {
+        const libddns = @import("../impl/ddns/libddns.zig");
+        ddns_version = libddns.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get DDNS version: {any}", .{err});
+            break :blk null;
+        };
+    }
+
+    const backend_runtime = @import("../impl/app_forward/forwarder_runtime.zig");
+    const backend_version = backend_runtime.backendVersion();
+
+    return .{
+        .version = "1.0.0",
+        .uci_mode = build_options.uci_mode,
+        .ubus_mode = build_options.ubus_mode,
+        .frpc_mode = build_options.frpc_mode,
+        .frps_mode = build_options.frps_mode,
+        .ddns_mode = build_options.ddns_mode,
+        .nftables_mode = build_options.nftables_mode,
+        .wol_mode = build_options.wol_mode,
+        .forward_backend = @tagName(build_options.forward_backend),
+        .frp_version = frp_version,
+        .ddns_version = ddns_version,
+        .backend_version = backend_version,
+    };
+}
 
 fn getStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetStatusResponse {
     _ = allocator;
