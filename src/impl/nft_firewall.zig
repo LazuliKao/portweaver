@@ -148,6 +148,13 @@ pub fn addAcceptRule(
     family: ?types.AddressFamily,
     enable_firewall_stats: bool,
 ) !void {
+    const family_str = switch (family orelse .any) {
+        .any => "any",
+        .ipv4 => "ipv4",
+        .ipv6 => "ipv6",
+    };
+    std.log.info("[NFT] ACCEPT {s}/{s} dport {s} ({s})", .{ proto, family_str, port_str, remark });
+
     const cmd = if (enable_firewall_stats)
         try std.fmt.allocPrintSentinel(
             allocator,
@@ -181,6 +188,7 @@ pub fn addNatRule(
     family: ?types.AddressFamily,
     enable_firewall_stats: bool,
 ) !void {
+    std.log.info("[NFT] SRCNAT {s} dport {s} -> {s}:{s} (preserve-src-ip, remark={s})", .{ proto, listen_port, dest_ip, dest_port, remark });
     const addr_keyword = familyAddrKeyword(family);
     const cmd = if (enable_firewall_stats)
         try std.fmt.allocPrintSentinel(
@@ -219,6 +227,8 @@ pub fn addRedirectRule(
 ) !void {
     _ = dest_zone;
 
+    std.log.info("[NFT] DNAT {s} iif={s} dport {s} -> {s}:{s} (remark={s})", .{ proto, src_zone, listen_port, dest_ip, dest_port, remark });
+
     if (preserve_source_ip) {
         try addNatRule(ctx, allocator, src_zone, proto, listen_port, dest_ip, dest_port, remark, family, enable_firewall_stats);
     }
@@ -252,6 +262,24 @@ pub fn applyRulesForProject(
     project: types.Project,
 ) !void {
     const should_add_forward = project.add_firewall_forward;
+
+    if (project.port_mappings.len > 0) {
+        std.log.info("[NFT] Project '{s}': applying {d} port mapping(s) (open_port={}, forward={})", .{
+            project.remark,
+            project.port_mappings.len,
+            project.open_firewall_port,
+            should_add_forward,
+        });
+    } else {
+        std.log.info("[NFT] Project '{s}': port {d} -> {s}:{d} (open_port={}, forward={})", .{
+            project.remark,
+            project.listen_port,
+            project.target_address,
+            project.target_port,
+            project.open_firewall_port,
+            should_add_forward,
+        });
+    }
 
     if (project.port_mappings.len > 0) {
         for (project.port_mappings) |mapping| {
@@ -344,12 +372,14 @@ pub fn applyRulesForProject(
 
 /// Flushes the entire portweaver nftables table.
 pub fn clearRules(ctx: anytype) !void {
+    std.log.info("[NFT] Flushing portweaver table rules", .{});
     const cmd: [*:0]const u8 = "flush table inet portweaver";
     try runCommandLogged(ctx, cmd);
 }
 
 /// Creates the nftables table and chains used by portweaver.
 pub fn setupTable(ctx: anytype, allocator: std.mem.Allocator) !void {
+    std.log.info("[NFT] Setting up table and chains (inet portweaver)", .{});
     const cmd = try std.fmt.allocPrintSentinel(
         allocator,
         \\add table inet portweaver

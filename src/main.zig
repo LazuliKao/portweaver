@@ -19,6 +19,7 @@ const process_lock = @import("process_lock.zig");
 const file_log = @import("file_log.zig");
 const compat = @import("compat.zig");
 const reload = @import("reload.zig");
+const libddns = if (build_options.ddns_mode) @import("impl/ddns/libddns.zig") else struct {};
 
 fn handleSighup(_: std.posix.SIG) callconv(.c) void {
     process_lock.requestReload();
@@ -45,9 +46,97 @@ fn myLogFn(
     }
 }
 
+const VersionInfo = struct {
+    version: []const u8 = "1.0.0",
+    uci_mode: bool = build_options.uci_mode,
+    ubus_mode: bool = build_options.ubus_mode,
+    frpc_mode: bool = build_options.frpc_mode,
+    frps_mode: bool = build_options.frps_mode,
+    ddns_mode: bool = build_options.ddns_mode,
+    nftables_mode: bool = build_options.nftables_mode,
+    wol_mode: bool = build_options.wol_mode,
+    forward_backend: []const u8 = @tagName(build_options.forward_backend),
+    frp_version: ?[]const u8,
+    ddns_version: ?[]const u8,
+    backend_version: []const u8,
+};
+
+fn handleVersionCommand(allocator: std.mem.Allocator, json_mode: bool) !void {
+    var frp_version: ?[]const u8 = null;
+    defer if (frp_version) |v| allocator.free(v);
+
+    if (build_options.frpc_mode) {
+        const libfrpc_impl = @import("impl/frpc/libfrpc.zig");
+        frp_version = libfrpc_impl.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get FRPC version: {any}", .{err});
+            break :blk null;
+        };
+    } else if (build_options.frps_mode) {
+        const libfrps_impl = @import("impl/frps/libfrps.zig");
+        frp_version = libfrps_impl.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get FRPS version: {any}", .{err});
+            break :blk null;
+        };
+    }
+
+    var ddns_version: ?[]const u8 = null;
+    defer if (ddns_version) |v| allocator.free(v);
+
+    if (build_options.ddns_mode) {
+        ddns_version = libddns.getVersion(allocator) catch |err| blk: {
+            std.log.warn("Failed to get DDNS version: {any}", .{err});
+            break :blk null;
+        };
+    }
+
+    const backend_runtime = @import("impl/app_forward/forwarder_runtime.zig");
+    const backend_version = backend_runtime.backendVersion();
+
+    const io = std.Options.debug_io;
+    const stdout_file = std.Io.File.stdout();
+    var write_buf: [4096]u8 = undefined;
+    var stdout_writer = stdout_file.writer(io, &write_buf);
+    const writer = &stdout_writer.interface;
+
+    if (json_mode) {
+        const info = VersionInfo{
+            .frp_version = frp_version,
+            .ddns_version = ddns_version,
+            .backend_version = backend_version,
+        };
+        try writer.print("{f}", .{std.json.fmt(info, .{})});
+        try writer.writeByte('\n');
+    } else {
+        try writer.print("PortWeaver version: 1.0.0\n", .{});
+        try writer.print("  Forwarding backend: {s} ({s})\n", .{ @tagName(build_options.forward_backend), backend_version });
+        if (frp_version) |v| {
+            try writer.print("  FRP version: {s}\n", .{v});
+        }
+        if (ddns_version) |v| {
+            try writer.print("  DDNS version: {s}\n", .{v});
+        }
+        try writer.print("  Features: uci={any}, ubus={any}, frpc={any}, frps={any}, ddns={any}, nftables={any}, wol={any}\n", .{
+            build_options.uci_mode,
+            build_options.ubus_mode,
+            build_options.frpc_mode,
+            build_options.frps_mode,
+            build_options.ddns_mode,
+            build_options.nftables_mode,
+            build_options.wol_mode,
+        });
+    }
+    try stdout_writer.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "version")) {
+        const json_mode = args.len >= 3 and std.mem.eql(u8, args[2], "--json");
+        try handleVersionCommand(allocator, json_mode);
+        return;
+    }
     errdefer {
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpErrorReturnTrace(trace);
