@@ -58,6 +58,7 @@ test "config provider: loadFrom delegates to source load" {
                 .projects = projects,
                 .frpc_nodes = std.StringHashMap(types.FrpcNode).init(allocator),
                 .frps_nodes = std.StringHashMap(types.FrpsNode).init(allocator),
+                .wol_targets = std.StringHashMap(types.WolTarget).init(allocator),
                 .ddns_configs = ddns_configs,
             };
         }

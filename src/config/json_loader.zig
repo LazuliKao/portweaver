@@ -377,9 +377,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         defer detect_protocols_list.deinit(a);
         errdefer for (detect_protocols_list.items) |p| a.free(p);
 
-        var wol_mac_addresses_list: std.ArrayList([]const u8) = .empty;
-        defer wol_mac_addresses_list.deinit(a);
-        errdefer for (wol_mac_addresses_list.items) |m| a.free(m);
+
 
         var allowed_protocols_list: std.ArrayList([]const u8) = .empty;
         defer allowed_protocols_list.deinit(a);
@@ -520,16 +518,11 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             parseJsonZones(a, v, &detect_protocols_list, ec.fieldPath("{s}.detect_protocols", .{prefix}), ec);
         }
 
-        if (obj.get("wol_mac_addresses")) |v| {
-            parseJsonZones(a, v, &wol_mac_addresses_list, ec.fieldPath("{s}.wol_mac_addresses", .{prefix}), ec);
-        }
-
-        if (obj.get("wol_cooldown_ms")) |v| {
-            project.wol_cooldown_ms = switch (v) {
-                .integer => |i| @intCast(i),
-                .string => |s| std.fmt.parseUnsigned(u64, s, 10) catch 30000,
-                else => 30000,
-            };
+        if (obj.get("wol_target")) |v| {
+            if (parseJsonString(v, ec.fieldPath("{s}.wol_target", .{prefix}), ec)) |s| {
+                project.wol_target = a.dupe(u8, s) catch "";
+                if (project.wol_target.len > 0) project_has_allocs = true;
+            }
         }
 
         if (obj.get("enable_protocol_filter")) |v| {
@@ -618,7 +611,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             for (src_zones_list.items) |z| a.free(z);
             for (dest_zones_list.items) |z| a.free(z);
             for (detect_protocols_list.items) |p| a.free(p);
-            for (wol_mac_addresses_list.items) |m| a.free(m);
+
             for (allowed_protocols_list.items) |p| a.free(p);
             for (tls_allowed_snis_list.items) |s| a.free(s);
             for (port_mappings_list.items) |*pm| pm.deinit(a);
@@ -627,7 +620,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             dest_zones_list.clearRetainingCapacity();
             port_mappings_list.clearRetainingCapacity();
             detect_protocols_list.clearRetainingCapacity();
-            wol_mac_addresses_list.clearRetainingCapacity();
+
             allowed_protocols_list.clearRetainingCapacity();
             tls_allowed_snis_list.clearRetainingCapacity();
             continue;
@@ -642,9 +635,7 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         if (detect_protocols_list.items.len != 0) {
             project.detect_protocols = detect_protocols_list.toOwnedSlice(a) catch &[_][]const u8{};
         }
-        if (wol_mac_addresses_list.items.len != 0) {
-            project.wol_mac_addresses = wol_mac_addresses_list.toOwnedSlice(a) catch &[_][]const u8{};
-        }
+
         if (allowed_protocols_list.items.len != 0) {
             project.allowed_protocols = allowed_protocols_list.toOwnedSlice(a) catch &[_][]const u8{};
         }
@@ -999,13 +990,77 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         }
     }
 
+    // ── WOL targets ─────────────────────────────────────────────────────
+    var wol_targets = std.StringHashMap(types.WolTarget).init(a);
+    errdefer {
+        var it = wol_targets.iterator();
+        while (it.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(a);
+        }
+        wol_targets.deinit();
+    }
+
+    if (root == .object) {
+        if (root.object.get("wol_targets")) |wol_value| {
+            if (wol_value == .object) {
+                var node_it = wol_value.object.iterator();
+                while (node_it.next()) |entry| {
+                    const target_name = entry.key_ptr.*;
+                    const target_obj = entry.value_ptr.*;
+                    const np = ec.fieldPath("wol_targets.{s}", .{target_name});
+
+                    if (target_obj != .object) continue;
+
+                    var wol_target = types.WolTarget{
+                        .enabled = true,
+                        .mac_addresses = &.{},
+                        .cooldown_ms = 30000,
+                    };
+                    var mac_list: std.ArrayList([]const u8) = .empty;
+                    defer mac_list.deinit(a);
+                    errdefer for (mac_list.items) |m| a.free(m);
+
+                    if (target_obj.object.get("mac_addresses")) |v| {
+                        parseJsonZones(a, v, &mac_list, ec.fieldPath("{s}.mac_addresses", .{np}), ec);
+                    } else if (target_obj.object.get("mac")) |v| {
+                        parseJsonZones(a, v, &mac_list, ec.fieldPath("{s}.mac", .{np}), ec);
+                    }
+
+                    if (target_obj.object.get("cooldown_ms")) |v| {
+                        wol_target.cooldown_ms = switch (v) {
+                            .integer => |i| @intCast(i),
+                            .string => |s| std.fmt.parseUnsigned(u64, s, 10) catch 30000,
+                            else => 30000,
+                        };
+                    }
+
+                    if (target_obj.object.get("enabled")) |v| {
+                         if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| wol_target.enabled = b;
+                    }
+
+                    if (target_obj.object.get("log_enabled")) |v| {
+                         if (parseJsonBool(v, ec.fieldPath("{s}.log_enabled", .{np}), ec)) |b| wol_target.log_enabled = b;
+                    }
+
+                    if (mac_list.items.len > 0) {
+                        wol_target.mac_addresses = mac_list.toOwnedSlice(a) catch return error.OutOfMemory;
+                    }
+
+                    const key = a.dupe(u8, target_name) catch continue;
+                    wol_targets.put(key, wol_target) catch {};
+                }
+            }
+        }
+    }
+
     // ── Final check ─────────────────────────────────────────────────────
     if (ec.hasErrors()) {
-        // errdefer blocks above will clean up list, frpc_nodes, frps_nodes, ddns_list
+        // errdefer blocks above will clean up list, frpc_nodes, frps_nodes, wol_targets, ddns_list
         return types.ConfigError.ValidationFailed;
     }
 
-    return .{
+    var cfg = types.Config{
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
         .watch = watch,
@@ -1013,8 +1068,11 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
+        .wol_targets = wol_targets,
         .ddns_configs = ddns_list.toOwnedSlice(a) catch return error.OutOfMemory,
     };
+    cfg.resolveWolTargets();
+    return cfg;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2219,14 +2277,19 @@ test "json: wol and protocol filter fields" {
     const alloc = testing.allocator;
     const path = try writeTmpJson(alloc,
         \\{
+        \\"wol_targets": {
+        \\  "my_pc": {
+        \\    "mac_addresses": ["AA:BB:CC:DD:EE:FF"],
+        \\    "cooldown_ms": 60000
+        \\  }
+        \\},
         \\"projects": [{
         \\"target_address": "192.168.1.1",
         \\"listen_port": 80,
         \\"target_port": 80,
         \\"enable_wol": true,
         \\"detect_protocols": ["rdp", "ssh"],
-        \\"wol_mac_addresses": "AA:BB:CC:DD:EE:FF",
-        \\"wol_cooldown_ms": 60000,
+        \\"wol_target": "my_pc",
         \\"enable_protocol_filter": true,
         \\"allowed_protocols": ["tcp", "udp"]
         \\}]
@@ -2243,12 +2306,13 @@ test "json: wol and protocol filter fields" {
     try testing.expectEqual(@as(usize, 1), cfg.projects.len);
     const p = cfg.projects[0];
     try testing.expect(p.enable_wol);
+    try testing.expectEqualStrings("my_pc", p.wol_target);
     try testing.expectEqual(@as(usize, 2), p.detect_protocols.len);
     try testing.expectEqualStrings("rdp", p.detect_protocols[0]);
     try testing.expectEqualStrings("ssh", p.detect_protocols[1]);
-    try testing.expectEqual(@as(usize, 1), p.wol_mac_addresses.len);
-    try testing.expectEqualStrings("AA:BB:CC:DD:EE:FF", p.wol_mac_addresses[0]);
-    try testing.expectEqual(@as(u64, 60000), p.wol_cooldown_ms);
+    try testing.expectEqual(@as(usize, 1), p.resolved_wol_macs.len);
+    try testing.expectEqualStrings("AA:BB:CC:DD:EE:FF", p.resolved_wol_macs[0]);
+    try testing.expectEqual(@as(u64, 60000), p.resolved_wol_cooldown_ms);
     try testing.expect(p.enable_protocol_filter);
     try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
     try testing.expectEqualStrings("tcp", p.allowed_protocols[0]);

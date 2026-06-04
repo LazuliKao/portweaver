@@ -134,6 +134,33 @@ pub const LoopMode = enum {
     global,
 };
 
+/// Wake-on-LAN 目标配置
+pub const WolTarget = struct {
+    /// 是否启用
+    enabled: bool = true,
+    /// 目标设备的 MAC 地址列表
+    mac_addresses: []const []const u8 = &[_][]const u8{},
+    /// WoL 魔术包发送冷却时间（毫秒）
+    cooldown_ms: u64 = 30000,
+    /// 是否启用 WoL 日志
+    log_enabled: bool = false,
+
+    pub fn deinit(self: *WolTarget, allocator: std.mem.Allocator) void {
+        if (self.mac_addresses.len != 0) {
+            for (self.mac_addresses) |m| allocator.free(m);
+            allocator.free(self.mac_addresses);
+        }
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            eqlStringSlices(a.mac_addresses, b.mac_addresses) and
+            a.cooldown_ms == b.cooldown_ms and
+            a.log_enabled == b.log_enabled;
+    }
+};
+
 /// FRP 节点配置
 pub const FrpcNode = struct {
     /// 是否启用此规则
@@ -340,10 +367,12 @@ pub const Project = struct {
     enable_wol: bool = false,
     /// 需要检测的协议名称列表
     detect_protocols: []const []const u8 = &[_][]const u8{},
-    /// 目标设备的 MAC 地址列表（用于 WoL 唤醒）
-    wol_mac_addresses: []const []const u8 = &[_][]const u8{},
-    /// WoL 魔术包发送冷却时间（毫秒）
-    wol_cooldown_ms: u64 = 30000,
+    /// Standalone WoL 目标名称引用
+    wol_target: []const u8 = "",
+    /// Runtime resolved properties (do not free in deinit, owned by Config.wol_targets)
+    resolved_wol_macs: []const []const u8 = &[_][]const u8{},
+    resolved_wol_cooldown_ms: u64 = 30000,
+    resolved_wol_log_enabled: bool = false,
     /// 启用协议过滤（拒绝不匹配的协议）
     enable_protocol_filter: bool = false,
     /// 允许的协议列表（当协议过滤启用时）
@@ -365,10 +394,7 @@ pub const Project = struct {
             for (self.detect_protocols) |p| allocator.free(p);
             allocator.free(self.detect_protocols);
         }
-        if (self.wol_mac_addresses.len != 0) {
-            for (self.wol_mac_addresses) |m| allocator.free(m);
-            allocator.free(self.wol_mac_addresses);
-        }
+        if (self.wol_target.len != 0) allocator.free(self.wol_target);
         if (self.allowed_protocols.len != 0) {
             for (self.allowed_protocols) |p| allocator.free(p);
             allocator.free(self.allowed_protocols);
@@ -397,14 +423,6 @@ pub const Project = struct {
         return self.app_forward_loop_mode orelse default_mode;
     }
 
-    fn eqlStringSlices(a: []const []const u8, b: []const []const u8) bool {
-        if (a.len != b.len) return false;
-        for (a, b) |sa, sb| {
-            if (!std.mem.eql(u8, sa, sb)) return false;
-        }
-        return true;
-    }
-
     pub fn eql(a: @This(), b: @This()) bool {
         return a.enabled == b.enabled and
             eqlStringSlices(a.src_zones, b.src_zones) and
@@ -427,8 +445,7 @@ pub const Project = struct {
             a.max_connections == b.max_connections and
             a.enable_wol == b.enable_wol and
             eqlStringSlices(a.detect_protocols, b.detect_protocols) and
-            eqlStringSlices(a.wol_mac_addresses, b.wol_mac_addresses) and
-            a.wol_cooldown_ms == b.wol_cooldown_ms and
+            std.mem.eql(u8, a.wol_target, b.wol_target) and
             a.enable_protocol_filter == b.enable_protocol_filter and
             eqlStringSlices(a.allowed_protocols, b.allowed_protocols) and
             eqlStringSlices(a.tls_allowed_snis, b.tls_allowed_snis);
@@ -597,6 +614,8 @@ pub const Config = struct {
     frps_nodes: std.StringHashMap(FrpsNode),
     /// DDNS 配置列表
     ddns_configs: []DdnsConfig,
+    /// Wake-on-LAN 目标配置（key 为目标名称）
+    wol_targets: std.StringHashMap(WolTarget),
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         self.log_config.deinit(allocator);
@@ -617,6 +636,13 @@ pub const Config = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.frps_nodes.deinit();
+
+        var wol_it = self.wol_targets.iterator();
+        while (wol_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.wol_targets.deinit();
 
         for (self.ddns_configs) |*d| d.deinit(allocator);
         allocator.free(self.ddns_configs);
@@ -642,12 +668,35 @@ pub const Config = struct {
             PortMapping.eqlSlice(Project, a.projects, b.projects) and
             eqlNodeHashMap(FrpcNode, a.frpc_nodes, b.frpc_nodes) and
             eqlNodeHashMap(FrpsNode, a.frps_nodes, b.frps_nodes) and
+            eqlNodeHashMap(WolTarget, a.wol_targets, b.wol_targets) and
             PortMapping.eqlSlice(DdnsConfig, a.ddns_configs, b.ddns_configs);
+    }
+
+    pub fn resolveWolTargets(self: *Config) void {
+        for (self.projects) |*p| {
+            if (p.enable_wol and p.wol_target.len > 0) {
+                if (self.wol_targets.get(p.wol_target)) |target| {
+                    p.resolved_wol_macs = target.mac_addresses;
+                    p.resolved_wol_cooldown_ms = target.cooldown_ms;
+                    p.resolved_wol_log_enabled = target.log_enabled;
+                } else {
+                    std.log.err("resolveWolTargets: wol_target '{s}' referenced by project '{s}' not found", .{ p.wol_target, p.remark });
+                }
+            }
+        }
     }
 };
 
 fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
+}
+
+fn eqlStringSlices(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |sa, sb| {
+        if (!std.mem.eql(u8, sa, sb)) return false;
+    }
+    return true;
 }
 
 pub fn parseBool(val: []const u8) !bool {
@@ -752,6 +801,7 @@ test "config: app forward loop mode defaults and effective override" {
         .projects = &[_]Project{},
         .frpc_nodes = undefined,
         .frps_nodes = undefined,
+        .wol_targets = undefined,
         .ddns_configs = &[_]DdnsConfig{},
     };
     const inherited = Project{
@@ -875,11 +925,16 @@ test "config: Config.eql with hashmaps" {
     var frps_c = std.StringHashMap(FrpsNode).init(allocator);
     try frps_c.put("srv1", FrpsNode{ .bind_port = 7000 });
 
+    const wol_a = std.StringHashMap(WolTarget).init(allocator);
+    const wol_b = std.StringHashMap(WolTarget).init(allocator);
+    const wol_c = std.StringHashMap(WolTarget).init(allocator);
+
     var cfg_a = Config{
         .log_config = .{ .file_path = "/tmp/test.log" },
         .projects = &[_]Project{},
         .frpc_nodes = frpc_a,
         .frps_nodes = frps_a,
+        .wol_targets = wol_a,
         .ddns_configs = &[_]DdnsConfig{},
     };
     var cfg_b = Config{
@@ -887,6 +942,7 @@ test "config: Config.eql with hashmaps" {
         .projects = &[_]Project{},
         .frpc_nodes = frpc_b,
         .frps_nodes = frps_b,
+        .wol_targets = wol_b,
         .ddns_configs = &[_]DdnsConfig{},
     };
     var cfg_c = Config{
@@ -894,6 +950,7 @@ test "config: Config.eql with hashmaps" {
         .projects = &[_]Project{},
         .frpc_nodes = frpc_c,
         .frps_nodes = frps_c,
+        .wol_targets = wol_c,
         .ddns_configs = &[_]DdnsConfig{},
     };
 
@@ -903,8 +960,11 @@ test "config: Config.eql with hashmaps" {
     // Clean up HashMap internals (keys are comptime literals, no free needed)
     cfg_a.frpc_nodes.deinit();
     cfg_a.frps_nodes.deinit();
+    cfg_a.wol_targets.deinit();
     cfg_b.frpc_nodes.deinit();
     cfg_b.frps_nodes.deinit();
+    cfg_b.wol_targets.deinit();
     cfg_c.frpc_nodes.deinit();
     cfg_c.frps_nodes.deinit();
+    cfg_c.wol_targets.deinit();
 }

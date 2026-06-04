@@ -38,11 +38,7 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         for (detect_protocols_list.items) |p| allocator.free(p);
     }
 
-    var wol_mac_addresses_list = std.array_list.Managed([]const u8).init(allocator);
-    defer wol_mac_addresses_list.deinit();
-    errdefer {
-        for (wol_mac_addresses_list.items) |m| allocator.free(m);
-    }
+
 
     var allowed_protocols_list = std.array_list.Managed([]const u8).init(allocator);
     defer allowed_protocols_list.deinit();
@@ -94,17 +90,14 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         }
 
         const is_detect_protocols = std.mem.eql(u8, opt_name, "detect_protocols");
-        const is_wol_mac_addresses = std.mem.eql(u8, opt_name, "wol_mac_addresses");
         const is_allowed_protocols = std.mem.eql(u8, opt_name, "allowed_protocols");
         const is_tls_allowed_snis = std.mem.eql(u8, opt_name, "tls_allowed_snis");
 
-        if (is_detect_protocols or is_wol_mac_addresses or is_allowed_protocols or is_tls_allowed_snis) {
+        if (is_detect_protocols or is_allowed_protocols or is_tls_allowed_snis) {
             if (opt.isString()) {
                 const opt_val = uci.cStr(opt.getString());
                 if (is_detect_protocols) {
                     try appendZoneString(&detect_protocols_list, allocator, opt_val);
-                } else if (is_wol_mac_addresses) {
-                    try appendZoneString(&wol_mac_addresses_list, allocator, opt_val);
                 } else if (is_allowed_protocols) {
                     try appendZoneString(&allowed_protocols_list, allocator, opt_val);
                 } else {
@@ -116,8 +109,6 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
                     const s = uci.cStr(val);
                     if (is_detect_protocols) {
                         try appendZoneString(&detect_protocols_list, allocator, s);
-                    } else if (is_wol_mac_addresses) {
-                        try appendZoneString(&wol_mac_addresses_list, allocator, s);
                     } else if (is_allowed_protocols) {
                         try appendZoneString(&allowed_protocols_list, allocator, s);
                     } else {
@@ -180,11 +171,8 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             }
         } else if (std.mem.eql(u8, opt_name, "enable_wol")) {
             project.enable_wol = try types.parseBool(opt_val);
-        } else if (std.mem.eql(u8, opt_name, "wol_cooldown_ms")) {
-            const cd_trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
-            if (cd_trimmed.len != 0) {
-                project.wol_cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch 30000;
-            }
+        } else if (std.mem.eql(u8, opt_name, "wol_target")) {
+            project.wol_target = try types.dupeIfNonEmpty(allocator, opt_val);
         } else if (std.mem.eql(u8, opt_name, "enable_protocol_filter")) {
             project.enable_protocol_filter = try types.parseBool(opt_val);
         }
@@ -230,9 +218,7 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
     if (detect_protocols_list.items.len != 0) {
         project.detect_protocols = try detect_protocols_list.toOwnedSlice();
     }
-    if (wol_mac_addresses_list.items.len != 0) {
-        project.wol_mac_addresses = try wol_mac_addresses_list.toOwnedSlice();
-    }
+
     if (allowed_protocols_list.items.len != 0) {
         project.allowed_protocols = try allowed_protocols_list.toOwnedSlice();
     }
@@ -320,6 +306,89 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         }
 
         try list.append(project);
+    }
+
+    // Parse WOL targets from UCI config
+    var wol_targets = std.StringHashMap(types.WolTarget).init(allocator);
+    errdefer {
+        var it = wol_targets.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        wol_targets.deinit();
+    }
+
+    var wol_sec_it = uci.sections(pkg);
+    while (wol_sec_it.next()) |sec| {
+        const sec_type = uci.cStr(sec.sectionType());
+        if (!std.mem.eql(u8, sec_type, "wol_target")) continue;
+
+        var wol_target = types.WolTarget{
+            .enabled = true,
+            .mac_addresses = &.{},
+            .cooldown_ms = 30000,
+        };
+        var target_name: []const u8 = "";
+        var mac_addresses_list = std.array_list.Managed([]const u8).init(allocator);
+        defer mac_addresses_list.deinit();
+        errdefer {
+            for (mac_addresses_list.items) |m| allocator.free(m);
+        }
+
+        // Get target name from section name or 'name' option
+        const sec_name = uci.cStr(sec.name());
+        if (sec_name.len > 0) {
+            target_name = sec_name;
+        }
+
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            const opt_name = uci.cStr(opt.name());
+            if (std.mem.eql(u8, opt_name, "mac_addresses") or std.mem.eql(u8, opt_name, "mac")) {
+                if (opt.isString()) {
+                    const opt_val = uci.cStr(opt.getString());
+                    try appendZoneString(&mac_addresses_list, allocator, opt_val);
+                } else if (opt.isList()) {
+                    var val_it = opt.values();
+                    while (val_it.next()) |val| {
+                        const s = uci.cStr(val);
+                        try appendZoneString(&mac_addresses_list, allocator, s);
+                    }
+                }
+                continue;
+            }
+
+            if (!opt.isString()) continue;
+            const opt_val = uci.cStr(opt.getString());
+
+            if (std.mem.eql(u8, opt_name, "name")) {
+                target_name = opt_val;
+            } else if (std.mem.eql(u8, opt_name, "enabled")) {
+                wol_target.enabled = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "log_enabled")) {
+                wol_target.log_enabled = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "cooldown_ms")) {
+                const cd_trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (cd_trimmed.len != 0) {
+                    wol_target.cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch 30000;
+                }
+            }
+        }
+
+        if (mac_addresses_list.items.len > 0) {
+            wol_target.mac_addresses = try mac_addresses_list.toOwnedSlice();
+        }
+
+        if (target_name.len == 0) {
+            wol_target.deinit(allocator);
+            continue;
+        }
+
+        const target_name_owned = try allocator.dupe(u8, target_name);
+        errdefer allocator.free(target_name_owned);
+
+        try wol_targets.put(target_name_owned, wol_target);
     }
 
     // Parse FRPC nodes from UCI config
@@ -669,13 +738,16 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try ddns_list.append(ddns_cfg);
     }
 
-    return .{
+    var cfg = types.Config{
         .log_config = log_config,
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
         .projects = try list.toOwnedSlice(),
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
+        .wol_targets = wol_targets,
         .ddns_configs = try ddns_list.toOwnedSlice(),
     };
+    cfg.resolveWolTargets();
+    return cfg;
 }

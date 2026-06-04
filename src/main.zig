@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
 
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, &handles, &cfg.frpc_nodes) catch |err| {
+        ubus_server.start(allocator, &handles, &cfg.frpc_nodes, &cfg.wol_targets) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
         };
     }

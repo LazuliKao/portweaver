@@ -54,10 +54,11 @@ const RuntimeState = struct {
     start_ts: u64,
     projects: *std.array_list.Managed(project_status.ProjectHandle),
     frpc_nodes: *const std.StringHashMap(types.FrpcNode),
+    wol_targets: *const std.StringHashMap(types.WolTarget),
     enabled: []bool,
     last_changed: []u64,
     mutex: std.Io.Mutex = .init,
-    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode)) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode), wol_targets: *const std.StringHashMap(types.WolTarget)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         errdefer allocator.destroy(state);
 
@@ -73,6 +74,7 @@ const RuntimeState = struct {
             .start_ts = now,
             .projects = projects,
             .frpc_nodes = frpc_nodes,
+            .wol_targets = wol_targets,
             .enabled = enabled,
             .last_changed = last_changed,
         };
@@ -172,6 +174,7 @@ const ddns_info_policy = [_]c.blobmsg_policy{
 
 const wol_project_policy = [_]c.blobmsg_policy{
     .{ .name = "project", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "target", .type = c.BLOBMSG_TYPE_STRING },
 };
 
 const restart_project_policy = [_]c.blobmsg_policy{
@@ -258,12 +261,12 @@ const field_names = struct {
     pub const project: [:0]const u8 = "project";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode)) !void {
+pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode), wol_targets: *const std.StringHashMap(types.WolTarget)) !void {
     g_lifecycle_mutex.lockUncancelable(compat.io());
     defer g_lifecycle_mutex.unlock(compat.io());
 
     if (g_state != null) return;
-    const state = try RuntimeState.init(allocator, projects, frpc_nodes);
+    const state = try RuntimeState.init(allocator, projects, frpc_nodes, wol_targets);
     g_state = state;
     errdefer {
         g_state = null;
@@ -743,7 +746,8 @@ const FullStatusResponse = struct {
 };
 
 const WolProjectArgs = struct {
-    project: []const u8,
+    project: ?[]const u8 = null,
+    target: ?[]const u8 = null,
 };
 
 const WolWakeResponse = struct {
@@ -1210,11 +1214,15 @@ fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !Reloa
     };
 }
 
-fn findProjectByName(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
+fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
     for (state.projects.items) |*project| {
         if (std.mem.eql(u8, project.cfg.remark, name)) {
             return project;
         }
+    }
+    const idx = std.fmt.parseUnsigned(usize, name, 10) catch return null;
+    if (idx < state.projects.items.len) {
+        return &state.projects.items[idx];
     }
     return null;
 }
@@ -1229,29 +1237,57 @@ fn getWolManager(allocator: std.mem.Allocator) *wol.WolManager {
 }
 
 fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolWakeResponse {
-    const project = findProjectByName(state, args.project) orelse return error.NotFound;
-    const cfg = project.cfg;
-    if (!cfg.enable_wol) {
-        return .{ .success = false, .sent_count = 0 };
-    }
-    if (cfg.wol_mac_addresses.len == 0) {
-        return .{ .success = true, .sent_count = 0 };
-    }
     const mgr = getWolManager(allocator);
-    wol.sendWoLWithCooldown(cfg.wol_mac_addresses, cfg.wol_cooldown_ms, mgr, @intCast(project.id));
-    return .{ .success = true, .sent_count = @intCast(cfg.wol_mac_addresses.len) };
+
+    if (args.target) |target_name| {
+        const target = state.wol_targets.get(target_name) orelse return error.NotFound;
+        if (!target.enabled) {
+            return .{ .success = false, .sent_count = 0 };
+        }
+        if (target.mac_addresses.len == 0) {
+            return .{ .success = true, .sent_count = 0 };
+        }
+        wol.sendWoLWithCooldown(target.mac_addresses, target.cooldown_ms, target.log_enabled, mgr, 9999);
+        return .{ .success = true, .sent_count = @intCast(target.mac_addresses.len) };
+    } else if (args.project) |project_name| {
+        const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
+        const cfg = project.cfg;
+        if (!cfg.enable_wol) {
+            return .{ .success = false, .sent_count = 0 };
+        }
+        if (cfg.resolved_wol_macs.len == 0) {
+            return .{ .success = true, .sent_count = 0 };
+        }
+        wol.sendWoLWithCooldown(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, mgr, @intCast(project.id));
+        return .{ .success = true, .sent_count = @intCast(cfg.resolved_wol_macs.len) };
+    } else {
+        return error.InvalidValue;
+    }
 }
 
 fn wolStatus(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolStatusResponse {
     _ = allocator;
-    const project = findProjectByName(state, args.project) orelse return error.NotFound;
-    const cfg = project.cfg;
-    return .{
-        .enabled = cfg.enable_wol,
-        .mac_count = @intCast(cfg.wol_mac_addresses.len),
-        .cooldown_ms = cfg.wol_cooldown_ms,
-        .detect_protocols = cfg.detect_protocols,
-    };
+
+    if (args.target) |target_name| {
+        const target = state.wol_targets.get(target_name) orelse return error.NotFound;
+        return .{
+            .enabled = target.enabled,
+            .mac_count = @intCast(target.mac_addresses.len),
+            .cooldown_ms = target.cooldown_ms,
+            .detect_protocols = &[_][]const u8{},
+        };
+    } else if (args.project) |project_name| {
+        const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
+        const cfg = project.cfg;
+        return .{
+            .enabled = cfg.enable_wol,
+            .mac_count = @intCast(cfg.resolved_wol_macs.len),
+            .cooldown_ms = cfg.resolved_wol_cooldown_ms,
+            .detect_protocols = cfg.detect_protocols,
+        };
+    } else {
+        return error.InvalidValue;
+    }
 }
 
 fn currentTs() u64 {

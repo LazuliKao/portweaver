@@ -179,7 +179,7 @@ pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
     var result = WolValidationResult{};
 
     // Validate MAC addresses
-    for (project.wol_mac_addresses) |mac_str| {
+    for (project.resolved_wol_macs) |mac_str| {
         if (wol.parseMac(mac_str) == null) {
             result.mac_errors += 1;
             if (result.first_error.len == 0) {
@@ -209,7 +209,7 @@ pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
     }
 
     // Validate cooldown range
-    if (project.wol_cooldown_ms < WOL_COOLDOWN_MIN_MS or project.wol_cooldown_ms > WOL_COOLDOWN_MAX_MS) {
+    if (project.resolved_wol_cooldown_ms < WOL_COOLDOWN_MIN_MS or project.resolved_wol_cooldown_ms > WOL_COOLDOWN_MAX_MS) {
         result.cooldown_error = true;
         if (result.first_error.len == 0) {
             result.first_error = "Cooldown out of range";
@@ -243,10 +243,10 @@ test "validateWolConfig: valid config with all fields passes" {
         .target_address = "192.168.1.100",
         .target_port = 3389,
         .enable_wol = true,
-        .wol_mac_addresses = &.{ "AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66" },
+        .resolved_wol_macs = &.{ "AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66" },
         .detect_protocols = &.{ "rdp", "ssh" },
         .allowed_protocols = &.{ "rdp", "ssh", "http" },
-        .wol_cooldown_ms = 30000,
+        .resolved_wol_cooldown_ms = 30000,
         .enable_protocol_filter = true,
     };
     const result = validateWolConfig(&proj);
@@ -269,7 +269,7 @@ test "validateWolConfig: invalid MAC address rejected" {
         .target_address = "192.168.1.100",
         .target_port = 3389,
         .enable_wol = true,
-        .wol_mac_addresses = &.{ "AA:BB:CC:DD:EE:FF", "not-a-mac" },
+        .resolved_wol_macs = &.{ "AA:BB:CC:DD:EE:FF", "not-a-mac" },
     };
     const result = validateWolConfig(&proj);
     try std.testing.expect(!result.isValid());
@@ -306,7 +306,7 @@ test "validateWolConfig: cooldown too low rejected" {
         .listen_port = 3389,
         .target_address = "192.168.1.100",
         .target_port = 3389,
-        .wol_cooldown_ms = 500,
+        .resolved_wol_cooldown_ms = 500,
     };
     const result = validateWolConfig(&proj);
     try std.testing.expect(!result.isValid());
@@ -318,7 +318,7 @@ test "validateWolConfig: cooldown too high rejected" {
         .listen_port = 3389,
         .target_address = "192.168.1.100",
         .target_port = 3389,
-        .wol_cooldown_ms = 400000,
+        .resolved_wol_cooldown_ms = 400000,
     };
     const result = validateWolConfig(&proj);
     try std.testing.expect(!result.isValid());
@@ -331,7 +331,7 @@ test "validateWolConfig: cooldown at boundaries accepted" {
         .listen_port = 3389,
         .target_address = "192.168.1.100",
         .target_port = 3389,
-        .wol_cooldown_ms = 1000,
+        .resolved_wol_cooldown_ms = 1000,
     };
     try std.testing.expect(validateWolConfig(&proj_min).isValid());
 
@@ -340,7 +340,7 @@ test "validateWolConfig: cooldown at boundaries accepted" {
         .listen_port = 3389,
         .target_address = "192.168.1.100",
         .target_port = 3389,
-        .wol_cooldown_ms = 300000,
+        .resolved_wol_cooldown_ms = 300000,
     };
     try std.testing.expect(validateWolConfig(&proj_max).isValid());
 }
@@ -350,9 +350,9 @@ test "validateWolConfig: multiple errors collected" {
         .listen_port = 3389,
         .target_address = "192.168.1.100",
         .target_port = 3389,
-        .wol_mac_addresses = &.{ "bad-mac1", "bad-mac2" },
+        .resolved_wol_macs = &.{ "bad-mac1", "bad-mac2" },
         .detect_protocols = &.{"fakeproto"},
-        .wol_cooldown_ms = 50,
+        .resolved_wol_cooldown_ms = 50,
     };
     const result = validateWolConfig(&proj);
     try std.testing.expect(!result.isValid());

@@ -394,6 +394,7 @@ fn makeTestConfig(alloc: std.mem.Allocator, projects: []const types.Project) !ty
         .projects = try alloc.dupe(types.Project, projects),
         .frpc_nodes = std.StringHashMap(types.FrpcNode).init(alloc),
         .frps_nodes = std.StringHashMap(types.FrpsNode).init(alloc),
+        .wol_targets = std.StringHashMap(types.WolTarget).init(alloc),
         .ddns_configs = try alloc.alloc(types.DdnsConfig, 0),
         .log_config = .{ .enabled = false, .file_path = "", .max_size = 0, .max_files = 0 },
     };

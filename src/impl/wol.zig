@@ -119,9 +119,7 @@ pub fn parseMac(mac_str: []const u8) ?[6]u8 {
     return result;
 }
 
-/// Iterate a list of MAC strings, check cooldown for each, and send WoL if eligible.
-/// Logs events via event_log. All errors are caught and logged — never propagated.
-pub fn sendWoLWithCooldown(mac_list: []const []const u8, cooldown_ms: u64, wol_mgr: *WolManager, project_id: i32) void {
+pub fn sendWoLWithCooldown(mac_list: []const []const u8, cooldown_ms: u64, log_enabled: bool, wol_mgr: *WolManager, project_id: i32) void {
     var sent_count: u32 = 0;
     var skipped_count: u32 = 0;
     var error_count: u32 = 0;
@@ -129,22 +127,34 @@ pub fn sendWoLWithCooldown(mac_list: []const []const u8, cooldown_ms: u64, wol_m
     for (mac_list) |mac_str| {
         const mac = parseMac(mac_str) orelse {
             event_log.logEventFmt(.warning, project_id, "WoL: invalid MAC address: {s}", .{mac_str});
+            if (log_enabled) {
+                std.log.warn("[WoL] invalid MAC address: {s}", .{mac_str});
+            }
             error_count += 1;
             continue;
         };
 
         if (!wol_mgr.shouldSend(mac_str, cooldown_ms)) {
             skipped_count += 1;
+            if (log_enabled) {
+                std.log.info("[WoL] skip sending to {s} (cooldown active)", .{mac_str});
+            }
             continue;
         }
 
         sendMagicPacket(mac) catch |err| {
             event_log.logEventFmt(.warning, project_id, "WoL: send failed for {s}: {}", .{ mac_str, err });
+            if (log_enabled) {
+                std.log.err("[WoL] send failed to {s}: {any}", .{ mac_str, err });
+            }
             error_count += 1;
             continue;
         };
 
         sent_count += 1;
+        if (log_enabled) {
+            std.log.info("[WoL] successfully sent magic packet to {s}", .{mac_str});
+        }
     }
 
     // Log summary if any MACs were processed

@@ -127,9 +127,9 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
         // WoL: trigger if protocol is in detect list
         if (cfg.enable_wol) {
             if (containsProtocol(cfg.detect_protocols, proto_str)) {
-                if (cfg.wol_mac_addresses.len > 0) {
+                if (cfg.resolved_wol_macs.len > 0) {
                     const mgr = getWolManager(ctx.allocator);
-                    wol.sendWoLWithCooldown(cfg.wol_mac_addresses, cfg.wol_cooldown_ms, mgr, @intCast(ctx.project_id));
+                    wol.sendWoLWithCooldown(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, mgr, @intCast(ctx.project_id));
                 }
             }
         }

@@ -165,14 +165,15 @@ pub fn parseArgs(comptime T: type, msg: ?*c.blob_attr, comptime policy: []const 
             };
         };
 
-        const attr = tb[idx] orelse {
+        if (tb[idx]) |attr| {
+            @field(result, field.name) = try parseAttr(field.type, attr);
+        } else {
             if (@typeInfo(field.type) == .optional) {
                 @field(result, field.name) = null;
-                continue;
+            } else {
+                return error.InvalidArgument;
             }
-            return error.InvalidArgument;
-        };
-        @field(result, field.name) = try parseAttr(field.type, attr);
+        }
     }
     return result;
 }

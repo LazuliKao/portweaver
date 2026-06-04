@@ -67,6 +67,13 @@
             "$ref": "#/definitions/Project"
           },
           "type": "array"
+        },
+        "wol_targets": {
+          "additionalProperties": {
+            "$ref": "#/definitions/WolTarget"
+          },
+          "description": "Wake-on-LAN target configurations",
+          "type": "object"
         }
       },
       "required": [
@@ -530,16 +537,9 @@
           },
           "type": "array"
         },
-        "wol_cooldown_ms": {
-          "description": "Wake-on-LAN magic packet send cooldown (ms)",
-          "type": "number"
-        },
-        "wol_mac_addresses": {
-          "description": "MAC addresses for Wake-on-LAN",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "wol_target": {
+          "description": "Wake-on-LAN target name reference",
+          "type": "string"
         }
       },
       "required": [
@@ -555,6 +555,32 @@
         "udp"
       ],
       "type": "string"
+    },
+    "WolTarget": {
+      "additionalProperties": false,
+      "description": "Wake-on-LAN target configuration",
+      "properties": {
+        "enabled": {
+          "description": "Whether this target is enabled",
+          "type": "boolean"
+        },
+        "mac_addresses": {
+          "description": "MAC addresses for this target",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cooldown_ms": {
+          "description": "Wake-on-LAN magic packet send cooldown (ms)",
+          "type": "number"
+        },
+        "log_enabled": {
+          "description": "Enable WoL logs for this target",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     }
   },
   "description": "PortWeaver configuration Supports two formats: 1. Object: { projects: [...], frpc_nodes: {...}, ... } 2. Array: Project[] (shorthand, only projects)"
