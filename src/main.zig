@@ -242,6 +242,9 @@ pub fn main(init: std.process.Init) !void {
                 .reload => {
                     std.log.info("Configuration reload requested...", .{});
                     reload.apply();
+                    if (build_options.ubus_mode) {
+                        ubus_server.notifyReload();
+                    }
                 },
             }
         }

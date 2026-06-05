@@ -31,6 +31,16 @@ fn familyAddrKeyword(family: ?types.AddressFamily) []const u8 {
     };
 }
 
+fn isIp4(str: []const u8) bool {
+    _ = std.Io.net.IpAddress.parseIp4(str, 0) catch return false;
+    return true;
+}
+
+fn isIp6(str: []const u8) bool {
+    _ = std.Io.net.IpAddress.parseIp6(str, 0) catch return false;
+    return true;
+}
+
 fn dnatTargetSpec(
     allocator: std.mem.Allocator,
     family: ?types.AddressFamily,
@@ -155,6 +165,17 @@ pub fn addAcceptRule(
     };
     std.log.info("[NFT] ACCEPT {s}/{s} dport {s} ({s})", .{ proto, family_str, port_str, remark });
 
+    if (enable_firewall_stats) {
+        const counter_cmd = try std.fmt.allocPrintSentinel(
+            allocator,
+            "add counter {s} pw_{s}_{s}_accept",
+            .{ NFT_TABLE, port_str, proto },
+            0,
+        );
+        defer allocator.free(counter_cmd);
+        try runCommandLogged(ctx, counter_cmd);
+    }
+
     const cmd = if (enable_firewall_stats)
         try std.fmt.allocPrintSentinel(
             allocator,
@@ -190,6 +211,18 @@ pub fn addNatRule(
 ) !void {
     std.log.info("[NFT] SRCNAT {s} dport {s} -> {s}:{s} (preserve-src-ip, remark={s})", .{ proto, listen_port, dest_ip, dest_port, remark });
     const addr_keyword = familyAddrKeyword(family);
+
+    if (enable_firewall_stats) {
+        const counter_cmd = try std.fmt.allocPrintSentinel(
+            allocator,
+            "add counter {s} pw_{s}_{s}_srcnat",
+            .{ NFT_TABLE, listen_port, proto },
+            0,
+        );
+        defer allocator.free(counter_cmd);
+        try runCommandLogged(ctx, counter_cmd);
+    }
+
     const cmd = if (enable_firewall_stats)
         try std.fmt.allocPrintSentinel(
             allocator,
@@ -227,6 +260,17 @@ pub fn addRedirectRule(
 ) !void {
     _ = dest_zone;
 
+    if (family) |fam| {
+        if (fam == .ipv6 and isIp4(dest_ip)) {
+            std.log.info("[NFT] Skipping IPv6 redirect rule for IPv4 destination: {s}", .{dest_ip});
+            return;
+        }
+        if (fam == .ipv4 and isIp6(dest_ip)) {
+            std.log.info("[NFT] Skipping IPv4 redirect rule for IPv6 destination: {s}", .{dest_ip});
+            return;
+        }
+    }
+
     std.log.info("[NFT] DNAT {s} iif={s} dport {s} -> {s}:{s} (remark={s})", .{ proto, src_zone, listen_port, dest_ip, dest_port, remark });
 
     if (preserve_source_ip) {
@@ -235,6 +279,17 @@ pub fn addRedirectRule(
 
     const dnat_spec = try dnatTargetSpec(allocator, family, dest_ip, dest_port);
     defer allocator.free(dnat_spec);
+
+    if (enable_firewall_stats) {
+        const counter_cmd = try std.fmt.allocPrintSentinel(
+            allocator,
+            "add counter {s} pw_{s}_{s}_dstnat",
+            .{ NFT_TABLE, listen_port, proto },
+            0,
+        );
+        defer allocator.free(counter_cmd);
+        try runCommandLogged(ctx, counter_cmd);
+    }
 
     const cmd = if (enable_firewall_stats)
         try std.fmt.allocPrintSentinel(
@@ -656,8 +711,8 @@ test "applyRulesForProject handles family expansion" {
 
     try applyRulesForProject(&mock, allocator, project);
 
-    // .any -> ipv4+ipv6 for both accept and redirect = 4 commands
-    try std.testing.expectEqual(@as(usize, 4), mock.commands.items.len);
+    // .any -> ipv4+ipv6 for accept = 2 commands, only ipv6 for redirect = 1 command. Total = 3 commands.
+    try std.testing.expectEqual(@as(usize, 3), mock.commands.items.len);
 
     // Verify IPv6 DNAT uses ip6 syntax
     var found_ipv6_dnat = false;
@@ -672,19 +727,21 @@ test "applyRulesForProject handles multi-port mode" {
     var mock = MockContext.init(allocator);
     defer mock.deinit();
 
-    const mappings = [_]types.PortMapping{
+    var mappings = [_]types.PortMapping{
         .{ .listen_port = "8080-8090", .target_port = "80-90", .protocol = .tcp },
     };
     const project = types.Project{
         .target_address = "192.168.1.100",
         .port_mappings = &mappings,
         .remark = "test",
+        .listen_port = 0,
+        .target_port = 0,
     };
 
     try applyRulesForProject(&mock, allocator, project);
 
-    // 1 accept + 1 redirect = 2 commands
-    try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
+    // .any -> ipv4+ipv6 for accept = 2 commands, only ipv4 for redirect = 1 command. Total = 3 commands.
+    try std.testing.expectEqual(@as(usize, 3), mock.commands.items.len);
 
     var found_port_range = false;
     for (mock.commands.items) |cmd| {
@@ -724,10 +781,10 @@ test "addAcceptRule with firewall stats injects counter" {
 
     try addAcceptRule(&mock, allocator, "tcp", "80", "web", .ipv4, true);
 
-    try std.testing.expectEqual(@as(usize, 1), mock.commands.items.len);
-    const cmd = mock.commands.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "counter name \"pw_80_tcp_accept\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "accept") != null);
+    try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[0], "add counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "counter name \"pw_80_tcp_accept\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "accept") != null);
 }
 
 test "addRedirectRule with firewall stats injects dstnat counter" {
@@ -737,10 +794,10 @@ test "addRedirectRule with firewall stats injects dstnat counter" {
 
     try addRedirectRule(&mock, allocator, "wan", "tcp", "80", "lan", "192.168.1.100", "8080", "web", .ipv4, false, true);
 
-    try std.testing.expectEqual(@as(usize, 1), mock.commands.items.len);
-    const cmd = mock.commands.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "counter name \"pw_80_tcp_dstnat\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cmd, "dnat ip to 192.168.1.100:8080") != null);
+    try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[0], "add counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "counter name \"pw_80_tcp_dstnat\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "dnat ip to 192.168.1.100:8080") != null);
 }
 
 test "addRedirectRule with firewall stats and preserve_source_ip adds both counters" {
@@ -750,10 +807,12 @@ test "addRedirectRule with firewall stats and preserve_source_ip adds both count
 
     try addRedirectRule(&mock, allocator, "wan", "tcp", "80", "lan", "192.168.1.100", "8080", "web", .ipv4, true, true);
 
-    // srcnat + dstnat = 2 commands, both with counters
-    try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[0], "counter name \"pw_80_tcp_srcnat\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "counter name \"pw_80_tcp_dstnat\"") != null);
+    // srcnat counter + srcnat rule + dstnat counter + dstnat rule = 4 commands
+    try std.testing.expectEqual(@as(usize, 4), mock.commands.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[0], "add counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "counter name \"pw_80_tcp_srcnat\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[2], "add counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[3], "counter name \"pw_80_tcp_dstnat\"") != null);
 }
 
 test "applyRulesForProject with enable_firewall_stats adds counters to all rules" {
@@ -773,10 +832,10 @@ test "applyRulesForProject with enable_firewall_stats adds counters to all rules
 
     try applyRulesForProject(&mock, allocator, project);
 
-    // accept + redirect = 2 commands, both with counters
-    try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
+    // accept counter + accept rule + redirect counter + redirect rule = 4 commands
+    try std.testing.expectEqual(@as(usize, 4), mock.commands.items.len);
     for (mock.commands.items) |cmd| {
-        try std.testing.expect(std.mem.indexOf(u8, cmd, "counter name") != null);
+        try std.testing.expect(std.mem.indexOf(u8, cmd, "add counter") != null or std.mem.indexOf(u8, cmd, "counter name") != null);
     }
 }
 
@@ -811,11 +870,10 @@ test "counter name contains port and protocol" {
     // Port range
     try addAcceptRule(&mock, allocator, "udp", "8080-8090", "test", .any, true);
 
-    // .any → 2 commands (ipv4 + ipv6), both sharing the same counter name
+    // .any → 1 accept rule preceded by 1 add counter command = 2 commands
     try std.testing.expectEqual(@as(usize, 2), mock.commands.items.len);
-    for (mock.commands.items) |cmd| {
-        try std.testing.expect(std.mem.indexOf(u8, cmd, "counter name \"pw_8080-8090_udp_accept\"") != null);
-    }
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[0], "add counter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.commands.items[1], "counter name \"pw_8080-8090_udp_accept\"") != null);
 }
 
 test "parseCounterJson extracts packets and bytes" {

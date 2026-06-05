@@ -345,17 +345,53 @@ fn takeOverExistingInstance(allocator: std.mem.Allocator, pid_file_path: []const
 
     if (existing_pid) |pid| {
         std.log.warn("Stopping previous PortWeaver instance (PID: {s})...", .{pid});
-        killProcess(allocator, pid) catch |err| {
-            std.log.warn("Failed to stop previous instance cleanly: {any}", .{err});
+        const pid_int = std.fmt.parseInt(i32, pid, 10) catch |err| {
+            std.log.warn("Failed to parse PID string '{s}': {any}", .{ pid, err });
+            return waitForLockRelease(pid_file_path, lock_retry_attempts);
         };
+
+        if (pid_int <= 1) {
+            std.log.warn("Parsed invalid PID '{d}' from PID file", .{pid_int});
+            return waitForLockRelease(pid_file_path, lock_retry_attempts);
+        }
+
+        // 1. Send SIGTERM
+        const term_result = std.c.kill(pid_int, std.posix.SIG.TERM);
+        if (term_result != 0) {
+            std.log.warn("SIGTERM to PID {d} failed (might not exist or permission denied)", .{pid_int});
+        }
+
+        // 2. Wait up to 5 seconds for lock release (50 attempts * 100ms)
+        if (waitForLockRelease(pid_file_path, 50)) |file| {
+            return file;
+        } else |err| switch (err) {
+            error.OldProcessStillRunning => {
+                // Lock still held, check if process is alive
+                if (std.c.kill(pid_int, @enumFromInt(0)) == 0) {
+                    std.log.warn("Previous PortWeaver instance (PID: {d}) did not exit after SIGTERM; sending SIGKILL...", .{pid_int});
+                    const kill_result = std.c.kill(pid_int, std.posix.SIG.KILL);
+                    if (kill_result != 0) {
+                        std.log.err("SIGKILL to PID {d} failed", .{pid_int});
+                    }
+
+                    // 3. Wait up to 5 seconds for lock release after SIGKILL
+                    return waitForLockRelease(pid_file_path, 50);
+                } else {
+                    // Process is not running, but lock is still held?
+                    // Let's try one more time to acquire lock (or it might be a stale lock/ownership issue)
+                    return waitForLockRelease(pid_file_path, 50);
+                }
+            },
+            else => return err,
+        }
     }
 
-    return waitForLockRelease(pid_file_path);
+    return waitForLockRelease(pid_file_path, lock_retry_attempts);
 }
 
-fn waitForLockRelease(pid_file_path: []const u8) !std.Io.File {
+fn waitForLockRelease(pid_file_path: []const u8, attempts: usize) !std.Io.File {
     var attempt: usize = 0;
-    while (attempt < lock_retry_attempts) : (attempt += 1) {
+    while (attempt < attempts) : (attempt += 1) {
         const file = acquireLockFile(pid_file_path) catch |err| switch (err) {
             error.WouldBlock => {
                 compat.sleepNanos(lock_retry_interval_ns);
@@ -411,58 +447,6 @@ fn writeCurrentPid(allocator: std.mem.Allocator, file: std.Io.File) !void {
     try file.setLength(compat.io(), 0);
     try file.writeStreamingAll(compat.io(), pid_str);
     try file.sync(compat.io());
-}
-
-/// Kills process by PID.
-fn killProcess(allocator: std.mem.Allocator, pid_str: []const u8) !void {
-    if (builtin.os.tag == .windows) {
-        try killProcessWindows(allocator, pid_str);
-    } else {
-        try killProcessUnix(pid_str);
-    }
-}
-
-/// Unix/Linux implementation: send SIGTERM, then SIGKILL if necessary.
-fn killProcessUnix(pid_str: []const u8) !void {
-    const pid = try std.fmt.parseInt(i32, pid_str, 10);
-
-    const term_result = std.c.kill(pid, std.posix.SIG.TERM);
-    if (term_result != 0) {
-        std.log.warn("SIGTERM failed, trying SIGKILL...", .{});
-
-        const kill_result = std.c.kill(pid, std.posix.SIG.KILL);
-        if (kill_result != 0) {
-            return error.KillFailed;
-        }
-    }
-}
-
-/// Windows implementation: use taskkill, then force with /F if needed.
-fn killProcessWindows(allocator: std.mem.Allocator, pid_str: []const u8) !void {
-    if (runProcess(allocator, &[_][]const u8{ "taskkill", "/PID", pid_str })) {
-        return;
-    } else |_| {
-        std.log.warn("taskkill /PID failed, trying force mode...", .{});
-    }
-
-    if (runProcess(allocator, &[_][]const u8{ "taskkill", "/F", "/PID", pid_str })) {
-        return;
-    } else |err| {
-        std.log.warn("taskkill /F /PID failed: {any}", .{err});
-        return error.KillFailed;
-    }
-}
-
-fn runProcess(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const result = try std.process.run(allocator, compat.io(), .{ .argv = argv });
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-
-    if (result.term != .exited or result.term.exited != 0) {
-        return error.ProcessCommandFailed;
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────

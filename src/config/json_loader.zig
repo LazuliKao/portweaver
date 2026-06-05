@@ -377,8 +377,6 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         defer detect_protocols_list.deinit(a);
         errdefer for (detect_protocols_list.items) |p| a.free(p);
 
-
-
         var allowed_protocols_list: std.ArrayList([]const u8) = .empty;
         defer allowed_protocols_list.deinit(a);
         errdefer for (allowed_protocols_list.items) |p| a.free(p);
@@ -1036,11 +1034,11 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                     }
 
                     if (target_obj.object.get("enabled")) |v| {
-                         if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| wol_target.enabled = b;
+                        if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| wol_target.enabled = b;
                     }
 
                     if (target_obj.object.get("log_enabled")) |v| {
-                         if (parseJsonBool(v, ec.fieldPath("{s}.log_enabled", .{np}), ec)) |b| wol_target.log_enabled = b;
+                        if (parseJsonBool(v, ec.fieldPath("{s}.log_enabled", .{np}), ec)) |b| wol_target.log_enabled = b;
                     }
 
                     if (mac_list.items.len > 0) {

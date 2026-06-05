@@ -38,8 +38,6 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         for (detect_protocols_list.items) |p| allocator.free(p);
     }
 
-
-
     var allowed_protocols_list = std.array_list.Managed([]const u8).init(allocator);
     defer allowed_protocols_list.deinit();
     errdefer {

@@ -86,6 +86,9 @@ pub const NftablesContext = struct {
     }
 
     pub fn listRules(self: *Self) ?[:0]const u8 {
+        // Clear output flags (e.g. REVERSEDNS and SERVICE) to prevent slow DNS lookups and resolve UBUS timeouts
+        self.setOutputFlags(0) catch {};
+
         self.runCommand("list table inet portweaver") catch {
             // Table might not exist yet
             return null;

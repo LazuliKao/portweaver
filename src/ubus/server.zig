@@ -93,9 +93,51 @@ const RuntimeState = struct {
         self.allocator.destroy(self);
     }
 
+    fn syncFromProjectsLocked(self: *RuntimeState) !void {
+        const new_len = self.projects.items.len;
+        const new_enabled = try self.allocator.alloc(bool, new_len);
+        errdefer self.allocator.free(new_enabled);
+        const new_last_changed = try self.allocator.alloc(u64, new_len);
+        errdefer self.allocator.free(new_last_changed);
+
+        const now = currentTs();
+        for (0..new_len) |i| {
+            const project = &self.projects.items[i];
+            const is_enabled = project.cfg.enabled;
+            new_enabled[i] = is_enabled;
+
+            if (i < self.enabled.len) {
+                if (self.enabled[i] != is_enabled) {
+                    new_last_changed[i] = now;
+                } else {
+                    new_last_changed[i] = self.last_changed[i];
+                }
+            } else {
+                new_last_changed[i] = now;
+            }
+        }
+
+        self.allocator.free(self.enabled);
+        self.allocator.free(self.last_changed);
+        self.enabled = new_enabled;
+        self.last_changed = new_last_changed;
+    }
+
+    pub fn syncFromProjects(self: *RuntimeState) !void {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+        try self.syncFromProjectsLocked();
+    }
+
     fn globalSnapshot(self: *RuntimeState) GlobalSnapshot {
         self.mutex.lockUncancelable(compat.io());
         defer self.mutex.unlock(compat.io());
+
+        if (self.enabled.len != self.projects.items.len) {
+            self.syncFromProjectsLocked() catch |err| {
+                std.log.err("ubus: failed to sync state in snapshot: {any}", .{err});
+            };
+        }
 
         var enabled_projects: u32 = 0;
         var success_projects: u32 = 0;
@@ -779,6 +821,10 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
     state.mutex.lockUncancelable(compat.io());
     defer state.mutex.unlock(compat.io());
 
+    if (state.enabled.len != state.projects.items.len) {
+        try state.syncFromProjectsLocked();
+    }
+
     var projects_list: std.ArrayList(ProjectStatusInfo) = .empty;
     errdefer projects_list.deinit(allocator);
 
@@ -830,16 +876,29 @@ fn setEnabled(allocator: std.mem.Allocator, state: *RuntimeState, args: SetEnabl
     state.mutex.lockUncancelable(compat.io());
     defer state.mutex.unlock(compat.io());
 
+    if (state.enabled.len != state.projects.items.len) {
+        try state.syncFromProjectsLocked();
+    }
+
     if (idx >= state.projects.items.len) {
         return error.InvalidArgument;
     }
 
+    const old_enabled = state.enabled[idx];
     state.enabled[idx] = args.enabled;
     const now = currentTs();
     state.last_changed[idx] = now;
 
     var project = &state.projects.items[idx];
     project.setRuntimeEnabled(args.enabled);
+
+    if (old_enabled != args.enabled) {
+        if (args.enabled) {
+            event_log.logEventFmt(.project_started, @intCast(idx), "Project {d} enabled via UBUS", .{idx + 1});
+        } else {
+            event_log.logEventFmt(.project_stopped, @intCast(idx), "Project {d} disabled via UBUS", .{idx + 1});
+        }
+    }
 
     return .{
         .id = args.id,
@@ -1155,7 +1214,8 @@ fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNfta
     };
     defer ctx.deinit();
 
-    const rules = ctx.listRules() orelse "No rules found or table does not exist";
+    const rules_raw = ctx.listRules() orelse "No rules found or table does not exist";
+    const rules = try allocator.dupe(u8, rules_raw);
     return .{ .rules = rules };
 }
 
@@ -1201,11 +1261,12 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
 
 fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !ReloadConfigResponse {
     _ = allocator;
-    _ = state;
 
     // Delegate to the shared reload module — it handles config re-reading,
     // diff comparison, teardown, restart, firewall refresh, and sub-service reload.
     reload.apply();
+
+    try state.syncFromProjects();
 
     return .{
         .success = true,
@@ -1294,4 +1355,14 @@ fn currentTs() u64 {
     const seconds = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
     if (seconds < 0) return 0;
     return @intCast(seconds);
+}
+
+pub fn notifyReload() void {
+    g_lifecycle_mutex.lockUncancelable(compat.io());
+    defer g_lifecycle_mutex.unlock(compat.io());
+    if (g_state) |state| {
+        state.syncFromProjects() catch |err| {
+            std.log.err("ubus: failed to sync state after reload: {any}", .{err});
+        };
+    }
 }

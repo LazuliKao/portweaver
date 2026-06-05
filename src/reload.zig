@@ -183,6 +183,9 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
             continue;
         }
 
+        const was_enabled = old_projects[i].enabled;
+        const is_enabled = new_projects[i].enabled;
+
         // Config changed — teardown and restart
         std.log.info("Reload: project {d} ({s}) config changed, restarting", .{ i + 1, new_projects[i].remark });
         handle.teardownForwarders();
@@ -192,6 +195,14 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
             startForwardingForHandle(alloc, handle, new_cfg);
         }
         changed += 1;
+
+        if (was_enabled != is_enabled) {
+            if (is_enabled) {
+                event_log.logEventFmt(.project_started, @intCast(i), "Project {d} enabled via reload", .{i + 1});
+            } else {
+                event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} disabled via reload", .{i + 1});
+            }
+        }
     }
 
     // 2) Update cfg pointers for unchanged projects beyond common range
@@ -212,11 +223,13 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
 
         if (!new_projects[i].enabled) {
             handle.setDisabled();
+            event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} added (disabled)", .{i + 1});
             continue;
         }
 
         startForwardingForHandle(alloc, handle, new_cfg);
         changed += 1;
+        event_log.logEventFmt(.project_started, @intCast(i), "Project {d} added and enabled", .{i + 1});
     }
 
     // 4) Disable removed projects (old projects beyond new config length)
@@ -227,6 +240,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
                 std.log.info("Reload: disabling removed project {d} ({s})", .{ i + 1, handle.cfg.remark });
                 handle.teardownForwarders();
                 handle.setDisabled();
+                event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} removed", .{i + 1});
             }
         }
     }

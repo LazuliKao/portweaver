@@ -47,7 +47,7 @@ var fn_nft_ctx_output_json_schema: ?nft_ctx_output_json_schema_fn = null;
 
 fn ensureLibLoaded() !void {
     if (lib_loader.isLoaded()) return;
-    try lib_loader.load("nftables");
+    try lib_loader.load("libnftables");
 }
 
 fn loadFunction(comptime T: type, comptime name: [:0]const u8, cache: *?T) !T {
@@ -158,5 +158,7 @@ pub inline fn nft_ctx_output_json_schema(ctx: ?*c.nft_ctx, json_schema: [*:0]con
 }
 
 pub fn isLoaded() bool {
+    if (lib_loader.isLoaded()) return true;
+    ensureLibLoaded() catch return false;
     return lib_loader.isLoaded();
 }
