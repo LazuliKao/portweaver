@@ -316,6 +316,9 @@ pub const PortMapping = struct {
 
 /// One port-forwarding project/rule.
 pub const Project = struct {
+    /// UCI section name (e.g. "cfg06283b" or "project_1")
+    /// Used for index-independent status matching with frontend
+    section_name: []const u8 = "",
     /// 是否启用此规则
     enabled: bool = true,
     /// 备注
@@ -381,6 +384,7 @@ pub const Project = struct {
     /// 支持通配符如 "*.example.com"
     tls_allowed_snis: []const []const u8 = &[_][]const u8{},
     pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
+        if (self.section_name.len != 0) allocator.free(self.section_name);
         if (self.remark.len != 0) allocator.free(self.remark);
         if (self.src_zones.len != 0) {
             for (self.src_zones) |z| allocator.free(z);

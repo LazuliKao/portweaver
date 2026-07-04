@@ -624,6 +624,7 @@ const ForwarderStatsInfo = struct {
 
 const ProjectStatusInfo = struct {
     id: u32,
+    section_name: []const u8,
     enabled: bool,
     status: []const u8,
     startup_status: []const u8,
@@ -849,6 +850,7 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
 
         try projects_list.append(allocator, .{
             .id = @intCast(i),
+            .section_name = project.cfg.section_name,
             .enabled = state.enabled[i],
             .status = if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED,
             .startup_status = project.startup_status.toString(),

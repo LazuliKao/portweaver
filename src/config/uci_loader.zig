@@ -224,6 +224,12 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         project.tls_allowed_snis = try tls_allowed_snis_list.toOwnedSlice();
     }
 
+    // Store the UCI section name for index-independent status matching
+    const sec_name = uci.cStr(sec.name());
+    if (sec_name.len > 0) {
+        project.section_name = try allocator.dupe(u8, sec_name);
+    }
+
     return project;
 }
 
