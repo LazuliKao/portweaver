@@ -142,6 +142,8 @@ pub const DdnsStatusResponse = struct {
     status: []const u8,
     last_error: []const u8,
     logs: [][]const u8,
+    last_ip: []const u8,
+    last_update: i64,
 };
 
 pub const DdnsInstance = struct {
@@ -348,6 +350,7 @@ pub const DdnsInstance = struct {
         for (response.logs) |*log| {
             log.* = try self.allocator.dupe(u8, log.*);
         }
+        response.last_ip = try self.allocator.dupe(u8, response.last_ip);
 
         return response;
     }

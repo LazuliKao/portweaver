@@ -384,13 +384,35 @@ pub fn getStatus(allocator: std.mem.Allocator) ![]DdnsStatus {
         holder.lock.lockUncancelable(compat.io());
         defer holder.lock.unlock(compat.io());
 
+        const response = holder.instance.getStatusAndLogs() catch |err| {
+            std.log.warn("Failed to get status and logs for {s}: {any}", .{ holder.config.name, err });
+            try list.append(.{
+                .name = try allocator.dupe(u8, holder.config.name),
+                .provider = try allocator.dupe(u8, holder.config.dns_provider),
+                .status = try allocator.dupe(u8, holder.last_status),
+                .last_update = holder.last_update,
+                .last_ip = try allocator.dupe(u8, holder.last_ip),
+                .message = try allocator.dupe(u8, holder.last_message),
+            });
+            continue;
+        };
+        defer {
+            allocator.free(response.status);
+            allocator.free(response.last_error);
+            for (response.logs) |log| {
+                allocator.free(log);
+            }
+            allocator.free(response.logs);
+            allocator.free(response.last_ip);
+        }
+
         try list.append(.{
             .name = try allocator.dupe(u8, holder.config.name),
             .provider = try allocator.dupe(u8, holder.config.dns_provider),
-            .status = try allocator.dupe(u8, holder.last_status),
-            .last_update = holder.last_update,
-            .last_ip = try allocator.dupe(u8, holder.last_ip),
-            .message = try allocator.dupe(u8, holder.last_message),
+            .status = try allocator.dupe(u8, response.status),
+            .last_update = response.last_update,
+            .last_ip = try allocator.dupe(u8, response.last_ip),
+            .message = try allocator.dupe(u8, response.last_error),
         });
     }
 
@@ -415,6 +437,7 @@ pub fn getInstanceStatus(allocator: std.mem.Allocator, name: []const u8) !DdnsIn
             allocator.free(log);
         }
         allocator.free(response.logs);
+        allocator.free(response.last_ip);
     }
 
     var logs_list = std.array_list.Managed([]const u8).init(allocator);

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -38,6 +39,7 @@ type ddnsWrapper struct {
 	lastError   string
 	logs        []string
 	logMutex    sync.Mutex
+	lastUpdate  int64
 }
 
 type ddns_ringBufferLogger struct {
@@ -146,6 +148,7 @@ func DdnsCreateInstance(
 		status:      "stopped",
 		lastError:   "",
 		logs:        make([]string, 0),
+		lastUpdate:  0,
 	}
 
 	instanceID := nextInstanceID
@@ -448,6 +451,7 @@ func DdnsUpdateOnce(instanceID C.int) C.int {
 	wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
 
 	domains := wrapper.dnsProvider.AddUpdateDomainRecords()
+	wrapper.lastUpdate = time.Now().Unix()
 
 	var result string
 	for _, domain := range domains.Ipv4Domains {
@@ -482,8 +486,6 @@ func DdnsStartAutoUpdate(
 	wrapper.isRunning = true
 	wrapper.status = "running"
 
-	wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
-
 	go func() {
 		ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
 		defer ticker.Stop()
@@ -492,7 +494,9 @@ func DdnsStartAutoUpdate(
 		originalOutput := log.Writer()
 		log.SetOutput(&ddns_ringBufferLogger{wrapper: wrapper})
 
+		wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
 		wrapper.dnsProvider.AddUpdateDomainRecords()
+		wrapper.lastUpdate = time.Now().Unix()
 
 		log.SetOutput(originalOutput)
 		globalLogMutex.Unlock()
@@ -504,13 +508,15 @@ func DdnsStartAutoUpdate(
 				originalOutput := log.Writer()
 				log.SetOutput(&ddns_ringBufferLogger{wrapper: wrapper})
 
+				wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
 				domains := wrapper.dnsProvider.AddUpdateDomainRecords()
-				for _, domain := range domains.Ipv4Domains {
-					log.Printf("[DDNS %d] IPv4 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-				}
-				for _, domain := range domains.Ipv6Domains {
-					log.Printf("[DDNS %d] IPv6 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-				}
+				wrapper.lastUpdate = time.Now().Unix()
+				// for _, domain := range domains.Ipv4Domains {
+				// 	log.Printf("[DDNS %d] IPv4 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
+				// }
+				// for _, domain := range domains.Ipv6Domains {
+				// 	log.Printf("[DDNS %d] IPv6 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
+				// }
 
 				log.SetOutput(originalOutput)
 				globalLogMutex.Unlock()
@@ -572,9 +578,11 @@ func DdnsFreeString(str *C.char) {
 }
 
 type DdnsStatusResponse struct {
-	Status    string   `json:"status"`
-	LastError string   `json:"last_error"`
-	Logs      []string `json:"logs"`
+	Status     string   `json:"status"`
+	LastError  string   `json:"last_error"`
+	Logs       []string `json:"logs"`
+	LastIp     string   `json:"last_ip"`
+	LastUpdate int64    `json:"last_update"`
 }
 
 //export DdnsGetStatusAndLogs
@@ -590,10 +598,21 @@ func DdnsGetStatusAndLogs(instanceID C.int) *C.char {
 	wrapper.logMutex.Lock()
 	defer wrapper.logMutex.Unlock()
 
+	lastIps := []string{}
+	if wrapper.ipv4cache.Addr != "" {
+		lastIps = append(lastIps, wrapper.ipv4cache.Addr)
+	}
+	if wrapper.ipv6cache.Addr != "" {
+		lastIps = append(lastIps, wrapper.ipv6cache.Addr)
+	}
+	lastIp := strings.Join(lastIps, ", ")
+
 	response := DdnsStatusResponse{
-		Status:    wrapper.status,
-		LastError: wrapper.lastError,
-		Logs:      wrapper.logs,
+		Status:     wrapper.status,
+		LastError:  wrapper.lastError,
+		Logs:       wrapper.logs,
+		LastIp:     lastIp,
+		LastUpdate: wrapper.lastUpdate,
 	}
 
 	jsonBytes, err := json.Marshal(response)
