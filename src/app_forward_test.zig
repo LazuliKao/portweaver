@@ -264,7 +264,7 @@ fn makeSinglePortHandleWithOptions(
         .enable_app_forward = true,
         .enable_app_stats = enable_app_stats,
         .reuseaddr = true,
-    });
+    }, false);
 }
 
 fn makePortMapping(allocator: std.mem.Allocator, protocol: types.Protocol, listen_port: []const u8, target_port: []const u8) !types.PortMapping {
@@ -310,7 +310,7 @@ fn makeRangeMappingHandle(
         .enable_app_forward = true,
         .enable_app_stats = false,
         .reuseaddr = true,
-    });
+    }, false);
 }
 
 fn tcpStartThread(ctx: *TcpRunContext) void {

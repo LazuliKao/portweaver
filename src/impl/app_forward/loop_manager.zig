@@ -639,7 +639,7 @@ test "loop manager reference accounting" {
         .target_address = "127.0.0.1",
         .target_port = 1,
         .listen_port = 2,
-    });
+    }, false);
     defer project.deinit();
 
     const first = try manager.acquire(.per_project, &project);

@@ -178,8 +178,9 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     for (0..common) |i| {
         var handle = &h.items[i];
         if (old_projects[i].eql(new_projects[i])) {
-            // Config unchanged — just update the cfg pointer to new config
+            // Config unchanged — just update the cfg pointer to new config and use_nftables
             handle.cfg = new_projects[i];
+            handle.use_nftables = new_cfg.use_nftables;
             continue;
         }
 
@@ -190,6 +191,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         std.log.info("Reload: project {d} ({s}) config changed, restarting", .{ i + 1, new_projects[i].remark });
         handle.teardownForwarders();
         handle.cfg = new_projects[i];
+        handle.use_nftables = new_cfg.use_nftables;
 
         if (new_projects[i].enabled) {
             startForwardingForHandle(alloc, handle, new_cfg);
@@ -214,7 +216,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     // 3) Add new projects
     for (common..new_projects.len) |i| {
         std.log.info("Reload: adding new project {d} ({s})", .{ i + 1, new_projects[i].remark });
-        const new_handle = project_status.ProjectHandle.init(alloc, i, new_projects[i]);
+        const new_handle = project_status.ProjectHandle.init(alloc, i, new_projects[i], new_cfg.use_nftables);
         h.append(new_handle) catch |err| {
             std.log.err("Reload: failed to add project {d}: {any}", .{ i + 1, err });
             continue;

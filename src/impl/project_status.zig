@@ -62,6 +62,7 @@ pub const ProjectHandle = struct {
     udp_forwarders: std.array_list.Managed(*UdpForwarder),
     lock: std.Io.Mutex = .init,
     cfg: types.Project,
+    use_nftables: bool,
     error_code: i32 = 0,
     active_ports: u32 = 0,
     id: usize,
@@ -70,7 +71,7 @@ pub const ProjectHandle = struct {
     runtime_enabled_lock: std.Io.Mutex = .init,
     runtime_manager: ?loop_manager.LoopManager = null,
 
-    pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project) ProjectHandle {
+    pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project, use_nftables: bool) ProjectHandle {
         return ProjectHandle{
             .tcp_forwarders = std.array_list.Managed(*TcpForwarder).init(allocator),
             .udp_forwarders = std.array_list.Managed(*UdpForwarder).init(allocator),
@@ -78,6 +79,7 @@ pub const ProjectHandle = struct {
             .id = id,
             .startup_status = .disabled,
             .cfg = cfg,
+            .use_nftables = use_nftables,
             .error_code = 0,
             .active_ports = 0,
         };
@@ -465,6 +467,7 @@ pub const ProjectHandle = struct {
     /// Requires: nftables build, enable_firewall_stats flag, and add_firewall_forward flag.
     fn shouldUseNftStats(self: *const ProjectHandle) bool {
         if (!build_options.nftables_mode) return false;
+        if (!self.use_nftables) return false;
         if (!self.cfg.enable_firewall_stats) return false;
         return self.cfg.add_firewall_forward;
     }
@@ -622,7 +625,7 @@ test "project status: init yields empty runtime info" {
     };
     defer cfg.deinit(allocator);
 
-    var handle = ProjectHandle.init(allocator, 7, cfg);
+    var handle = ProjectHandle.init(allocator, 7, cfg, false);
     defer handle.deinit();
 
     const runtime = handle.getProjectRuntimeInfo();
@@ -644,7 +647,7 @@ test "project status: startup status transitions update error code" {
     };
     defer cfg.deinit(allocator);
 
-    var handle = ProjectHandle.init(allocator, 0, cfg);
+    var handle = ProjectHandle.init(allocator, 0, cfg, false);
     defer handle.deinit();
 
     handle.setStartupFailedCode(-5);

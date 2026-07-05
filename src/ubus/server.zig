@@ -57,6 +57,7 @@ const RuntimeState = struct {
     wol_targets: *const std.StringHashMap(types.WolTarget),
     enabled: []bool,
     last_changed: []u64,
+    use_nftables: bool,
     mutex: std.Io.Mutex = .init,
     pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode), wol_targets: *const std.StringHashMap(types.WolTarget)) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
@@ -77,6 +78,7 @@ const RuntimeState = struct {
             .wol_targets = wol_targets,
             .enabled = enabled,
             .last_changed = last_changed,
+            .use_nftables = if (projects.items.len > 0) projects.items[0].use_nftables else false,
         };
 
         for (projects.items, 0..) |project, idx| {
@@ -121,6 +123,7 @@ const RuntimeState = struct {
         self.allocator.free(self.last_changed);
         self.enabled = new_enabled;
         self.last_changed = new_last_changed;
+        self.use_nftables = if (new_len > 0) self.projects.items[0].use_nftables else false;
     }
 
     pub fn syncFromProjects(self: *RuntimeState) !void {
@@ -1206,9 +1209,12 @@ const GetNftablesRulesResponse = struct {
 };
 
 fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNftablesRulesResponse {
-    _ = state;
     if (!build_options.nftables_mode) {
         return .{ .rules = "nftables support not compiled" };
+    }
+
+    if (!state.use_nftables) {
+        return .{ .rules = "nftables backend is disabled" };
     }
 
     var ctx = nftables.NftablesContext.init(allocator) catch {

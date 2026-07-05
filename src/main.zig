@@ -282,8 +282,8 @@ fn parseConfigFile(args: []const []const u8) ![]const u8 {
     std.log.info("No config file specified, using default: config.json", .{});
     return "config.json";
 }
-fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandle), project: config.Project) !void {
-    const handle: project_status.ProjectHandle = .init(allocator, id, project);
+fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandle), project: config.Project, use_nftables: bool) !void {
+    const handle: project_status.ProjectHandle = .init(allocator, id, project, use_nftables);
     try handles.append(handle);
 
     if (!project.enabled) {
@@ -301,7 +301,7 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_lis
 fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandle), cfg: *const config.Config) !bool {
     // 设置所有项目
     for (cfg.projects, 0..) |project, i| {
-        setupProject(allocator, i, handles, project) catch |err| {
+        setupProject(allocator, i, handles, project, cfg.use_nftables) catch |err| {
             std.log.err("Failed to setup project {d} ({s}): {any}", .{ i + 1, project.remark, err });
             continue;
         };
