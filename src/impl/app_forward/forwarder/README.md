@@ -127,12 +127,13 @@ Important: `*_destroy(...)` must never tear down `forwarder_runtime_t`.
 
 `forwarder.h` is the **authoritative ABI contract**.
 
-Both backends fully satisfy this contract:
+All three backends fully satisfy this contract:
 
 - The libuv implementation (`impl_libuv/`) is the reference implementation.
-- The Asio implementation (`impl_asio/`) implements the same contract using standalone Asio (not Boost).
+- The Asio implementation (`impl_asio/`) uses standalone Asio (not Boost).
+- The io_uring implementation (`impl_io_uring/`) uses liburing on Linux.
 
-Both backends are behind the same C ABI boundary — Zig only imports `forwarder.h`, never backend-specific headers.
+All backends are behind the same C ABI boundary — Zig only imports `forwarder.h`, never backend-specific headers.
 
 ## Backend Replaceability
 
@@ -161,8 +162,9 @@ The ownership and lifecycle split is the core invariant:
 |-----------|---------|--------|
 | `impl_libuv/` | libuv | Active implementation |
 | `impl_asio/` | Asio (standalone C++) | Active implementation |
+| `impl_io_uring/` | io_uring (liburing C) | Active Linux implementation |
 
-Both backends implement the same `forwarder.h` contract.
+All backends implement the same `forwarder.h` contract.
 ### Public ABI vs impl-internal helpers
 
 The functions declared in `forwarder.h` are the public ABI. In addition,
@@ -173,14 +175,16 @@ the public contract:
   `uv_loop_t *`. Used by TCP/UDP forwarders within `impl_libuv/` to access
   the backend event loop.
 - `forwarder_runtime_get_allocator(forwarder_runtime_t *)` — returns the stored
-  `forwarder_allocator_t`. Used by both backends to allocate through the
+  `forwarder_allocator_t`. Used by all backends to allocate through the
   runtime's allocator bridge.
 - `forwarder_runtime_get_io_context(forwarder_runtime_t *)` — Asio-only, returns
   `asio::io_context &`. Used by TCP/UDP forwarders within `impl_asio/` to access
   the backend event loop.
+- `forwarder_runtime_get_ring(forwarder_runtime_t *)` — io_uring-only, returns
+  `struct io_uring *`. Used within `impl_io_uring/` to submit operations.
 
-These helpers are internal to `impl_libuv/` / `impl_asio/` and must not be
-called from Zig or from any code outside the implementation directory.
+These helpers are internal to their backend implementation directories and
+must not be called from Zig or from code outside those directories.
 
 ## Stats Semantics
 
@@ -206,13 +210,17 @@ zig build -Dforward_backend=asio
 # Asio backend (Linux musl cross-compile)
 zig build -Dforward_backend=asio -Dtarget=aarch64-linux-musl
 zig build -Dforward_backend=asio -Dtarget=x86_64-linux-musl
+
+# io_uring backend (Linux only)
+zig build -Dforward_backend=io_uring
 ```
 
-| Target | libuv | Asio |
-|--------|-------|------|
-| native (Windows) | ✅ | ✅ |
-| aarch64-linux-musl | ✅ | ✅ |
-| x86_64-linux-musl | ✅ | ✅ |
+| Target | libuv | Asio | io_uring |
+|--------|-------|------|----------|
+| native Linux | ✅ | ✅ | ✅ |
+| native Windows | ✅ | ✅ | — |
+| aarch64-linux-musl | ✅ | ✅ | ✅ |
+| x86_64-linux-musl | ✅ | ✅ | ✅ |
 
 ## Backend-Dependent Utilities
 
@@ -220,5 +228,6 @@ zig build -Dforward_backend=asio -Dtarget=x86_64-linux-musl
 
 - **libuv backend**: returns the actual libuv version string (e.g., `"1.48.0"`)
 - **Asio backend**: returns `"asio-standalone"` to indicate standalone Asio is in use
+- **io_uring backend**: returns `"io_uring-liburing"`
 
 This allows code to detect which backend is active at runtime if needed, while maintaining ABI compatibility.

@@ -1013,6 +1013,16 @@ fn addForwarderBackend(
             if (target.result.os.tag != .linux) {
                 @panic("io_uring backend requires Linux target. Use -Dforward_backend=libuv or asio for non-Linux targets.");
             }
+            // The configuration file watcher remains libuv-based; only the
+            // application-layer forwarding executor is replaced by io_uring.
+            const uv = addLibuv(b, target, optimize);
+            root_module.linkLibrary(uv);
+            root_module.addIncludePath(b.path("deps/libuv/include"));
+            root_module.addIncludePath(b.path("deps/libuv/src"));
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/file_watcher.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+            });
             const uring_res = addLiburing(b, target, optimize);
             root_module.linkLibrary(uring_res.lib);
             root_module.addConfigHeader(uring_res.compat_h);
