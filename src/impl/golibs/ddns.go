@@ -511,12 +511,12 @@ func DdnsStartAutoUpdate(
 				wrapper.dnsProvider.Init(wrapper.dnsConf, wrapper.ipv4cache, wrapper.ipv6cache)
 				domains := wrapper.dnsProvider.AddUpdateDomainRecords()
 				wrapper.lastUpdate = time.Now().Unix()
-				// for _, domain := range domains.Ipv4Domains {
-				// 	log.Printf("[DDNS %d] IPv4 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-				// }
-				// for _, domain := range domains.Ipv6Domains {
-				// 	log.Printf("[DDNS %d] IPv6 %s: %s", instanceID, domain.String(), domain.UpdateStatus)
-				// }
+				for _, domain := range domains.Ipv4Domains {
+					log.Printf("[DDNS %d] IPv4 %s %s", instanceID, domain.String(), domain.UpdateStatus)
+				}
+				for _, domain := range domains.Ipv6Domains {
+					log.Printf("[DDNS %d] IPv6 %s %s", instanceID, domain.String(), domain.UpdateStatus)
+				}
 
 				log.SetOutput(originalOutput)
 				globalLogMutex.Unlock()

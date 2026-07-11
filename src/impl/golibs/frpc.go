@@ -15,6 +15,7 @@ import (
 
 	"github.com/fatedier/frp/client"
 	"github.com/fatedier/frp/client/proxy"
+	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/xlog"
@@ -34,6 +35,8 @@ type clientWrapper struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	config         *v1.ClientCommonConfig
+	configSource   *source.ConfigSource
+	aggregator     *source.Aggregator
 	proxies        []v1.TypedProxyConfig
 	name           string
 	routingID      string
@@ -119,6 +122,7 @@ func FrpcCreateClient(
 		ctx:            ctx,
 		cancel:         cancel,
 		config:         &cfg,
+		configSource:   source.NewConfigSource(),
 		proxies:        make([]v1.TypedProxyConfig, 0),
 		name:           name,
 		routingID:      "",
@@ -129,6 +133,7 @@ func FrpcCreateClient(
 		useEncryption:  useEncryption != 0,
 		useCompression: useCompression != 0,
 	}
+	wrapper.aggregator = source.NewAggregator(wrapper.configSource)
 
 	clientID := nextClientID
 	nextClientID++
@@ -235,6 +240,16 @@ func makeProxyConfigurers(proxies []v1.TypedProxyConfig) []v1.ProxyConfigurer {
 	return proxyConfigurers
 }
 
+func replaceClientConfigSource(wrapper *clientWrapper) error {
+	if wrapper.configSource == nil {
+		wrapper.configSource = source.NewConfigSource()
+	}
+	if wrapper.aggregator == nil {
+		wrapper.aggregator = source.NewAggregator(wrapper.configSource)
+	}
+	return wrapper.configSource.ReplaceAll(makeProxyConfigurers(wrapper.proxies), nil)
+}
+
 //export FrpcFlushClient
 func FrpcFlushClient(clientID C.int) C.int {
 	clientsMutex.RLock()
@@ -243,10 +258,17 @@ func FrpcFlushClient(clientID C.int) C.int {
 	if !ok {
 		return -1
 	}
+	if err := replaceClientConfigSource(wrapper); err != nil {
+		fmt.Printf("Failed to refresh frp client config source: %v\n", err)
+		return -3
+	}
 	if wrapper.service == nil {
 		return -2
 	}
-	wrapper.service.UpdateAllConfigurer(makeProxyConfigurers(wrapper.proxies), nil)
+	if err := wrapper.service.UpdateAllConfigurer(makeProxyConfigurers(wrapper.proxies), nil); err != nil {
+		fmt.Printf("Failed to update frp client configurers: %v\n", err)
+		return -4
+	}
 	return 0
 }
 
@@ -314,11 +336,14 @@ func FrpcStartClient(clientID C.int) C.int {
 		}
 		wrapper.logMutex.Unlock()
 	}
+	if err := replaceClientConfigSource(wrapper); err != nil {
+		fmt.Printf("Failed to prepare frp client config source: %v\n", err)
+		return -2
+	}
 
 	svr, err := client.NewService(wrapper.ctx, client.ServiceOptions{
-		Common:      wrapper.config,
-		ProxyCfgs:   makeProxyConfigurers(wrapper.proxies),
-		VisitorCfgs: nil,
+		Common:                 wrapper.config,
+		ConfigSourceAggregator: wrapper.aggregator,
 	})
 	if err != nil {
 		fmt.Printf("Failed to create frp service: %v\n", err)

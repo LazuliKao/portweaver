@@ -858,38 +858,25 @@ fn addCombinedGoLib(
     if (!frpc and !ddns and !frps) {
         @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
     }
-    const tags = if (frpc and ddns and frps)
-        "libfrpc,libddns,libfrps"
-    else if (frpc and ddns)
-        "libfrpc,libddns"
-    else if (frpc and frps)
-        "libfrpc,libfrps"
-    else if (ddns and frps)
-        "libddns,libfrps"
-    else if (frpc)
-        "libfrpc"
-    else if (ddns)
-        "libddns"
-    else if (frps)
-        "libfrps"
-    else
-        @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
-    const tags_dir = if (frpc and ddns and frps)
-        "frpc-ddns-frps"
-    else if (frpc and ddns)
-        "frpc-ddns"
-    else if (frpc and frps)
-        "frpc-frps"
-    else if (ddns and frps)
-        "ddns-frps"
-    else if (frpc)
-        "frpc"
-    else if (ddns)
-        "ddns"
-    else if (frps)
-        "frps"
-    else
-        @panic("At least one of frpc, ddns, or frps must be true when calling addCombinedGoLib");
+
+    // Build tag lists dynamically based on feature flags
+    var tag_parts: std.ArrayList([]const u8) = .empty;
+    defer tag_parts.deinit(b.allocator);
+    tag_parts.append(b.allocator, "noweb") catch @panic("OOM");
+    if (frpc) {
+        tag_parts.append(b.allocator, "libfrpc") catch @panic("OOM");
+    }
+    if (ddns) {
+        tag_parts.append(b.allocator, "libddns") catch @panic("OOM");
+    }
+    if (frps) {
+        tag_parts.append(b.allocator, "libfrps") catch @panic("OOM");
+    }
+
+    const tags = std.mem.join(b.allocator, ",", tag_parts.items) catch @panic("OOM");
+    defer b.allocator.free(tags);
+    const tags_dir = std.mem.join(b.allocator, "-", tag_parts.items) catch @panic("OOM");
+    defer b.allocator.free(tags_dir);
 
     // Use architecture- and feature-specific output directory for parallel build support
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
