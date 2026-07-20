@@ -120,11 +120,20 @@ fn parseDomains(allocator: std.mem.Allocator, domains_str: []const u8) ![][]cons
         list.deinit();
     }
 
-    var iter = std.mem.splitScalar(u8, domains_str, ',');
-    while (iter.next()) |domain| {
-        const trimmed = std.mem.trim(u8, domain, " \t\r\n");
-        if (trimmed.len > 0) {
-            try list.append(try allocator.dupe(u8, trimmed));
+    var line_iter = std.mem.splitScalar(u8, domains_str, '\n');
+    while (line_iter.next()) |line| {
+        const trimmed_line = std.mem.trim(u8, line, " \t\r");
+        if (trimmed_line.len == 0) continue;
+        if (std.mem.startsWith(u8, trimmed_line, "#") or std.mem.startsWith(u8, trimmed_line, "//")) {
+            continue;
+        }
+
+        var token_iter = std.mem.tokenizeAny(u8, trimmed_line, ",\t ");
+        while (token_iter.next()) |domain| {
+            const trimmed_domain = std.mem.trim(u8, domain, " \t\r\n");
+            if (trimmed_domain.len > 0) {
+                try list.append(try allocator.dupe(u8, trimmed_domain));
+            }
         }
     }
 
@@ -153,6 +162,50 @@ test "ddns manager: parseDomains returns empty slice for blank input" {
     defer allocator.free(domains);
 
     try std.testing.expectEqual(@as(usize, 0), domains.len);
+}
+test "ddns manager: parseDomains parses multi-line domains" {
+    const allocator = std.testing.allocator;
+
+    const domains = try parseDomains(allocator,
+        \\example.com
+        \\sub.example.com
+        \\  another.example.org  
+        \\
+        \\api@test.com
+    );
+    defer {
+        for (domains) |d| allocator.free(d);
+        allocator.free(domains);
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), domains.len);
+    try std.testing.expectEqualStrings("example.com", domains[0]);
+    try std.testing.expectEqualStrings("sub.example.com", domains[1]);
+    try std.testing.expectEqualStrings("another.example.org", domains[2]);
+    try std.testing.expectEqualStrings("api@test.com", domains[3]);
+}
+test "ddns manager: parseDomains ignores comment lines" {
+    const allocator = std.testing.allocator;
+
+    const domains = try parseDomains(allocator,
+        \\example.com, sub.example.com
+        \\# this is a comment line
+        \\  # this is another comment with leading spaces
+        \\another.example.org
+        \\// slash comment line
+        \\  // indented slash comment
+        \\final.example.com
+    );
+    defer {
+        for (domains) |d| allocator.free(d);
+        allocator.free(domains);
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), domains.len);
+    try std.testing.expectEqualStrings("example.com", domains[0]);
+    try std.testing.expectEqualStrings("sub.example.com", domains[1]);
+    try std.testing.expectEqualStrings("another.example.org", domains[2]);
+    try std.testing.expectEqualStrings("final.example.com", domains[3]);
 }
 
 fn createInstance(
