@@ -69,26 +69,28 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "mips-linux-any" }) });
         uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "any-linux-any" }) });
     }
+    const libuv_dep = b.dependency("libuv", .{});
 
-    uv.root_module.addIncludePath(b.path("deps/libuv/include"));
+    uv.root_module.addIncludePath(libuv_dep.path("include"));
     // libuv has internal headers included from its own C sources.
-    uv.root_module.addIncludePath(b.path("deps/libuv/src"));
+    uv.root_module.addIncludePath(libuv_dep.path("src"));
 
-    // Base sources from deps/libuv/CMakeLists.txt (uv_sources)
+    // Base sources from libuv/CMakeLists.txt (uv_sources)
     uv.root_module.addCSourceFiles(.{
+        .root = libuv_dep.path(""),
         .files = &.{
-            "deps/libuv/src/fs-poll.c",
-            "deps/libuv/src/idna.c",
-            "deps/libuv/src/inet.c",
-            "deps/libuv/src/random.c",
-            "deps/libuv/src/strscpy.c",
-            "deps/libuv/src/strtok.c",
-            "deps/libuv/src/thread-common.c",
-            "deps/libuv/src/threadpool.c",
-            "deps/libuv/src/timer.c",
-            "deps/libuv/src/uv-common.c",
-            "deps/libuv/src/uv-data-getter-setters.c",
-            "deps/libuv/src/version.c",
+            "src/fs-poll.c",
+            "src/idna.c",
+            "src/inet.c",
+            "src/random.c",
+            "src/strscpy.c",
+            "src/strtok.c",
+            "src/thread-common.c",
+            "src/threadpool.c",
+            "src/timer.c",
+            "src/uv-common.c",
+            "src/uv-data-getter-setters.c",
+            "src/version.c",
         },
         .flags = &.{},
     });
@@ -107,60 +109,62 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         uv.root_module.addCMacro("_CRT_DECLARE_NONSTDC_NAMES", "0");
 
         uv.root_module.addCSourceFiles(.{
+            .root = libuv_dep.path(""),
             .files = &.{
-                "deps/libuv/src/win/async.c",
-                "deps/libuv/src/win/core.c",
-                "deps/libuv/src/win/detect-wakeup.c",
-                "deps/libuv/src/win/dl.c",
-                "deps/libuv/src/win/error.c",
-                "deps/libuv/src/win/fs.c",
-                "deps/libuv/src/win/fs-event.c",
-                "deps/libuv/src/win/getaddrinfo.c",
-                "deps/libuv/src/win/getnameinfo.c",
-                "deps/libuv/src/win/handle.c",
-                "deps/libuv/src/win/loop-watcher.c",
-                "deps/libuv/src/win/pipe.c",
-                "deps/libuv/src/win/thread.c",
-                "deps/libuv/src/win/poll.c",
-                "deps/libuv/src/win/process.c",
-                "deps/libuv/src/win/process-stdio.c",
-                "deps/libuv/src/win/signal.c",
-                "deps/libuv/src/win/snprintf.c",
-                "deps/libuv/src/win/stream.c",
-                "deps/libuv/src/win/tcp.c",
-                "deps/libuv/src/win/tty.c",
-                "deps/libuv/src/win/udp.c",
-                "deps/libuv/src/win/util.c",
-                "deps/libuv/src/win/winapi.c",
-                "deps/libuv/src/win/winsock.c",
+                "src/win/async.c",
+                "src/win/core.c",
+                "src/win/detect-wakeup.c",
+                "src/win/dl.c",
+                "src/win/error.c",
+                "src/win/fs.c",
+                "src/win/fs-event.c",
+                "src/win/getaddrinfo.c",
+                "src/win/getnameinfo.c",
+                "src/win/handle.c",
+                "src/win/loop-watcher.c",
+                "src/win/pipe.c",
+                "src/win/thread.c",
+                "src/win/poll.c",
+                "src/win/process.c",
+                "src/win/process-stdio.c",
+                "src/win/signal.c",
+                "src/win/snprintf.c",
+                "src/win/stream.c",
+                "src/win/tcp.c",
+                "src/win/tty.c",
+                "src/win/udp.c",
+                "src/win/util.c",
+                "src/win/winapi.c",
+                "src/win/winsock.c",
             },
             .flags = &.{},
         });
     } else {
-        // Unix-like base (non-Windows) from deps/libuv/CMakeLists.txt
+        // Unix-like base from libuv/CMakeLists.txt
         // uv.root_module.addCMacro("_FILE_OFFSET_BITS", "64");
         // uv.root_module.addCMacro("_LARGEFILE_SOURCE", "1");
 
         uv.root_module.addCSourceFiles(.{
+            .root = libuv_dep.path(""),
             .files = &.{
-                "deps/libuv/src/unix/async.c",
-                "deps/libuv/src/unix/core.c",
-                "deps/libuv/src/unix/dl.c",
-                "deps/libuv/src/unix/fs.c",
-                "deps/libuv/src/unix/getaddrinfo.c",
-                "deps/libuv/src/unix/getnameinfo.c",
-                "deps/libuv/src/unix/loop-watcher.c",
-                "deps/libuv/src/unix/loop.c",
-                "deps/libuv/src/unix/pipe.c",
-                "deps/libuv/src/unix/poll.c",
-                "deps/libuv/src/unix/process.c",
-                "deps/libuv/src/unix/random-devurandom.c",
-                "deps/libuv/src/unix/signal.c",
-                "deps/libuv/src/unix/stream.c",
-                "deps/libuv/src/unix/tcp.c",
-                "deps/libuv/src/unix/thread.c",
-                "deps/libuv/src/unix/tty.c",
-                "deps/libuv/src/unix/udp.c",
+                "src/unix/async.c",
+                "src/unix/core.c",
+                "src/unix/dl.c",
+                "src/unix/fs.c",
+                "src/unix/getaddrinfo.c",
+                "src/unix/getnameinfo.c",
+                "src/unix/loop-watcher.c",
+                "src/unix/loop.c",
+                "src/unix/pipe.c",
+                "src/unix/poll.c",
+                "src/unix/process.c",
+                "src/unix/random-devurandom.c",
+                "src/unix/signal.c",
+                "src/unix/stream.c",
+                "src/unix/tcp.c",
+                "src/unix/thread.c",
+                "src/unix/tty.c",
+                "src/unix/udp.c",
             },
             .flags = &.{},
         });
@@ -170,16 +174,17 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             uv.root_module.linkSystemLibrary("dl", .{});
             uv.root_module.linkSystemLibrary("rt", .{});
             uv.root_module.linkSystemLibrary("m", .{});
-            // Linux specifics from deps/libuv/CMakeLists.txt
+            // Linux specifics from libuv/CMakeLists.txt
             uv.root_module.addCMacro("_GNU_SOURCE", "1");
             uv.root_module.addCMacro("_POSIX_C_SOURCE", "200112");
             uv.root_module.addCSourceFiles(.{
+                .root = libuv_dep.path(""),
                 .files = &.{
-                    "deps/libuv/src/unix/proctitle.c",
-                    "deps/libuv/src/unix/linux.c",
-                    "deps/libuv/src/unix/procfs-exepath.c",
-                    "deps/libuv/src/unix/random-getrandom.c",
-                    "deps/libuv/src/unix/random-sysctl-linux.c",
+                    "src/unix/proctitle.c",
+                    "src/unix/linux.c",
+                    "src/unix/procfs-exepath.c",
+                    "src/unix/random-getrandom.c",
+                    "src/unix/random-sysctl-linux.c",
                 },
                 .flags = &.{},
             });
@@ -189,14 +194,15 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
             uv.root_module.addCMacro("_DARWIN_UNLIMITED_SELECT", "1");
 
             uv.root_module.addCSourceFiles(.{
+                .root = libuv_dep.path(""),
                 .files = &.{
-                    "deps/libuv/src/unix/proctitle.c",
-                    "deps/libuv/src/unix/bsd-ifaddrs.c",
-                    "deps/libuv/src/unix/darwin.c",
-                    "deps/libuv/src/unix/darwin-proctitle.c",
-                    "deps/libuv/src/unix/fsevents.c",
-                    "deps/libuv/src/unix/kqueue.c",
-                    "deps/libuv/src/unix/random-getentropy.c",
+                    "src/unix/proctitle.c",
+                    "src/unix/bsd-ifaddrs.c",
+                    "src/unix/darwin.c",
+                    "src/unix/darwin-proctitle.c",
+                    "src/unix/fsevents.c",
+                    "src/unix/kqueue.c",
+                    "src/unix/random-getentropy.c",
                 },
                 .flags = &.{},
             });
@@ -908,7 +914,8 @@ fn addLiburing(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-) LibUringResult {
+) ?LibUringResult {
+    const liburing_dep = b.lazyDependency("liburing", .{}) orelse return null;
     const is_mips = switch (target.result.cpu.arch) {
         .mips, .mipsel, .mips64, .mips64el => true,
         else => false,
@@ -940,16 +947,17 @@ fn addLiburing(
     lib.root_module.addConfigHeader(version_h);
 
     lib.root_module.addCSourceFiles(.{
+        .root = liburing_dep.path(""),
         .files = &.{
-            "deps/liburing/src/setup.c",
-            "deps/liburing/src/queue.c",
-            "deps/liburing/src/register.c",
-            "deps/liburing/src/syscall.c",
+            "src/setup.c",
+            "src/queue.c",
+            "src/register.c",
+            "src/syscall.c",
         },
         .flags = &.{ "-D_GNU_SOURCE", "-D_LARGEFILE_SOURCE", "-D_FILE_OFFSET_BITS=64" },
     });
-    lib.root_module.addIncludePath(b.path("deps/liburing/src/include"));
-    lib.root_module.addIncludePath(b.path("deps/liburing/src"));
+    lib.root_module.addIncludePath(liburing_dep.path("src/include"));
+    lib.root_module.addIncludePath(liburing_dep.path("src"));
     return .{
         .lib = lib,
         .compat_h = compat_h,
@@ -968,10 +976,11 @@ fn addForwarderBackend(
 
     switch (backend) {
         .libuv => {
+            const libuv_dep = b.dependency("libuv", .{});
             const uv = addLibuv(b, target, optimize);
             root_module.linkLibrary(uv);
-            root_module.addIncludePath(b.path("deps/libuv/include"));
-            root_module.addIncludePath(b.path("deps/libuv/src"));
+            root_module.addIncludePath(libuv_dep.path("include"));
+            root_module.addIncludePath(libuv_dep.path("src"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
                 .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
@@ -990,7 +999,13 @@ fn addForwarderBackend(
             });
         },
         .asio => {
-            root_module.addIncludePath(b.path("deps/asio/asio/include"));
+            const libuv_dep = b.dependency("libuv", .{});
+            const uv = addLibuv(b, target, optimize);
+            root_module.linkLibrary(uv);
+            root_module.addIncludePath(libuv_dep.path("include"));
+            root_module.addIncludePath(libuv_dep.path("src"));
+            const asio_dep = b.dependency("asio", .{});
+            root_module.addIncludePath(asio_dep.path("include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/runtime.cpp"),
                 .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
@@ -1002,6 +1017,10 @@ fn addForwarderBackend(
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/udp_forwarder.cpp"),
                 .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+            });
+            root_module.addCSourceFile(.{
+                .file = b.path("src/impl/file_watcher.c"),
+                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
             });
             root_module.linkSystemLibrary("c++", .{});
             if (target.result.os.tag == .windows) {
@@ -1015,19 +1034,21 @@ fn addForwarderBackend(
             }
             // The configuration file watcher remains libuv-based; only the
             // application-layer forwarding executor is replaced by io_uring.
+            const libuv_dep = b.dependency("libuv", .{});
             const uv = addLibuv(b, target, optimize);
             root_module.linkLibrary(uv);
-            root_module.addIncludePath(b.path("deps/libuv/include"));
-            root_module.addIncludePath(b.path("deps/libuv/src"));
+            root_module.addIncludePath(libuv_dep.path("include"));
+            root_module.addIncludePath(libuv_dep.path("src"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/file_watcher.c"),
                 .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
             });
-            const uring_res = addLiburing(b, target, optimize);
+            const liburing_dep = b.lazyDependency("liburing", .{}) orelse return;
+            const uring_res = addLiburing(b, target, optimize) orelse return;
             root_module.linkLibrary(uring_res.lib);
             root_module.addConfigHeader(uring_res.compat_h);
             root_module.addConfigHeader(uring_res.version_h);
-            root_module.addIncludePath(b.path("deps/liburing/src/include"));
+            root_module.addIncludePath(liburing_dep.path("src/include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/runtime.c"),
                 .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},

@@ -1,9 +1,0 @@
-[submodule "deps/libuv"]
-	path = deps/libuv
-	url = https://github.com/libuv/libuv.git
-[submodule "deps/asio"]
-	path = deps/asio
-	url = https://github.com/chriskohlhoff/asio.git
-[submodule "deps/liburing"]
-	path = deps/liburing
-	url = https://github.com/axboe/liburing.git
