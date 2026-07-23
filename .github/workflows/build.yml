@@ -27,7 +27,7 @@ jobs:
           - io_uring
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -36,7 +36,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.25.7'
           cache-dependency-path: "**/go.sum"
@@ -143,16 +143,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          submodules: recursive
+          fetch-depth: 1
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         # if: ${{ !matrix.custom_golang }}
         with:
           go-version: '1.25.7'
@@ -221,7 +221,7 @@ jobs:
           move zig-out\bin\portweaver.exe ${{ matrix.name }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
@@ -235,7 +235,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -248,7 +248,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Nightly Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly
           target_commitish: ${{ github.sha }}
