@@ -104,48 +104,79 @@ portweaver [选项]
 
 ## 架构
 
-```
-                    ┌─────────────────────────────────────┐
-                    │          PortWeaver 后端              │
-                    │         (Zig + 静态链接 Go 库)        │
-                    └──────────────┬──────────────────────┘
-                                   │
-         ┌─────────────────────────┼─────────────────────────┐
-         │                         │                         │
-    ┌────▼────┐             ┌──────▼──────┐           ┌──────▼──────┐
-    │  配置    │             │   主循环     │           │  UBUS RPC   │
-    │  系统    │             │ (100ms 轮询) │           │   服务器    │
-    │ UCI/JSON │             │              │           │  (可选)     │
-    └────┬────┘             └──────┬──────┘           └─────────────┘
-         │                         │
-    ┌────▼────┐             ┌──────▼──────┐
-    │ 防火墙  │             │   项目       │
-    │  规则   │             │  (句柄)      │
-    │ (UCI)   │             └──────┬──────┘
-    └─────────┘                    │
-                    ┌──────────────┼──────────────┐
-                    │              │              │
-              ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼─────┐
-              │ 内核 NAT  │ │ 应用层    │ │    FRP    │
-              │   转发    │ │   转发    │ │ (客户端/  │
-              │(iptables) │ │  (libuv)  │ │ 服务端)   │
-              └───────────┘ └───────────┘ └───────────┘
-                                                    │
-                                              ┌─────▼─────┐
-                                              │   DDNS    │
-                                              └───────────┘
+PortWeaver 采用单一轻量化二进制文件设计，集成了高性能用户态数据包转发、内核级防火墙 NAT 规则调度、动态 DNS 同步以及 FRP 内网穿透隧道——无需依赖任何外部进程。
+
+```mermaid
+graph TD
+    Engine["PortWeaver 引擎<br/>(Zig 核心 + 静态链接 C / Go 扩展库)"]
+
+    subgraph Core["控制与管理层"]
+        Config["配置系统<br/>(UCI / JSON 加载器)"]
+        Reload["热重载管理器<br/>(uv_fs_event 监听 / SIGHUP)"]
+        Lock["进程锁与平滑接管<br/>(PID 文件 / 命名互斥体)"]
+        UBUS["UBUS RPC 服务<br/>(libubus)"]
+        Log["日志与诊断子系统<br/>(环形缓冲区 / 滚动文件)"]
+    end
+
+    Project["项目句柄<br/>(运行时状态与路由调度)"]
+
+    subgraph Forwarding["多转发引擎层"]
+        KernelNAT["内核 NAT 转发<br/>(OpenWrt fw4 / libnftables)"]
+        AppForward["应用层转发<br/>(libuv 异步 I/O)"]
+        GoLibs["静态链接 Go 扩展库<br/>(libgolibs.a)"]
+    end
+
+    subgraph GoServices["进程内 Go 服务"]
+        FRP["FRP 内网穿透<br/>(FRPC 客户端 / FRPS 服务端)"]
+        DDNS["动态 DNS 同步<br/>(24 个 DNS 服务商)"]
+    end
+
+    Engine --> Core
+    Config --> Project
+    Reload --> Project
+    Lock --> Project
+    Project --> Forwarding
+    KernelNAT --- Project
+    AppForward --- Project
+    GoLibs --> GoServices
+    UBUS -.->|"RPC 控制与状态监测"| Project
+    Log -.->|"事件追踪"| Engine
 ```
 
-## 启动流程
+### 子系统详解
 
-1. `ensureSingleInstance()` — 获取 PID 文件锁（Unix）或命名互斥体（Windows）；优雅接管，5 秒延迟
-2. `event_log.initGlobal()` — 初始化线程安全的事件环形缓冲区（容量 20）
-3. `loadConfig()` — 根据编译标志解析 JSON 文件或加载 UCI 配置
-4. `file_log.initGlobalFileLogger()` — 启动可选的滚动文件日志
-5. `setupProject()` — 为每个已启用的项目创建 ProjectHandle
-6. `applyConfig()` — 应用 UCI 防火墙规则，启动 DDNS 实例，启动 FRPS 服务器
-7. `startForwardingThreads()` — 为每个项目生成每端口的 TCP/UDP 转发线程
-8. 主循环：每 100ms 睡眠间隔轮询 `shouldExitForTakeover()`；在接管信号时干净退出
+- **控制与生命周期引擎** (`main.zig`, `process_lock.zig`)：
+  - **单实例互斥与平滑接管**：通过 PID 文件锁（Unix）或命名互斥体（Windows）防止重复启动，并支持 5 秒缓冲期的平滑进程接管（Takeover）。
+  - **事件驱动主循环**：采用事件通知机制（`process_lock.waitForEvent()`）代替高 CPU 消耗的轮询模式。
+- **动态配置与热重载子系统** (`config/`, `reload.zig`)：
+  - **双配置加载器**：原生支持 OpenWrt UCI 配置（`libuci` 绑定）与结构化 JSON（`std.json`）。
+  - **热重载机制**：通过 `libuv` `uv_fs_event` 自动监听 JSON 配置文件变动，或响应 `SIGHUP` 信号与 UBUS RPC 指令，实现无需中断现有活跃转发流的无缝平滑重载。
+- **多转发引擎子系统** (`impl/`)：
+  - **内核防火墙 NAT (`uci_firewall.zig`, `nft_firewall.zig`)**：自动配置 OpenWrt `fw4` / UCI 防火墙规则或直接调用 `libnftables` 管理 DNAT、端口重定向、源 IP 保留（`preserve_source_ip`）及内核级数据包统计计数器（`enable_firewall_stats`）。
+  - **用户态应用层转发 (`impl/app_forward/`)**：基于 `libuv` 事件循环（`loop_manager.zig`）的多线程异步 I/O 引擎。支持 TCP/UDP 转发、IPv4/IPv6 跨协议栈转换、套接字复用（`SO_REUSEADDR`）及实时字节流量统计（`enable_app_stats`）。
+- **静态链接 Go 扩展库** (`src/impl/golibs/` -> `libgolibs.a`)：
+  - **FRP 反向代理 (`frpc_forward.zig`, `frps_forward.zig`)**：静态链接的 FRP Client 和 Server 模块，全在进程内通过 CGO 绑定管理，无需依赖外部 `frpc`/`frps` 可执行文件。
+  - **动态 DNS 同步 (`ddns_manager.zig`)**：进程内 DDNS 更新引擎，支持 24 家 DNS 服务商及可配置的检查间隔。
+- **UBUS RPC 与诊断子系统** (`ubus/`, `event_log.zig`, `file_log.zig`)：
+  - **UBUS RPC 服务**：在 `portweaver` 命名空间下暴露 RPC 方法，支持查询运行状态、按项目动态开关（`set_enabled`）、FRP 统计及 DDNS 日志。
+  - **诊断日志**：内置线程安全环形事件日志缓冲区（容量 20）及滚动文件日志记录器。
+
+### 启动流程
+
+1. `process_lock.ensureSingleInstance()` — 获取 PID 文件锁 / 命名互斥体；若已有实例运行则触发平滑接管。
+2. `event_log.initGlobal()` — 初始化全局线程安全内存事件环形缓冲区。
+3. **注册信号处理器** — 在 POSIX 系统上注册 `SIGHUP` 信号以支持热重载。
+4. `loadConfigFrom()` — 从 OpenWrt UCI (`/etc/config/portweaver`) 或 JSON (`-c` 参数) 加载配置。
+5. `file_log.initGlobalFileLogger()` — 初始化可选的滚动文件日志记录器。
+6. `reload.init()` — 初始化重载模块，若启用 JSON 文件监听则启动 `libuv` `uv_fs_event` 配置文件监听器。
+7. `applyConfig()`：
+   - 为各个已启用项目初始化 `ProjectHandle` 句柄。
+   - 应用内核防火墙 / NAT 规则（UCI `fw4` 或原生 `libnftables`）。
+   - 初始化并启动已启用的 DDNS 实例。
+   - 启动活跃的 FRPS 服务端实例。
+   - 为各个项目生成 `libuv` 用户态转发线程并启动 FRPC 客户端。
+8. `ubus_server.start()` — 若以 `-Dubus=true` 编译则启动 OpenWrt UBUS RPC 服务。
+9. **主事件循环** — 阻塞等待 `process_lock.waitForEvent()` 响应程序退出、进程接管或热重载请求（`reload.apply()`）。
 
 ## UBUS RPC API
 

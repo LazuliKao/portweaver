@@ -130,50 +130,79 @@ In UCI builds (`-Duci=true`), the configuration is always loaded from `/etc/conf
 
 ## Architecture
 
+PortWeaver is built as a single, lightweight binary that integrates high-performance userspace packet forwarding, kernel-level firewall NAT rule orchestration, dynamic DNS synchronization, and FRP tunneling—eliminating external process dependencies.
+
+```mermaid
+graph TD
+    Engine["PortWeaver Engine<br/>(Zig Core + Statically Linked C / Go Libs)"]
+
+    subgraph Core["Control & Management Layer"]
+        Config["Config System<br/>(UCI / JSON Loaders)"]
+        Reload["Reload Manager<br/>(uv_fs_event Watcher / SIGHUP)"]
+        Lock["Process Lock & Graceful Takeover<br/>(PID File / Named Mutex)"]
+        UBUS["UBUS RPC Server<br/>(libubus)"]
+        Log["Logging & Diagnostics<br/>(Ring Buffer / Rotating File)"]
+    end
+
+    Project["Project Handles<br/>(Runtime State & Routing)"]
+
+    subgraph Forwarding["Multi-Engine Forwarding Layer"]
+        KernelNAT["Kernel NAT Forwarding<br/>(OpenWrt fw4 / libnftables)"]
+        AppForward["App-Layer Forwarding<br/>(libuv Async I/O)"]
+        GoLibs["Statically Linked Go Libs<br/>(libgolibs.a)"]
+    end
+
+    subgraph GoServices["In-Process Go Services"]
+        FRP["FRP Tunneling<br/>(FRPC Client / FRPS Server)"]
+        DDNS["Dynamic DNS Sync<br/>(24 DNS Providers)"]
+    end
+
+    Engine --> Core
+    Config --> Project
+    Reload --> Project
+    Lock --> Project
+    Project --> Forwarding
+    KernelNAT --- Project
+    AppForward --- Project
+    GoLibs --> GoServices
+    UBUS -.->|"RPC Control & Monitoring"| Project
+    Log -.->|"Event Tracking"| Engine
 ```
-                    +-------------------------------------+
-                    |         PortWeaver Backend           |
-                    |        (Zig + Statically Linked      |
-                    |         Go Libraries)                 |
-                    +------------------+------------------+
-                                       |
-         +-----------------------------+-----------------------------+
-         |                             |                             |
-    +----v----+                 +------+-------+             +------+-------+
-    |  Config  |                 |   Core Loop  |             |   UBUS RPC  |
-    |  System  |                 |  (100ms poll)|             |   Server    |
-    | UCI/JSON |                 |              |             |  (optional) |
-    +----+----+                 +------+-------+             +--------------+
-         |                             |
-    +----v----+                 +------+-------+
-    | Firewall |                 |   Projects   |
-    |  Rules   |                 |  (handles)   |
-    | (UCI)   |                 +------+-------+
-    +---------+                          |
-                         +---------------+---------------+
-                         |               |               |
-                   +-----v-----+  +-----v-----+  +-----v-----+
-                   | Kernel NAT |  | App-Layer |  |    FRP    |
-                   | Forwarding |  | Forwarding|  | (clt/srv) |
-                   | (iptables) |  |  (libuv)  |  |(libgolibs)|
-                   +-----------+  +-----------+  +-----------+
-                                                       |
-                                                 +-----v-----+
-                                                 |    DDNS   |
-                                                 |(libgolibs)|
-                                                 +-----------+
-```
+
+### Subsystems Breakdown
+
+- **Control & Lifecycle Engine** (`main.zig`, `process_lock.zig`):
+  - **Single-Instance Enforcement & Graceful Handoff**: Uses file PID lock (Unix) or Named Mutex (Windows) to prevent double instantiation and supports graceful process takeover with a 5-second handoff window.
+  - **Event-Driven Execution**: Employs event notification synchronization (`process_lock.waitForEvent()`) instead of wasteful busy-polling loops.
+- **Dynamic Config & Hot Reload Subsystem** (`config/`, `reload.zig`):
+  - **Dual Loaders**: Supports OpenWrt UCI configuration (`libuci` integration) and structured JSON (`std.json`).
+  - **Live Reloading**: Automatically watches JSON configuration files via `libuv` `uv_fs_event` or responds to SIGHUP signals / UBUS RPC triggers, applying configuration changes on-the-fly without tearing down unaffected long-running forwarding streams.
+- **Multi-Engine Port Forwarding Subsystem** (`impl/`):
+  - **Kernel Firewall NAT (`uci_firewall.zig`, `nft_firewall.zig`)**: Automatically provisions OpenWrt `fw4` / UCI firewall rules or direct `libnftables` rules for DNAT, port redirects, source IP preservation (`preserve_source_ip`), and kernel packet statistics counters (`enable_firewall_stats`).
+  - **Userspace App-Layer Forwarding (`impl/app_forward/`)**: Asynchronous, multi-threaded forwarding powered by `libuv` event loops (`loop_manager.zig`). Supports TCP/UDP traffic, cross-family IPv4/IPv6 address translation, socket reuse (`SO_REUSEADDR`), and real-time app-layer byte statistics (`enable_app_stats`).
+- **Statically Linked Go Subsystems** (`src/impl/golibs/` -> `libgolibs.a`):
+  - **FRP Reverse Proxying (`frpc_forward.zig`, `frps_forward.zig`)**: Statically linked FRP Client and Server modules. Managed entirely in-process via CGO bindings without external `frpc`/`frps` binaries.
+  - **Dynamic DNS Sync (`ddns_manager.zig`)**: In-process DDNS update engine supporting 24 DNS providers with configurable polling intervals.
+- **UBUS RPC & Diagnostics Subsystem** (`ubus/`, `event_log.zig`, `file_log.zig`):
+  - **UBUS Server**: Exposes RPC methods under the `portweaver` namespace for runtime status inspection, per-project dynamic toggle (`set_enabled`), FRPC/FRPS stats, and DDNS logs.
+  - **Diagnostics**: Includes a thread-safe circular event log ring buffer (20 entries) and a rotating file logger.
 
 ### Startup Sequence
 
-1. **`ensureSingleInstance()`** -- Acquire PID file lock (Unix) or named mutex (Windows); graceful takeover with 5s delay
-2. **`event_log.initGlobal()`** -- Initialize thread-safe event ring buffer (20 capacity)
-3. **`loadConfig()`** -- Parse JSON file or load UCI config based on compile flag
-4. **`file_log.initGlobalFileLogger()`** -- Start optional rotating file logger
-5. **`setupProject()`** -- Create `ProjectHandle` for each enabled project
-6. **`applyConfig()`** -- Apply UCI firewall rules, start DDNS instances, start FRPS servers
-7. **`startForwardingThreads()`** -- Spawn per-port TCP/UDP forwarding threads for each project
-8. **Main loop** -- Poll `shouldExitForTakeover()` with 100ms sleep intervals; exit cleanly on takeover signal
+1. **`process_lock.ensureSingleInstance()`** -- Acquire PID file lock / named mutex; execute graceful takeover if another instance is running.
+2. **`event_log.initGlobal()`** -- Initialize global thread-safe in-memory event ring buffer.
+3. **Signal Handler Registration** -- Register `SIGHUP` signal handler on POSIX systems for live configuration reloads.
+4. **`loadConfigFrom()`** -- Load configuration from OpenWrt UCI (`/etc/config/portweaver`) or JSON (`-c` flag).
+5. **`file_log.initGlobalFileLogger()`** -- Initialize optional rotating file logger if enabled in config.
+6. **`reload.init()`** -- Initialize reload manager and start `libuv` `uv_fs_event` config file watcher (if JSON file watch is enabled).
+7. **`applyConfig()`**:
+   - Initialize `ProjectHandle` instances for configured projects.
+   - Apply kernel firewall / NAT rules (UCI `fw4` or native `libnftables`).
+   - Initialize and start enabled DDNS instances.
+   - Start active FRPS server instances.
+   - Spawn per-project `libuv` app-layer forwarding threads and start FRPC clients.
+8. **`ubus_server.start()`** -- Start OpenWrt UBUS RPC server if compiled with `-Dubus=true`.
+9. **Event Loop** -- Wait on `process_lock.waitForEvent()` for process shutdown, takeover, or hot reload requests (`reload.apply()`).
 
 ## Configuration
 
