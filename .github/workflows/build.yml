@@ -198,7 +198,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true"
+          ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true -Dnftables=true -Dwol=true"
           if [ -n "${{ matrix.cpu }}" ]; then
             ZIG_FLAGS="$ZIG_FLAGS -Dcpu=${{ matrix.cpu }}"
           fi

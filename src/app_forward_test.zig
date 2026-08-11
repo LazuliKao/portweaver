@@ -869,6 +869,46 @@ test "app forward: architecture test with three concurrent loop modes" {
     try testing.expectEqual(@as(usize, 0), runtime_manager.debugRuntimeCount(.per_listener));
 }
 
+test "app forward: project teardown and restart sequence" {
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(85, 0);
+    const target_port = testTargetPort(85, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 85, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    // 1. Initial Start
+    try app_forward.startForwarding(alloc, &handle);
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expectEqual(@as(u32, 1), handle.active_ports);
+
+    // 2. Force Teardown (Simulate UBUS restart_project step 1)
+    handle.teardownForwarders();
+
+    try testing.expectEqual(project_status.StartupStatus.disabled, handle.startup_status);
+    try testing.expectEqual(@as(u32, 0), handle.active_ports);
+    try testing.expect(handle.runtime_manager == null);
+
+    // 3. Restart (Simulate UBUS restart_project step 2)
+    var echo_server = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_server});
+    defer echo_thread.join();
+
+    try app_forward.startForwarding(alloc, &handle);
+    compat.sleepNanos(forwarder_ready_ns);
+
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expectEqual(@as(u32, 1), handle.active_ports);
+
+    // Verify data transfer after restart
+    const response = try tcpClientTest(listen_port, "restart test payload", std.time.ns_per_s);
+    defer alloc.free(response);
+    try testing.expectEqualStrings("restart test payload", response);
+    try testing.expect(echo_server.start_error == null);
+}
+
 test "app forward: tcp single connection with data transfer" {
     const alloc = testing.allocator;
     const listen_port = testListenPort(8, 0);
