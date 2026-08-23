@@ -169,6 +169,8 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
             }
         } else if (std.mem.eql(u8, opt_name, "enable_wol")) {
             project.enable_wol = try types.parseBool(opt_val);
+        } else if (std.mem.eql(u8, opt_name, "wol_trigger_mode")) {
+            project.wol_trigger_mode = try types.parseWolTriggerMode(opt_val);
         } else if (std.mem.eql(u8, opt_name, "wol_target")) {
             project.wol_target = try types.dupeIfNonEmpty(allocator, opt_val);
         } else if (std.mem.eql(u8, opt_name, "enable_protocol_filter")) {
@@ -377,6 +379,15 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 if (cd_trimmed.len != 0) {
                     wol_target.cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch return types.ConfigError.InvalidValue;
                 }
+            } else if (std.mem.eql(u8, opt_name, "wake_delay_ms")) {
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len != 0) wol_target.wake_delay_ms = std.fmt.parseUnsigned(u64, trimmed, 10) catch return types.ConfigError.InvalidValue;
+            } else if (std.mem.eql(u8, opt_name, "retry_interval_ms")) {
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len != 0) wol_target.retry_interval_ms = std.fmt.parseUnsigned(u64, trimmed, 10) catch return types.ConfigError.InvalidValue;
+            } else if (std.mem.eql(u8, opt_name, "retry_window_ms")) {
+                const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
+                if (trimmed.len != 0) wol_target.retry_window_ms = std.fmt.parseUnsigned(u64, trimmed, 10) catch return types.ConfigError.InvalidValue;
             }
         }
 

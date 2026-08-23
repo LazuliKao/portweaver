@@ -134,6 +134,11 @@ pub const LoopMode = enum {
     global,
 };
 
+pub const WolTriggerMode = enum {
+    on_connect,
+    on_protocol,
+};
+
 /// Wake-on-LAN 目标配置
 pub const WolTarget = struct {
     /// 是否启用
@@ -142,6 +147,12 @@ pub const WolTarget = struct {
     mac_addresses: []const []const u8 = &[_][]const u8{},
     /// WoL 魔术包发送冷却时间（毫秒）
     cooldown_ms: u64 = 30000,
+    /// Time to wait after waking before the first target connection attempt.
+    wake_delay_ms: u64 = 1000,
+    /// Delay between target connection retries while the machine wakes.
+    retry_interval_ms: u64 = 1000,
+    /// Maximum time spent waiting and retrying for the target.
+    retry_window_ms: u64 = 30000,
     /// 是否启用 WoL 日志
     log_enabled: bool = false,
 
@@ -157,6 +168,9 @@ pub const WolTarget = struct {
         return a.enabled == b.enabled and
             eqlStringSlices(a.mac_addresses, b.mac_addresses) and
             a.cooldown_ms == b.cooldown_ms and
+            a.wake_delay_ms == b.wake_delay_ms and
+            a.retry_interval_ms == b.retry_interval_ms and
+            a.retry_window_ms == b.retry_window_ms and
             a.log_enabled == b.log_enabled;
     }
 };
@@ -368,6 +382,8 @@ pub const Project = struct {
     max_connections: ?u32 = null,
     /// 启用 Wake-on-LAN 功能
     enable_wol: bool = false,
+    /// Trigger immediately on connection or after recognizing a client protocol.
+    wol_trigger_mode: WolTriggerMode = .on_protocol,
     /// 需要检测的协议名称列表
     detect_protocols: []const []const u8 = &[_][]const u8{},
     /// Standalone WoL 目标名称引用
@@ -375,6 +391,9 @@ pub const Project = struct {
     /// Runtime resolved properties (do not free in deinit, owned by Config.wol_targets)
     resolved_wol_macs: []const []const u8 = &[_][]const u8{},
     resolved_wol_cooldown_ms: u64 = 30000,
+    resolved_wol_wake_delay_ms: u64 = 1000,
+    resolved_wol_retry_interval_ms: u64 = 1000,
+    resolved_wol_retry_window_ms: u64 = 30000,
     resolved_wol_log_enabled: bool = false,
     /// 启用协议过滤（拒绝不匹配的协议）
     enable_protocol_filter: bool = false,
@@ -448,6 +467,7 @@ pub const Project = struct {
             a.connect_timeout_ms == b.connect_timeout_ms and
             a.max_connections == b.max_connections and
             a.enable_wol == b.enable_wol and
+            a.wol_trigger_mode == b.wol_trigger_mode and
             eqlStringSlices(a.detect_protocols, b.detect_protocols) and
             std.mem.eql(u8, a.wol_target, b.wol_target) and
             a.enable_protocol_filter == b.enable_protocol_filter and
@@ -682,6 +702,9 @@ pub const Config = struct {
                 if (self.wol_targets.get(p.wol_target)) |target| {
                     p.resolved_wol_macs = target.mac_addresses;
                     p.resolved_wol_cooldown_ms = target.cooldown_ms;
+                    p.resolved_wol_wake_delay_ms = target.wake_delay_ms;
+                    p.resolved_wol_retry_interval_ms = target.retry_interval_ms;
+                    p.resolved_wol_retry_window_ms = target.retry_window_ms;
                     p.resolved_wol_log_enabled = target.log_enabled;
                 } else {
                     std.log.err("resolveWolTargets: wol_target '{s}' referenced by project '{s}' not found", .{ p.wol_target, p.remark });
@@ -773,6 +796,13 @@ pub fn parseLoopMode(val: []const u8) !LoopMode {
     return ConfigError.InvalidValue;
 }
 
+pub fn parseWolTriggerMode(val: []const u8) !WolTriggerMode {
+    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+    if (trimmed.len == 0 or eqlIgnoreCase(trimmed, "on_protocol") or eqlIgnoreCase(trimmed, "on-protocol")) return .on_protocol;
+    if (eqlIgnoreCase(trimmed, "on_connect") or eqlIgnoreCase(trimmed, "on-connect")) return .on_connect;
+    return ConfigError.InvalidValue;
+}
+
 pub fn dupeIfNonEmpty(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (s.len == 0) return "";
     return allocator.dupe(u8, s);
@@ -797,6 +827,13 @@ test "config: parse app forward loop mode" {
     try std.testing.expectEqual(LoopMode.per_project, try parseLoopMode("per_project"));
     try std.testing.expectEqual(LoopMode.global, try parseLoopMode("global"));
     try std.testing.expectError(ConfigError.InvalidValue, parseLoopMode("bad_mode"));
+}
+
+test "config: parse wol trigger mode" {
+    try std.testing.expectEqual(WolTriggerMode.on_protocol, try parseWolTriggerMode(""));
+    try std.testing.expectEqual(WolTriggerMode.on_protocol, try parseWolTriggerMode("on_protocol"));
+    try std.testing.expectEqual(WolTriggerMode.on_connect, try parseWolTriggerMode("on-connect"));
+    try std.testing.expectError(ConfigError.InvalidValue, parseWolTriggerMode("first_packet"));
 }
 
 test "config: app forward loop mode defaults and effective override" {

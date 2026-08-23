@@ -514,6 +514,15 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             if (parseJsonBool(v, ec.fieldPath("{s}.enable_wol", .{prefix}), ec)) |b| project.enable_wol = b;
         }
 
+        if (obj.get("wol_trigger_mode")) |v| {
+            if (parseJsonString(v, ec.fieldPath("{s}.wol_trigger_mode", .{prefix}), ec)) |s| {
+                project.wol_trigger_mode = types.parseWolTriggerMode(s) catch blk: {
+                    ec.addFmt(ec.fieldPath("{s}.wol_trigger_mode", .{prefix}), .enum_value_invalid, "on_connect/on_protocol", "{s}", .{s}, "invalid WoL trigger mode");
+                    break :blk .on_protocol;
+                };
+            }
+        }
+
         if (obj.get("detect_protocols")) |v| {
             parseJsonZones(a, v, &detect_protocols_list, ec.fieldPath("{s}.detect_protocols", .{prefix}), ec);
         }
@@ -1033,6 +1042,24 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                                 ec.add(ec.fieldPath("{s}.cooldown_ms", .{np}), .out_of_range, "1000-300000", "", "WoL cooldown is out of range");
                                 break :blk 30000;
                             };
+                        }
+                    }
+
+                    if (target_obj.object.get("wake_delay_ms")) |v| {
+                        if (parseJsonUnsigned(v, ec.fieldPath("{s}.wake_delay_ms", .{np}), ec)) |value| {
+                            wol_target.wake_delay_ms = std.math.cast(u64, value) orelse 1000;
+                        }
+                    }
+
+                    if (target_obj.object.get("retry_interval_ms")) |v| {
+                        if (parseJsonUnsigned(v, ec.fieldPath("{s}.retry_interval_ms", .{np}), ec)) |value| {
+                            wol_target.retry_interval_ms = std.math.cast(u64, value) orelse 1000;
+                        }
+                    }
+
+                    if (target_obj.object.get("retry_window_ms")) |v| {
+                        if (parseJsonUnsigned(v, ec.fieldPath("{s}.retry_window_ms", .{np}), ec)) |value| {
+                            wol_target.retry_window_ms = std.math.cast(u64, value) orelse 30000;
                         }
                     }
 
@@ -2296,7 +2323,10 @@ test "json: wol and protocol filter fields" {
         \\"wol_targets": {
         \\  "my_pc": {
         \\    "mac_addresses": ["AA:BB:CC:DD:EE:FF"],
-        \\    "cooldown_ms": 60000
+        \\    "cooldown_ms": 60000,
+        \\    "wake_delay_ms": 2000,
+        \\    "retry_interval_ms": 500,
+        \\    "retry_window_ms": 45000
         \\  }
         \\},
         \\"projects": [{
@@ -2306,10 +2336,11 @@ test "json: wol and protocol filter fields" {
         \\"protocol": "tcp",
         \\"enable_app_forward": true,
         \\"enable_wol": true,
-        \\"detect_protocols": ["rdp", "ssh"],
+        \\"wol_trigger_mode": "on_protocol",
+        \\"detect_protocols": ["rdp", "tls"],
         \\"wol_target": "my_pc",
         \\"enable_protocol_filter": true,
-        \\"allowed_protocols": ["rdp", "ssh"]
+        \\"allowed_protocols": ["rdp", "tls"]
         \\}]
         \\}
     );
@@ -2324,17 +2355,21 @@ test "json: wol and protocol filter fields" {
     try testing.expectEqual(@as(usize, 1), cfg.projects.len);
     const p = cfg.projects[0];
     try testing.expect(p.enable_wol);
+    try testing.expectEqual(types.WolTriggerMode.on_protocol, p.wol_trigger_mode);
     try testing.expectEqualStrings("my_pc", p.wol_target);
     try testing.expectEqual(@as(usize, 2), p.detect_protocols.len);
     try testing.expectEqualStrings("rdp", p.detect_protocols[0]);
-    try testing.expectEqualStrings("ssh", p.detect_protocols[1]);
+    try testing.expectEqualStrings("tls", p.detect_protocols[1]);
     try testing.expectEqual(@as(usize, 1), p.resolved_wol_macs.len);
     try testing.expectEqualStrings("AA:BB:CC:DD:EE:FF", p.resolved_wol_macs[0]);
     try testing.expectEqual(@as(u64, 60000), p.resolved_wol_cooldown_ms);
+    try testing.expectEqual(@as(u64, 2000), p.resolved_wol_wake_delay_ms);
+    try testing.expectEqual(@as(u64, 500), p.resolved_wol_retry_interval_ms);
+    try testing.expectEqual(@as(u64, 45000), p.resolved_wol_retry_window_ms);
     try testing.expect(p.enable_protocol_filter);
     try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
     try testing.expectEqualStrings("rdp", p.allowed_protocols[0]);
-    try testing.expectEqualStrings("ssh", p.allowed_protocols[1]);
+    try testing.expectEqualStrings("tls", p.allowed_protocols[1]);
 }
 
 test "json: invalid protocol filter configuration is rejected" {

@@ -159,6 +159,9 @@ pub fn parseFrpcForwardString(allocator: std.mem.Allocator, s: []const u8) !type
 pub const WOL_COOLDOWN_MIN_MS: u64 = 1000;
 /// Maximum cooldown in milliseconds (5 minutes)
 pub const WOL_COOLDOWN_MAX_MS: u64 = 300000;
+pub const WOL_WAKE_DELAY_MAX_MS: u64 = 300000;
+pub const WOL_RETRY_INTERVAL_MIN_MS: u64 = 100;
+pub const WOL_RETRY_WINDOW_MAX_MS: u64 = 300000;
 
 fn containsProtocol(protocols: []const []const u8, needle: []const u8) bool {
     for (protocols) |protocol| {
@@ -184,6 +187,14 @@ fn hasTcpMapping(project: *const types.Project) bool {
         if (mapping.protocol != .udp) return true;
     }
     return false;
+}
+
+fn supportsProtocolWake(protocol_name: []const u8) bool {
+    const protocol = protocol_detector.protocolFromString(protocol_name) orelse return false;
+    return switch (protocol) {
+        .rdp, .http, .tls, .socks5, .postgresql, .minecraft, .mqtt, .smb => true,
+        .ssh, .vnc, .telnet => false,
+    };
 }
 
 fn isValidSniPattern(pattern: []const u8) bool {
@@ -217,6 +228,12 @@ pub fn validateConfig(config: *const types.Config) !void {
         const target = entry.value_ptr;
         if (entry.key_ptr.*.len == 0 or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
         if (target.cooldown_ms < WOL_COOLDOWN_MIN_MS or target.cooldown_ms > WOL_COOLDOWN_MAX_MS) return types.ConfigError.InvalidValue;
+        if (target.wake_delay_ms > WOL_WAKE_DELAY_MAX_MS or
+            target.retry_interval_ms < WOL_RETRY_INTERVAL_MIN_MS or
+            target.retry_window_ms == 0 or
+            target.retry_window_ms > WOL_RETRY_WINDOW_MAX_MS or
+            target.wake_delay_ms > target.retry_window_ms or
+            target.retry_interval_ms > target.retry_window_ms) return types.ConfigError.InvalidValue;
         if (hasDuplicateStrings(target.mac_addresses)) return types.ConfigError.InvalidValue;
         for (target.mac_addresses) |mac| {
             if (wol.parseMac(mac) == null) return types.ConfigError.InvalidValue;
@@ -243,9 +260,15 @@ pub fn validateConfig(config: *const types.Config) !void {
         }
 
         if (project.enable_wol) {
-            if (project.detect_protocols.len == 0 or project.wol_target.len == 0) return types.ConfigError.InvalidValue;
+            if (project.wol_target.len == 0) return types.ConfigError.InvalidValue;
             const target = config.wol_targets.get(project.wol_target) orelse return types.ConfigError.InvalidValue;
             if (!target.enabled or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
+            if (project.wol_trigger_mode == .on_protocol) {
+                if (project.detect_protocols.len == 0) return types.ConfigError.InvalidValue;
+                for (project.detect_protocols) |protocol| {
+                    if (!supportsProtocolWake(protocol)) return types.ConfigError.InvalidValue;
+                }
+            }
         }
 
         if (project.enable_protocol_filter and project.allowed_protocols.len == 0) return types.ConfigError.InvalidValue;
