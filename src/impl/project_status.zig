@@ -537,6 +537,10 @@ pub const ProjectHandle = struct {
     }
 };
 
+/// Owns heap-allocated project handles. The pointer values remain stable when
+/// the list grows, so active forwarders can safely retain their owner handle.
+pub const ProjectHandleList = std.array_list.Managed(*ProjectHandle);
+
 /// Reads nftables counter stats from a batch JSON output for a given port+protocol.
 /// dstnat counter → bytes_in (inbound traffic), srcnat counter → bytes_out (outbound traffic).
 /// No allocations — counter names are constructed on the stack.
@@ -608,9 +612,10 @@ fn parsePortPrefix(port_str: []const u8) u16 {
     return std.fmt.parseInt(u16, port_str, 10) catch 0;
 }
 
-pub fn stopAll(handles: *std.array_list.Managed(ProjectHandle)) void {
-    for (handles.items) |*handle| {
+pub fn stopAll(handles: *ProjectHandleList) void {
+    for (handles.items) |handle| {
         handle.deinit();
+        handle.allocator.destroy(handle);
     }
     handles.clearAndFree();
 }
@@ -660,4 +665,35 @@ test "project status: startup status transitions update error code" {
 
     handle.setDisabled();
     try std.testing.expectEqual(StartupStatus.disabled, handle.startup_status);
+}
+
+test "project handle list growth preserves handle addresses" {
+    const allocator = std.testing.allocator;
+    var handles = try ProjectHandleList.initCapacity(allocator, 1);
+    defer {
+        stopAll(&handles);
+        handles.deinit();
+    }
+
+    const project: types.Project = .{
+        .listen_port = 1,
+        .target_address = "127.0.0.1",
+        .target_port = 1,
+    };
+    const first = try allocator.create(ProjectHandle);
+    first.* = ProjectHandle.init(allocator, 0, project, false);
+    try handles.append(first);
+
+    const original_address = @intFromPtr(first);
+    for (1..16) |id| {
+        const handle = try allocator.create(ProjectHandle);
+        handle.* = ProjectHandle.init(allocator, id, project, false);
+        handles.append(handle) catch |err| {
+            handle.deinit();
+            allocator.destroy(handle);
+            return err;
+        };
+    }
+
+    try std.testing.expectEqual(original_address, @intFromPtr(handles.items[0]));
 }

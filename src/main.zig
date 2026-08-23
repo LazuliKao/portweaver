@@ -169,28 +169,20 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // 加载配置
-    var result = try loadConfigFrom(allocator, cfg_source, cfg_path);
+    const result = try loadConfigFrom(allocator, cfg_source, cfg_path);
 
     if (result.log_config.enabled) {
         file_log.initGlobalFileLogger(allocator, result.log_config);
     }
     defer file_log.deinitGlobalFileLogger();
 
-    const cfg = &result;
+    var handles = try project_status.ProjectHandleList.initCapacity(allocator, result.projects.len);
 
-    @import("impl/app_forward/forwarder_runtime.zig").logBackendVersion();
-    std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
-    if (build_options.frpc_mode) {
-        std.log.info("FRPC client mode enabled (build flag)", .{});
-    }
-    if (build_options.frps_mode) {
-        std.log.info("FRPS server mode enabled (build flag)", .{});
-    }
-    if (build_options.nftables_mode) {
-        std.log.info("nftables mode enabled (build flag)", .{});
-    }
-
-    var handles = try std.array_list.Managed(project_status.ProjectHandle).initCapacity(allocator, cfg.projects.len);
+    // 初始化重载模块（接管 config 所有权，之后不要 deinit result）
+    reload.init(allocator, &handles, result, cfg_source, cfg_path);
+    defer reload.deinit();
+    // This defer is registered after reload.deinit so handles stop before their
+    // borrowed project configuration is released.
     defer {
         if (build_options.ubus_mode) {
             ubus_server.stop();
@@ -209,16 +201,25 @@ pub fn main(init: std.process.Init) !void {
             libfrps.cleanup();
         }
     }
+    const cfg = reload.getConfig().?;
 
-    // 初始化重载模块（接管 config 所有权，之后不要 deinit result）
-    reload.init(allocator, &handles, result, cfg_source, cfg_path);
-    defer reload.deinit();
+    @import("impl/app_forward/forwarder_runtime.zig").logBackendVersion();
+    std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
+    if (build_options.frpc_mode) {
+        std.log.info("FRPC client mode enabled (build flag)", .{});
+    }
+    if (build_options.frps_mode) {
+        std.log.info("FRPS server mode enabled (build flag)", .{});
+    }
+    if (build_options.nftables_mode) {
+        std.log.info("nftables mode enabled (build flag)", .{});
+    }
 
     // 应用配置并启动服务
     const has_app_forward = try applyConfig(allocator, &handles, cfg);
 
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, &handles, &cfg.frpc_nodes, &cfg.wol_targets) catch |err| {
+        ubus_server.start(allocator, &handles) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
         };
     }
@@ -241,9 +242,14 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .reload => {
                     std.log.info("Configuration reload requested...", .{});
+                    if (build_options.ubus_mode) {
+                        ubus_server.stop();
+                    }
                     reload.apply();
                     if (build_options.ubus_mode) {
-                        ubus_server.notifyReload();
+                        ubus_server.start(allocator, &handles) catch |err| {
+                            std.log.warn("Failed to restart ubus server after reload: {any}", .{err});
+                        };
                     }
                 },
             }
@@ -282,12 +288,15 @@ fn parseConfigFile(args: []const []const u8) ![]const u8 {
     std.log.info("No config file specified, using default: config.json", .{});
     return "config.json";
 }
-fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_list.Managed(project_status.ProjectHandle), project: config.Project, use_nftables: bool) !void {
-    const handle: project_status.ProjectHandle = .init(allocator, id, project, use_nftables);
+fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *project_status.ProjectHandleList, project: config.Project, use_nftables: bool) !void {
+    const handle = try allocator.create(project_status.ProjectHandle);
+    errdefer allocator.destroy(handle);
+    handle.* = .init(allocator, id, project, use_nftables);
+    errdefer handle.deinit();
     try handles.append(handle);
 
     if (!project.enabled) {
-        handles.items[handles.items.len - 1].setDisabled();
+        handle.setDisabled();
         std.log.info("Project {d} ({s}) is disabled, skipping.", .{ id + 1, project.remark });
         return;
     }
@@ -298,7 +307,7 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *std.array_lis
     }
 }
 /// 应用配置：设置防火墙规则并启动应用层转发
-fn applyConfig(allocator: std.mem.Allocator, handles: *std.array_list.Managed(project_status.ProjectHandle), cfg: *const config.Config) !bool {
+fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHandleList, cfg: *const config.Config) !bool {
     // 设置所有项目
     for (cfg.projects, 0..) |project, i| {
         setupProject(allocator, i, handles, project, cfg.use_nftables) catch |err| {
@@ -435,13 +444,13 @@ fn logProjectConfig(project: config.Project) void {
 /// 启动所有转发线程
 fn startForwardingThreads(
     allocator: std.mem.Allocator,
-    handles: *std.array_list.Managed(project_status.ProjectHandle),
+    handles: *project_status.ProjectHandleList,
     frpc_nodes: *const std.StringHashMap(config.FrpcNode),
 ) !bool {
     std.log.info("Starting forwarding threads...", .{});
     var has_app_forward = false;
 
-    for (handles.items) |*handle| {
+    for (handles.items) |handle| {
         if (!handle.cfg.enabled) {
             continue;
         }

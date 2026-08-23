@@ -18,7 +18,7 @@ pub const ConfigSource = enum {
 };
 
 var allocator: ?std.mem.Allocator = null;
-var handles: ?*std.array_list.Managed(project_status.ProjectHandle) = null;
+var handles: ?*project_status.ProjectHandleList = null;
 var current_cfg: ?config.Config = null;
 var config_source: ConfigSource = .uci;
 var config_path: ?[]const u8 = null;
@@ -75,7 +75,7 @@ fn stopWatcher() void {
 /// Takes ownership of `cfg` — caller must NOT deinit it.
 pub fn init(
     alloc: std.mem.Allocator,
-    h: *std.array_list.Managed(project_status.ProjectHandle),
+    h: *project_status.ProjectHandleList,
     cfg: config.Config,
     source: ConfigSource,
     path: ?[]const u8,
@@ -176,7 +176,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
 
     // 1) Restart changed projects (index-aligned diff)
     for (0..common) |i| {
-        var handle = &h.items[i];
+        const handle = h.items[i];
         if (old_projects[i].eql(new_projects[i])) {
             // Config unchanged — just update the cfg pointer to new config and use_nftables
             handle.cfg = new_projects[i];
@@ -216,12 +216,18 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     // 3) Add new projects
     for (common..new_projects.len) |i| {
         std.log.info("Reload: adding new project {d} ({s})", .{ i + 1, new_projects[i].remark });
-        const new_handle = project_status.ProjectHandle.init(alloc, i, new_projects[i], new_cfg.use_nftables);
-        h.append(new_handle) catch |err| {
-            std.log.err("Reload: failed to add project {d}: {any}", .{ i + 1, err });
+        const new_handle = alloc.create(project_status.ProjectHandle) catch |err| {
+            std.log.err("Reload: failed to allocate project {d}: {any}", .{ i + 1, err });
             continue;
         };
-        var handle = &h.items[h.items.len - 1];
+        new_handle.* = project_status.ProjectHandle.init(alloc, i, new_projects[i], new_cfg.use_nftables);
+        h.append(new_handle) catch |err| {
+            std.log.err("Reload: failed to add project {d}: {any}", .{ i + 1, err });
+            new_handle.deinit();
+            alloc.destroy(new_handle);
+            continue;
+        };
+        const handle = new_handle;
 
         if (!new_projects[i].enabled) {
             handle.setDisabled();
@@ -234,17 +240,16 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         event_log.logEventFmt(.project_started, @intCast(i), "Project {d} added and enabled", .{i + 1});
     }
 
-    // 4) Disable removed projects (old projects beyond new config length)
+    // 4) Destroy removed projects before releasing their borrowed config.
     if (old_projects.len > new_projects.len) {
         for (new_projects.len..old_projects.len) |i| {
-            var handle = &h.items[i];
-            if (handle.startup_status == .success or handle.startup_status == .disabled) {
-                std.log.info("Reload: disabling removed project {d} ({s})", .{ i + 1, handle.cfg.remark });
-                handle.teardownForwarders();
-                handle.setDisabled();
-                event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} removed", .{i + 1});
-            }
+            const handle = h.items[i];
+            std.log.info("Reload: removing project {d} ({s})", .{ i + 1, handle.cfg.remark });
+            handle.deinit();
+            alloc.destroy(handle);
+            event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} removed", .{i + 1});
         }
+        h.shrinkRetainingCapacity(new_projects.len);
     }
 
     // 5) Flush FRPC clients after all changes

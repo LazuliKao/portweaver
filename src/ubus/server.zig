@@ -35,6 +35,7 @@ const serialization = @import("serialization.zig");
 const RawJson = serialization.RawJson;
 const wrapHandler = serialization.wrapHandler;
 const reload = @import("../reload.zig");
+const process_lock = @import("../process_lock.zig");
 
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
@@ -52,14 +53,12 @@ const GlobalSnapshot = struct {
 const RuntimeState = struct {
     allocator: std.mem.Allocator,
     start_ts: u64,
-    projects: *std.array_list.Managed(project_status.ProjectHandle),
-    frpc_nodes: *const std.StringHashMap(types.FrpcNode),
-    wol_targets: *const std.StringHashMap(types.WolTarget),
+    projects: *project_status.ProjectHandleList,
     enabled: []bool,
     last_changed: []u64,
     use_nftables: bool,
     mutex: std.Io.Mutex = .init,
-    pub fn init(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode), wol_targets: *const std.StringHashMap(types.WolTarget)) !*RuntimeState {
+    pub fn init(allocator: std.mem.Allocator, projects: *project_status.ProjectHandleList) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         errdefer allocator.destroy(state);
 
@@ -74,8 +73,6 @@ const RuntimeState = struct {
             .allocator = allocator,
             .start_ts = now,
             .projects = projects,
-            .frpc_nodes = frpc_nodes,
-            .wol_targets = wol_targets,
             .enabled = enabled,
             .last_changed = last_changed,
             .use_nftables = if (projects.items.len > 0) projects.items[0].use_nftables else false,
@@ -104,7 +101,7 @@ const RuntimeState = struct {
 
         const now = currentTs();
         for (0..new_len) |i| {
-            const project = &self.projects.items[i];
+            const project = self.projects.items[i];
             const is_enabled = project.cfg.enabled;
             new_enabled[i] = is_enabled;
 
@@ -150,7 +147,7 @@ const RuntimeState = struct {
 
         var i: usize = 0;
         while (i < self.projects.items.len) : (i += 1) {
-            const project = &self.projects.items[i];
+            const project = self.projects.items[i];
             if (self.enabled[i]) {
                 enabled_projects += 1;
                 if (project.startup_status == .success) {
@@ -306,12 +303,12 @@ const field_names = struct {
     pub const project: [:0]const u8 = "project";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: *std.array_list.Managed(project_status.ProjectHandle), frpc_nodes: *const std.StringHashMap(types.FrpcNode), wol_targets: *const std.StringHashMap(types.WolTarget)) !void {
+pub fn start(allocator: std.mem.Allocator, projects: *project_status.ProjectHandleList) !void {
     g_lifecycle_mutex.lockUncancelable(compat.io());
     defer g_lifecycle_mutex.unlock(compat.io());
 
     if (g_state != null) return;
-    const state = try RuntimeState.init(allocator, projects, frpc_nodes, wol_targets);
+    const state = try RuntimeState.init(allocator, projects);
     g_state = state;
     errdefer {
         g_state = null;
@@ -832,7 +829,7 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
     var projects_list: std.ArrayList(ProjectStatusInfo) = .empty;
     errdefer projects_list.deinit(allocator);
 
-    for (state.projects.items, 0..) |*project, i| {
+    for (state.projects.items, 0..) |project, i| {
         const info = project.getProjectRuntimeInfo();
 
         var forwarders_list: std.ArrayList(ForwarderStatsInfo) = .empty;
@@ -894,7 +891,7 @@ fn setEnabled(allocator: std.mem.Allocator, state: *RuntimeState, args: SetEnabl
     const now = currentTs();
     state.last_changed[idx] = now;
 
-    var project = &state.projects.items[idx];
+    const project = state.projects.items[idx];
     project.setRuntimeEnabled(args.enabled);
 
     if (old_enabled != args.enabled) {
@@ -1237,7 +1234,7 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
         return error.InvalidArgument;
     }
 
-    var project = &state.projects.items[idx];
+    const project = state.projects.items[idx];
     if (!project.cfg.enabled) {
         return error.InvalidArgument;
     }
@@ -1253,7 +1250,8 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
 
     // Re-start FRPC forwarding (if enabled)
     if (build_options.frpc_mode) {
-        frpc_forward.startForwarding(allocator, project, state.frpc_nodes) catch |err| {
+        const frpc_nodes = reload.getFrpcNodes() orelse return error.InvalidValue;
+        frpc_forward.startForwarding(allocator, project, frpc_nodes) catch |err| {
             std.log.warn("ubus: failed to restart FRPC for project {d}: {any}", .{ args.id, err });
         };
     }
@@ -1270,28 +1268,25 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
 fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !ReloadConfigResponse {
     _ = allocator;
 
-    // Delegate to the shared reload module — it handles config re-reading,
-    // diff comparison, teardown, restart, firewall refresh, and sub-service reload.
-    reload.apply();
-
-    try state.syncFromProjects();
+    _ = state;
+    process_lock.requestReload();
 
     return .{
         .success = true,
         .changes = 0, // Individual counts are logged by reload.apply()
-        .message = "Config reload triggered successfully",
+        .message = "Config reload scheduled",
     };
 }
 
 fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
-    for (state.projects.items) |*project| {
+    for (state.projects.items) |project| {
         if (std.mem.eql(u8, project.cfg.remark, name)) {
             return project;
         }
     }
     const idx = std.fmt.parseUnsigned(usize, name, 10) catch return null;
     if (idx < state.projects.items.len) {
-        return &state.projects.items[idx];
+        return state.projects.items[idx];
     }
     return null;
 }
@@ -1309,7 +1304,8 @@ fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectA
     const mgr = getWolManager(allocator);
 
     if (args.target) |target_name| {
-        const target = state.wol_targets.get(target_name) orelse return error.NotFound;
+        const cfg = reload.getConfig() orelse return error.InvalidValue;
+        const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
         if (!target.enabled) {
             return .{ .success = false, .sent_count = 0 };
         }
@@ -1338,7 +1334,8 @@ fn wolStatus(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjec
     _ = allocator;
 
     if (args.target) |target_name| {
-        const target = state.wol_targets.get(target_name) orelse return error.NotFound;
+        const cfg = reload.getConfig() orelse return error.InvalidValue;
+        const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
         return .{
             .enabled = target.enabled,
             .mac_count = @intCast(target.mac_addresses.len),
