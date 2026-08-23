@@ -493,19 +493,21 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         }
 
         if (obj.get("connect_timeout_ms")) |v| {
-            project.connect_timeout_ms = switch (v) {
-                .integer => |i| @intCast(i),
-                .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch null,
-                else => null,
-            };
+            if (parseJsonUnsigned(v, ec.fieldPath("{s}.connect_timeout_ms", .{prefix}), ec)) |value| {
+                project.connect_timeout_ms = std.math.cast(u32, value) orelse blk: {
+                    ec.add(ec.fieldPath("{s}.connect_timeout_ms", .{prefix}), .out_of_range, "0-u32.max", "", "connect timeout is out of range");
+                    break :blk null;
+                };
+            }
         }
 
         if (obj.get("max_connections")) |v| {
-            project.max_connections = switch (v) {
-                .integer => |i| @intCast(i),
-                .string => |s| std.fmt.parseUnsigned(u32, s, 10) catch null,
-                else => null,
-            };
+            if (parseJsonUnsigned(v, ec.fieldPath("{s}.max_connections", .{prefix}), ec)) |value| {
+                project.max_connections = std.math.cast(u32, value) orelse blk: {
+                    ec.add(ec.fieldPath("{s}.max_connections", .{prefix}), .out_of_range, "0-u32.max", "", "maximum connections is out of range");
+                    break :blk null;
+                };
+            }
         }
 
         if (obj.get("enable_wol")) |v| {
@@ -1026,11 +1028,12 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                     }
 
                     if (target_obj.object.get("cooldown_ms")) |v| {
-                        wol_target.cooldown_ms = switch (v) {
-                            .integer => |i| @intCast(i),
-                            .string => |s| std.fmt.parseUnsigned(u64, s, 10) catch 30000,
-                            else => 30000,
-                        };
+                        if (parseJsonUnsigned(v, ec.fieldPath("{s}.cooldown_ms", .{np}), ec)) |value| {
+                            wol_target.cooldown_ms = std.math.cast(u64, value) orelse blk: {
+                                ec.add(ec.fieldPath("{s}.cooldown_ms", .{np}), .out_of_range, "1000-300000", "", "WoL cooldown is out of range");
+                                break :blk 30000;
+                            };
+                        }
                     }
 
                     if (target_obj.object.get("enabled")) |v| {
@@ -1051,6 +1054,21 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             }
         }
     }
+
+    const validation_config = types.Config{
+        .app_forward_loop_mode = app_forward_loop_mode,
+        .use_nftables = use_nftables,
+        .watch = watch,
+        .log_config = log_config,
+        .projects = list.items,
+        .frpc_nodes = frpc_nodes,
+        .frps_nodes = frps_nodes,
+        .wol_targets = wol_targets,
+        .ddns_configs = ddns_list.items,
+    };
+    helper.validateConfig(&validation_config) catch {
+        ec.add("wol/protocol_filter", .conflict, "valid WoL and protocol-filter configuration", "", "invalid feature configuration");
+    };
 
     // ── Final check ─────────────────────────────────────────────────────
     if (ec.hasErrors()) {
@@ -2285,11 +2303,13 @@ test "json: wol and protocol filter fields" {
         \\"target_address": "192.168.1.1",
         \\"listen_port": 80,
         \\"target_port": 80,
+        \\"protocol": "tcp",
+        \\"enable_app_forward": true,
         \\"enable_wol": true,
         \\"detect_protocols": ["rdp", "ssh"],
         \\"wol_target": "my_pc",
         \\"enable_protocol_filter": true,
-        \\"allowed_protocols": ["tcp", "udp"]
+        \\"allowed_protocols": ["rdp", "ssh"]
         \\}]
         \\}
     );
@@ -2313,8 +2333,30 @@ test "json: wol and protocol filter fields" {
     try testing.expectEqual(@as(u64, 60000), p.resolved_wol_cooldown_ms);
     try testing.expect(p.enable_protocol_filter);
     try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
-    try testing.expectEqualStrings("tcp", p.allowed_protocols[0]);
-    try testing.expectEqualStrings("udp", p.allowed_protocols[1]);
+    try testing.expectEqualStrings("rdp", p.allowed_protocols[0]);
+    try testing.expectEqualStrings("ssh", p.allowed_protocols[1]);
+}
+
+test "json: invalid protocol filter configuration is rejected" {
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\"projects": [{
+        \\"target_address": "192.168.1.1",
+        \\"listen_port": 80,
+        \\"target_port": 80,
+        \\"enable_app_forward": true,
+        \\"enable_protocol_filter": true,
+        \\"allowed_protocols": ["tcp", "udp"]
+        \\}]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    try testing.expectError(types.ConfigError.ValidationFailed, loadFromJsonFileWithErrors(alloc, path, &ec));
+    try testing.expect(ec.hasErrors());
 }
 
 test "json: tls_allowed_snis parsing" {
@@ -2325,6 +2367,8 @@ test "json: tls_allowed_snis parsing" {
         \\"target_address": "192.168.1.1",
         \\"listen_port": 443,
         \\"target_port": 443,
+        \\"protocol": "tcp",
+        \\"enable_app_forward": true,
         \\"enable_protocol_filter": true,
         \\"allowed_protocols": ["tls"],
         \\"tls_allowed_snis": ["*.example.com", "specific.host.org"]

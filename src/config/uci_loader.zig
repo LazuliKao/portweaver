@@ -160,12 +160,12 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
         } else if (std.mem.eql(u8, opt_name, "connect_timeout_ms")) {
             const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
             if (trimmed.len != 0) {
-                project.connect_timeout_ms = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
+                project.connect_timeout_ms = std.fmt.parseUnsigned(u32, trimmed, 10) catch return types.ConfigError.InvalidValue;
             }
         } else if (std.mem.eql(u8, opt_name, "max_connections")) {
             const trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
             if (trimmed.len != 0) {
-                project.max_connections = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
+                project.max_connections = std.fmt.parseUnsigned(u32, trimmed, 10) catch return types.ConfigError.InvalidValue;
             }
         } else if (std.mem.eql(u8, opt_name, "enable_wol")) {
             project.enable_wol = try types.parseBool(opt_val);
@@ -186,12 +186,12 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
                 var val_it = opt.values();
                 while (val_it.next()) |val| {
                     const s = uci.cStr(val);
-                    const mapping = helper.parsePortMapping(allocator, s) catch continue;
+                    const mapping = try helper.parsePortMapping(allocator, s);
                     try port_mappings_list.append(mapping);
                 }
             } else if (opt.isString()) {
                 const opt_val = uci.cStr(opt.getString());
-                const mapping = helper.parsePortMapping(allocator, opt_val) catch continue;
+                const mapping = try helper.parsePortMapping(allocator, opt_val);
                 try port_mappings_list.append(mapping);
             }
         }
@@ -375,7 +375,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             } else if (std.mem.eql(u8, opt_name, "cooldown_ms")) {
                 const cd_trimmed = std.mem.trim(u8, opt_val, " \t\r\n");
                 if (cd_trimmed.len != 0) {
-                    wol_target.cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch 30000;
+                    wol_target.cooldown_ms = std.fmt.parseUnsigned(u64, cd_trimmed, 10) catch return types.ConfigError.InvalidValue;
                 }
             }
         }
@@ -392,6 +392,10 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         const target_name_owned = try allocator.dupe(u8, target_name);
         errdefer allocator.free(target_name_owned);
 
+        if (wol_targets.contains(target_name_owned)) {
+            wol_target.deinit(allocator);
+            return types.ConfigError.InvalidValue;
+        }
         try wol_targets.put(target_name_owned, wol_target);
     }
 
@@ -742,16 +746,28 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         try ddns_list.append(ddns_cfg);
     }
 
+    const projects = try list.toOwnedSlice();
+    errdefer {
+        for (projects) |*project| project.deinit(allocator);
+        allocator.free(projects);
+    }
+    const ddns_configs = try ddns_list.toOwnedSlice();
+    errdefer {
+        for (ddns_configs) |*ddns| ddns.deinit(allocator);
+        allocator.free(ddns_configs);
+    }
+
     var cfg = types.Config{
         .log_config = log_config,
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
-        .projects = try list.toOwnedSlice(),
+        .projects = projects,
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
         .wol_targets = wol_targets,
-        .ddns_configs = try ddns_list.toOwnedSlice(),
+        .ddns_configs = ddns_configs,
     };
+    try helper.validateConfig(&cfg);
     cfg.resolveWolTargets();
     return cfg;
 }

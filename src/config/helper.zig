@@ -160,6 +160,100 @@ pub const WOL_COOLDOWN_MIN_MS: u64 = 1000;
 /// Maximum cooldown in milliseconds (5 minutes)
 pub const WOL_COOLDOWN_MAX_MS: u64 = 300000;
 
+fn containsProtocol(protocols: []const []const u8, needle: []const u8) bool {
+    for (protocols) |protocol| {
+        if (std.ascii.eqlIgnoreCase(protocol, needle)) return true;
+    }
+    return false;
+}
+
+fn hasDuplicateStrings(values: []const []const u8) bool {
+    for (values, 0..) |value, index| {
+        for (values[index + 1 ..]) |other| {
+            if (std.ascii.eqlIgnoreCase(value, other)) return true;
+        }
+    }
+    return false;
+}
+
+fn hasTcpMapping(project: *const types.Project) bool {
+    if (project.port_mappings.len == 0) {
+        return project.protocol != .udp;
+    }
+    for (project.port_mappings) |mapping| {
+        if (mapping.protocol != .udp) return true;
+    }
+    return false;
+}
+
+fn isValidSniPattern(pattern: []const u8) bool {
+    if (pattern.len == 0 or pattern.len > 253) return false;
+
+    var hostname = pattern;
+    if (std.mem.startsWith(u8, hostname, "*.")) {
+        hostname = hostname[2..];
+    } else if (std.mem.indexOfScalar(u8, hostname, '*') != null) {
+        return false;
+    }
+    if (hostname.len == 0 or hostname[0] == '.' or hostname[hostname.len - 1] == '.') return false;
+
+    var label_start: usize = 0;
+    for (hostname, 0..) |char, index| {
+        if (char == '.') {
+            if (index == label_start or index - label_start > 63) return false;
+            if (hostname[label_start] == '-' or hostname[index - 1] == '-') return false;
+            label_start = index + 1;
+        } else if (!std.ascii.isAlphanumeric(char) and char != '-') {
+            return false;
+        }
+    }
+    return hostname.len - label_start <= 63 and hostname[label_start] != '-' and hostname[hostname.len - 1] != '-';
+}
+
+/// Validate all WoL targets and project feature invariants after parsing.
+pub fn validateConfig(config: *const types.Config) !void {
+    var target_it = config.wol_targets.iterator();
+    while (target_it.next()) |entry| {
+        const target = entry.value_ptr;
+        if (entry.key_ptr.*.len == 0 or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
+        if (target.cooldown_ms < WOL_COOLDOWN_MIN_MS or target.cooldown_ms > WOL_COOLDOWN_MAX_MS) return types.ConfigError.InvalidValue;
+        if (hasDuplicateStrings(target.mac_addresses)) return types.ConfigError.InvalidValue;
+        for (target.mac_addresses) |mac| {
+            if (wol.parseMac(mac) == null) return types.ConfigError.InvalidValue;
+        }
+    }
+
+    for (config.projects) |*project| {
+        if (hasDuplicateStrings(project.detect_protocols) or
+            hasDuplicateStrings(project.allowed_protocols) or
+            hasDuplicateStrings(project.tls_allowed_snis)) return types.ConfigError.InvalidValue;
+
+        for (project.detect_protocols) |protocol| {
+            if (protocol_detector.protocolFromString(protocol) == null) return types.ConfigError.InvalidValue;
+        }
+        for (project.allowed_protocols) |protocol| {
+            if (protocol_detector.protocolFromString(protocol) == null) return types.ConfigError.InvalidValue;
+        }
+        for (project.tls_allowed_snis) |pattern| {
+            if (!isValidSniPattern(pattern)) return types.ConfigError.InvalidValue;
+        }
+
+        if (project.enable_wol or project.enable_protocol_filter) {
+            if (!project.enable_app_forward or !hasTcpMapping(project)) return types.ConfigError.InvalidValue;
+        }
+
+        if (project.enable_wol) {
+            if (project.detect_protocols.len == 0 or project.wol_target.len == 0) return types.ConfigError.InvalidValue;
+            const target = config.wol_targets.get(project.wol_target) orelse return types.ConfigError.InvalidValue;
+            if (!target.enabled or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
+        }
+
+        if (project.enable_protocol_filter and project.allowed_protocols.len == 0) return types.ConfigError.InvalidValue;
+        if (project.tls_allowed_snis.len > 0 and
+            (!project.enable_protocol_filter or !containsProtocol(project.allowed_protocols, "tls"))) return types.ConfigError.InvalidValue;
+    }
+}
+
 /// Result of WoL config validation. Collects errors without requiring an allocator.
 pub const WolValidationResult = struct {
     mac_errors: u32 = 0,
@@ -174,7 +268,7 @@ pub const WolValidationResult = struct {
 
 /// Validate WoL and protocol filter configuration fields.
 /// Returns a WolValidationResult indicating whether the config is valid.
-/// Empty lists are considered valid (use defaults).
+/// This field-level helper is retained for callers that need error counts.
 pub fn validateWolConfig(project: *const types.Project) WolValidationResult {
     var result = WolValidationResult{};
 
