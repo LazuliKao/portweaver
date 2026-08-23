@@ -20,6 +20,7 @@ const file_log = @import("file_log.zig");
 const compat = @import("compat.zig");
 const reload = @import("reload.zig");
 const libddns = if (build_options.ddns_mode) @import("impl/ddns/libddns.zig") else struct {};
+const wol = if (build_options.wol_mode) @import("impl/wol.zig") else struct {};
 
 fn handleSighup(_: std.posix.SIG) callconv(.c) void {
     process_lock.requestReload();
@@ -150,6 +151,11 @@ pub fn main(init: std.process.Init) !void {
     // Initialize event logger
     event_log.initGlobal(allocator);
     defer event_log.deinitGlobal();
+
+    if (build_options.wol_mode) {
+        try wol.initGlobal(allocator);
+    }
+    defer if (build_options.wol_mode) wol.deinitGlobal();
 
     // 注册 SIGHUP 信号处理器（非 Windows）
     if (@import("builtin").os.tag != .windows) {

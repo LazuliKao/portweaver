@@ -4,73 +4,274 @@ const linux = std.os.linux;
 const event_log = @import("../event_log.zig");
 const compat = @import("../compat.zig");
 
-/// Per-MAC cooldown manager (global, in-memory, not persisted).
-/// Maps MAC string to the last WoL send timestamp (milliseconds).
-pub const WolManager = struct {
-    cooldown_map: std.StringHashMap(i64),
-    mutex: std.Io.Mutex,
+const DEFAULT_QUEUE_CAPACITY = 256;
 
-    pub fn init(allocator: std.mem.Allocator) WolManager {
-        return .{
-            .cooldown_map = std.StringHashMap(i64).init(allocator),
-            .mutex = .init,
+pub const EnqueueResult = struct {
+    queued: u32 = 0,
+    skipped: u32 = 0,
+    failed: u32 = 0,
+};
+
+const Job = struct {
+    mac: [6]u8,
+    cooldown_ms: u64,
+    log_enabled: bool,
+    project_id: i32,
+};
+
+const CooldownEntry = struct {
+    cooldown_until_ms: ?i64 = null,
+    pending: bool = false,
+};
+
+const SendFn = *const fn (?*anyopaque, [6]u8) anyerror!void;
+const ClockFn = *const fn (?*anyopaque) i64;
+
+/// Process-wide asynchronous WoL sender. The service owns its queue, worker,
+/// and cooldown state; callers only enqueue value-owned jobs.
+pub const WolService = struct {
+    allocator: std.mem.Allocator,
+    queue: std.array_list.Managed(Job),
+    queue_capacity: usize,
+    cooldowns: std.AutoHashMap([6]u8, CooldownEntry),
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    thread: ?std.Thread = null,
+    stop_requested: bool = false,
+    active_jobs: usize = 0,
+    send_fn: SendFn,
+    send_context: ?*anyopaque,
+    clock_fn: ClockFn,
+    clock_context: ?*anyopaque,
+
+    const Options = struct {
+        queue_capacity: usize = DEFAULT_QUEUE_CAPACITY,
+        send_fn: SendFn = defaultSend,
+        send_context: ?*anyopaque = null,
+        clock_fn: ClockFn = defaultClock,
+        clock_context: ?*anyopaque = null,
+    };
+
+    /// The returned service owns all allocations and must be deinitialized.
+    pub fn init(allocator: std.mem.Allocator) !*WolService {
+        return initWithOptions(allocator, .{});
+    }
+
+    fn initWithOptions(allocator: std.mem.Allocator, options: Options) !*WolService {
+        if (options.queue_capacity == 0) return error.InvalidQueueCapacity;
+
+        const self = try allocator.create(WolService);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
+            .allocator = allocator,
+            .queue = try std.array_list.Managed(Job).initCapacity(allocator, options.queue_capacity),
+            .queue_capacity = options.queue_capacity,
+            .cooldowns = std.AutoHashMap([6]u8, CooldownEntry).init(allocator),
+            .send_fn = options.send_fn,
+            .send_context = options.send_context,
+            .clock_fn = options.clock_fn,
+            .clock_context = options.clock_context,
         };
+        errdefer self.queue.deinit();
+        errdefer self.cooldowns.deinit();
+
+        self.thread = try std.Thread.spawn(.{}, workerMain, .{self});
+        return self;
     }
 
-    pub fn deinit(self: *WolManager) void {
-        self.cooldown_map.deinit();
+    pub fn deinit(self: *WolService) void {
+        self.mutex.lockUncancelable(compat.io());
+        self.stop_requested = true;
+        self.condition.broadcast(compat.io());
+        self.mutex.unlock(compat.io());
+
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+
+        self.cooldowns.deinit();
+        self.queue.deinit();
+        const allocator = self.allocator;
+        allocator.destroy(self);
     }
 
-    /// Returns true if enough time has passed since the last WoL for this MAC.
-    /// On success (returns true), updates the timestamp.
-    pub fn shouldSend(self: *WolManager, mac_key: []const u8, cooldown_ms: u64) bool {
+    /// Enqueues all eligible MACs without performing network I/O on the caller.
+    pub fn enqueue(self: *WolService, mac_list: []const []const u8, cooldown_ms: u64, log_enabled: bool, project_id: i32) EnqueueResult {
+        var result = EnqueueResult{};
+
         self.mutex.lockUncancelable(compat.io());
         defer self.mutex.unlock(compat.io());
 
-        const now: i64 = @intCast(std.Io.Timestamp.now(compat.io(), .real).toMilliseconds());
-
-        if (self.cooldown_map.get(mac_key)) |last_sent| {
-            const elapsed = now - last_sent;
-            const cooldown_i64: i64 = @intCast(cooldown_ms);
-            if (elapsed >= cooldown_i64) {
-                // Cooldown expired — update and allow send
-                self.cooldown_map.put(mac_key, now) catch return false;
-                return true;
-            }
-            // Still within cooldown window
-            return false;
+        if (self.stop_requested) {
+            result.failed = @intCast(mac_list.len);
+            return result;
         }
 
-        // First time seeing this MAC — allow send and record timestamp
-        self.cooldown_map.put(mac_key, now) catch return false;
-        return true;
+        const now = self.clock_fn(self.clock_context);
+        self.pruneExpired(now);
+        for (mac_list) |mac_str| {
+            const mac = parseMac(mac_str) orelse {
+                result.failed += 1;
+                continue;
+            };
+
+            const entry = self.cooldowns.getOrPut(mac) catch {
+                result.failed += 1;
+                continue;
+            };
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+
+            if (entry.value_ptr.pending or cooldownActive(entry.value_ptr.cooldown_until_ms, now)) {
+                result.skipped += 1;
+                continue;
+            }
+            if (self.queue.items.len >= self.queue_capacity) {
+                result.failed += 1;
+                if (!entry.found_existing) _ = self.cooldowns.remove(mac);
+                continue;
+            }
+
+            self.queue.appendAssumeCapacity(.{
+                .mac = mac,
+                .cooldown_ms = cooldown_ms,
+                .log_enabled = log_enabled,
+                .project_id = project_id,
+            });
+            entry.value_ptr.pending = true;
+            result.queued += 1;
+        }
+
+        if (result.queued > 0) self.condition.broadcast(compat.io());
+        return result;
+    }
+
+    fn workerMain(self: *WolService) void {
+        while (true) {
+            self.mutex.lockUncancelable(compat.io());
+            while (self.queue.items.len == 0 and !self.stop_requested) {
+                self.condition.waitUncancelable(compat.io(), &self.mutex);
+            }
+            if (self.queue.items.len == 0 and self.stop_requested) {
+                self.mutex.unlock(compat.io());
+                return;
+            }
+            const job = self.queue.orderedRemove(0);
+            self.active_jobs += 1;
+            self.mutex.unlock(compat.io());
+
+            self.send_fn(self.send_context, job.mac) catch |err| {
+                self.finishJob(job, false);
+                event_log.logEventFmt(.wol_failed, job.project_id, "WoL magic packet send failed: {}", .{err});
+                if (job.log_enabled) std.log.err("[WoL] magic packet send failed: {any}", .{err});
+                continue;
+            };
+
+            self.finishJob(job, true);
+            event_log.logEventFmt(.wol_sent, job.project_id, "WoL magic packet sent", .{});
+            if (job.log_enabled) std.log.info("[WoL] magic packet sent", .{});
+        }
+    }
+
+    fn finishJob(self: *WolService, job: Job, succeeded: bool) void {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+
+        if (self.cooldowns.getPtr(job.mac)) |entry| {
+            entry.pending = false;
+            if (succeeded) {
+                const now = self.clock_fn(self.clock_context);
+                const cooldown: i64 = @intCast(job.cooldown_ms);
+                entry.cooldown_until_ms = std.math.add(i64, now, cooldown) catch std.math.maxInt(i64);
+            } else if (!cooldownActive(entry.cooldown_until_ms, self.clock_fn(self.clock_context))) {
+                _ = self.cooldowns.remove(job.mac);
+            }
+        }
+        self.active_jobs -= 1;
+        self.condition.broadcast(compat.io());
+    }
+
+    fn waitUntilIdle(self: *WolService) void {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+        while (self.queue.items.len > 0 or self.active_jobs > 0) {
+            self.condition.waitUncancelable(compat.io(), &self.mutex);
+        }
+    }
+
+    fn pruneExpired(self: *WolService, now: i64) void {
+        while (true) {
+            var iterator = self.cooldowns.iterator();
+            var expired_key: ?[6]u8 = null;
+            while (iterator.next()) |entry| {
+                if (!entry.value_ptr.pending and !cooldownActive(entry.value_ptr.cooldown_until_ms, now)) {
+                    expired_key = entry.key_ptr.*;
+                    break;
+                }
+            }
+            if (expired_key) |key| {
+                _ = self.cooldowns.remove(key);
+            } else {
+                return;
+            }
+        }
     }
 };
 
+var global_service: ?*WolService = null;
+var global_mutex: std.Io.Mutex = .init;
+
+pub fn initGlobal(allocator: std.mem.Allocator) !void {
+    global_mutex.lockUncancelable(compat.io());
+    defer global_mutex.unlock(compat.io());
+    if (global_service != null) return;
+    global_service = try WolService.init(allocator);
+}
+
+pub fn deinitGlobal() void {
+    global_mutex.lockUncancelable(compat.io());
+    defer global_mutex.unlock(compat.io());
+    if (global_service) |service| {
+        service.deinit();
+        global_service = null;
+    }
+}
+
+pub fn enqueueGlobal(mac_list: []const []const u8, cooldown_ms: u64, log_enabled: bool, project_id: i32) EnqueueResult {
+    global_mutex.lockUncancelable(compat.io());
+    defer global_mutex.unlock(compat.io());
+    const service = global_service orelse return .{ .failed = @intCast(mac_list.len) };
+    return service.enqueue(mac_list, cooldown_ms, log_enabled, project_id);
+}
+
+fn cooldownActive(cooldown_until_ms: ?i64, now: i64) bool {
+    const cooldown_until = cooldown_until_ms orelse return false;
+    return now < cooldown_until;
+}
+
+fn defaultClock(_: ?*anyopaque) i64 {
+    return std.Io.Timestamp.now(compat.io(), .awake).toMilliseconds();
+}
+
+fn defaultSend(_: ?*anyopaque, mac: [6]u8) !void {
+    try sendMagicPacket(mac);
+}
+
 /// Build a WoL magic packet: 6 bytes of 0xFF followed by 16 repetitions of the 6-byte MAC.
-/// Total: 102 bytes.
 pub fn buildMagicPacket(mac: [6]u8) [102]u8 {
     var packet: [102]u8 = undefined;
-    // 6 bytes of 0xFF
-    for (0..6) |i| {
-        packet[i] = 0xFF;
-    }
-    // 16 repetitions of the MAC address
+    @memset(packet[0..6], 0xFF);
     for (0..16) |rep| {
         const offset = 6 + rep * 6;
-        for (0..6) |j| {
-            packet[offset + j] = mac[j];
-        }
+        @memcpy(packet[offset .. offset + 6], &mac);
     }
     return packet;
 }
 
 /// Send a WoL magic packet via UDP broadcast to 255.255.255.255:9.
-/// Opens a UDP socket, sets SO_BROADCAST, sends, and closes.
 pub fn sendMagicPacket(mac: [6]u8) !void {
     const packet = buildMagicPacket(mac);
-
-    // Create UDP socket using linux raw syscall
     const sock_rc = linux.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
     const fd: i32 = switch (posix.errno(sock_rc)) {
         .SUCCESS => @intCast(sock_rc),
@@ -78,215 +279,140 @@ pub fn sendMagicPacket(mac: [6]u8) !void {
     };
     defer _ = linux.close(fd);
 
-    // Enable SO_BROADCAST
     const enabled: u32 = 1;
-    {
-        const setopt_rc = linux.setsockopt(fd, posix.SOL.SOCKET, posix.SO.BROADCAST, @ptrCast(&enabled), @sizeOf(u32));
-        switch (posix.errno(setopt_rc)) {
-            .SUCCESS => {},
-            else => return error.SetSockOptFailed,
-        }
-    }
+    const setopt_rc = linux.setsockopt(fd, posix.SOL.SOCKET, posix.SO.BROADCAST, @ptrCast(&enabled), @sizeOf(u32));
+    if (posix.errno(setopt_rc) != .SUCCESS) return error.SetSockOptFailed;
 
-    // Broadcast address: 255.255.255.255:9
     const addr = linux.sockaddr.in{
         .port = std.mem.nativeToBig(u16, 9),
-        .addr = 0xFFFFFFFF, // 255.255.255.255
+        .addr = 0xFFFFFFFF,
     };
-
-    // Send the magic packet
     const send_rc = linux.sendto(fd, &packet, packet.len, 0, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-    switch (posix.errno(send_rc)) {
-        .SUCCESS => {},
-        else => return error.SendFailed,
-    }
+    if (posix.errno(send_rc) != .SUCCESS) return error.SendFailed;
+    if (send_rc != packet.len) return error.ShortSend;
 }
 
-/// Parse a colon-separated MAC string (e.g. "AA:BB:CC:DD:EE:FF") into 6 bytes.
-/// Returns null if the format is invalid.
+/// Parse a colon-separated MAC string into a value-owned six-byte key.
 pub fn parseMac(mac_str: []const u8) ?[6]u8 {
-    // Expected format: XX:XX:XX:XX:XX:XX = 17 characters
     if (mac_str.len != 17) return null;
-
     var result: [6]u8 = undefined;
     for (0..6) |i| {
         const start = i * 3;
-        // Verify colon separator (except after last group)
         if (i < 5 and mac_str[start + 2] != ':') return null;
-
         result[i] = std.fmt.parseInt(u8, mac_str[start .. start + 2], 16) catch return null;
     }
     return result;
 }
 
-pub fn sendWoLWithCooldown(mac_list: []const []const u8, cooldown_ms: u64, log_enabled: bool, wol_mgr: *WolManager, project_id: i32) void {
-    var sent_count: u32 = 0;
-    var skipped_count: u32 = 0;
-    var error_count: u32 = 0;
-
-    for (mac_list) |mac_str| {
-        const mac = parseMac(mac_str) orelse {
-            event_log.logEventFmt(.warning, project_id, "WoL: invalid MAC address: {s}", .{mac_str});
-            if (log_enabled) {
-                std.log.warn("[WoL] invalid MAC address: {s}", .{mac_str});
-            }
-            error_count += 1;
-            continue;
-        };
-
-        if (!wol_mgr.shouldSend(mac_str, cooldown_ms)) {
-            skipped_count += 1;
-            if (log_enabled) {
-                std.log.info("[WoL] skip sending to {s} (cooldown active)", .{mac_str});
-            }
-            continue;
-        }
-
-        sendMagicPacket(mac) catch |err| {
-            event_log.logEventFmt(.warning, project_id, "WoL: send failed for {s}: {}", .{ mac_str, err });
-            if (log_enabled) {
-                std.log.err("[WoL] send failed to {s}: {any}", .{ mac_str, err });
-            }
-            error_count += 1;
-            continue;
-        };
-
-        sent_count += 1;
-        if (log_enabled) {
-            std.log.info("[WoL] successfully sent magic packet to {s}", .{mac_str});
-        }
-    }
-
-    // Log summary if any MACs were processed
-    if (sent_count > 0) {
-        event_log.logEventFmt(.info, project_id, "WoL: sent {d} magic packet(s)", .{sent_count});
-    }
-    if (skipped_count > 0) {
-        event_log.logEventFmt(.info, project_id, "WoL: {d} MAC(s) skipped (cooldown active)", .{skipped_count});
-    }
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
 test "magic packet format" {
     const mac = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
     const packet = buildMagicPacket(mac);
-
-    // Total size must be 102
     try std.testing.expectEqual(@as(usize, 102), packet.len);
-
-    // First 6 bytes must be 0xFF
-    for (0..6) |i| {
-        try std.testing.expectEqual(@as(u8, 0xFF), packet[i]);
-    }
-
-    // 16 repetitions of the MAC starting at offset 6
+    for (packet[0..6]) |byte| try std.testing.expectEqual(@as(u8, 0xFF), byte);
     for (0..16) |rep| {
         const offset = 6 + rep * 6;
-        for (0..6) |j| {
-            try std.testing.expectEqual(mac[j], packet[offset + j]);
-        }
+        try std.testing.expectEqualSlices(u8, &mac, packet[offset .. offset + 6]);
     }
 }
 
-test "parseMac valid" {
-    const result = parseMac("AA:BB:CC:DD:EE:FF");
-    try std.testing.expect(result != null);
-    const mac = result.?;
-    try std.testing.expectEqual(@as(u8, 0xAA), mac[0]);
-    try std.testing.expectEqual(@as(u8, 0xBB), mac[1]);
-    try std.testing.expectEqual(@as(u8, 0xCC), mac[2]);
-    try std.testing.expectEqual(@as(u8, 0xDD), mac[3]);
-    try std.testing.expectEqual(@as(u8, 0xEE), mac[4]);
-    try std.testing.expectEqual(@as(u8, 0xFF), mac[5]);
+test "parseMac validates canonical format" {
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF }, &(parseMac("aA:Bb:cC:Dd:Ee:Ff").?));
+    try std.testing.expect(parseMac("AA-BB-CC-DD-EE-FF") == null);
+    try std.testing.expect(parseMac("GG:BB:CC:DD:EE:FF") == null);
+    try std.testing.expect(parseMac("") == null);
 }
 
-test "parseMac lowercase" {
-    const result = parseMac("aa:bb:cc:dd:ee:ff");
-    try std.testing.expect(result != null);
-    const mac = result.?;
-    try std.testing.expectEqual(@as(u8, 0xAA), mac[0]);
-    try std.testing.expectEqual(@as(u8, 0xFF), mac[5]);
-}
+const FakeSender = struct {
+    calls: usize = 0,
+    fail: bool = false,
 
-test "parseMac mixed case" {
-    const result = parseMac("aA:Bb:cC:Dd:Ee:Ff");
-    try std.testing.expect(result != null);
-}
-
-test "parseMac invalid length" {
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("AA:BB:CC:DD:EE"));
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("AA:BB:CC:DD:EE:FF:00"));
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac(""));
-}
-
-test "parseMac invalid separator" {
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("AA-BB-CC-DD-EE-FF"));
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("AA.BB.CC.DD.EE.FF"));
-}
-
-test "parseMac invalid hex" {
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("GG:BB:CC:DD:EE:FF"));
-    try std.testing.expectEqual(@as(?[6]u8, null), parseMac("AA:BB:CC:DD:EE:ZZ"));
-}
-
-test "parseMac zero MAC" {
-    const result = parseMac("00:00:00:00:00:00");
-    try std.testing.expect(result != null);
-    const mac = result.?;
-    for (mac) |b| {
-        try std.testing.expectEqual(@as(u8, 0), b);
+    fn send(context: ?*anyopaque, _: [6]u8) !void {
+        const self: *FakeSender = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.fail) return error.InjectedFailure;
     }
+};
+
+const FakeClock = struct {
+    now: i64 = 1000,
+
+    fn read(context: ?*anyopaque) i64 {
+        const self: *FakeClock = @ptrCast(@alignCast(context.?));
+        return self.now;
+    }
+};
+
+test "service shares cooldown and commits only successful sends" {
+    var sender = FakeSender{};
+    var clock = FakeClock{};
+    const service = try WolService.initWithOptions(std.testing.allocator, .{
+        .send_fn = FakeSender.send,
+        .send_context = &sender,
+        .clock_fn = FakeClock.read,
+        .clock_context = &clock,
+    });
+    defer service.deinit();
+
+    const macs = &[_][]const u8{"AA:BB:CC:DD:EE:FF"};
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(macs, 1000, false, 1).queued);
+    service.waitUntilIdle();
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(macs, 1000, false, 1).skipped);
+
+    clock.now += 1000;
+    sender.fail = true;
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(macs, 1000, false, 1).queued);
+    service.waitUntilIdle();
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(macs, 1000, false, 1).queued);
+    service.waitUntilIdle();
+    try std.testing.expectEqual(@as(usize, 3), sender.calls);
 }
 
-test "cooldown first call returns true" {
-    var mgr = WolManager.init(std.testing.allocator);
-    defer mgr.deinit();
+const BlockingSender = struct {
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    started: bool = false,
+    released: bool = false,
 
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 1000));
-}
+    fn send(context: ?*anyopaque, _: [6]u8) !void {
+        const self: *BlockingSender = @ptrCast(@alignCast(context.?));
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+        self.started = true;
+        self.condition.broadcast(compat.io());
+        while (!self.released) self.condition.waitUncancelable(compat.io(), &self.mutex);
+    }
 
-test "cooldown second call within window returns false" {
-    var mgr = WolManager.init(std.testing.allocator);
-    defer mgr.deinit();
+    fn waitUntilStarted(self: *BlockingSender) void {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+        while (!self.started) self.condition.waitUncancelable(compat.io(), &self.mutex);
+    }
 
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 10000));
-    // Immediate second call should be blocked by cooldown
-    try std.testing.expect(!mgr.shouldSend("AA:BB:CC:DD:EE:FF", 10000));
-}
+    fn release(self: *BlockingSender) void {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+        self.released = true;
+        self.condition.broadcast(compat.io());
+    }
+};
 
-test "cooldown different MACs are independent" {
-    var mgr = WolManager.init(std.testing.allocator);
-    defer mgr.deinit();
+test "service bounds its queue and suppresses duplicate pending work" {
+    var sender = BlockingSender{};
+    const service = try WolService.initWithOptions(std.testing.allocator, .{
+        .queue_capacity = 1,
+        .send_fn = BlockingSender.send,
+        .send_context = &sender,
+    });
+    defer service.deinit();
+    defer sender.release();
 
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:01", 10000));
-    // Different MAC should not be affected
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:02", 10000));
-}
+    const first = &[_][]const u8{"AA:BB:CC:DD:EE:01"};
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(first, 1000, false, 1).queued);
+    sender.waitUntilStarted();
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(first, 1000, false, 1).skipped);
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(&[_][]const u8{"AA:BB:CC:DD:EE:02"}, 1000, false, 1).queued);
+    try std.testing.expectEqual(@as(u32, 1), service.enqueue(&[_][]const u8{"AA:BB:CC:DD:EE:03"}, 1000, false, 1).failed);
 
-test "cooldown zero ms always allows" {
-    var mgr = WolManager.init(std.testing.allocator);
-    defer mgr.deinit();
-
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 0));
-    // With 0ms cooldown, even immediate call should succeed (elapsed >= 0)
-    // Note: this depends on at least 0ms passing, which is always true
-    // but the timestamp might be the same millisecond.
-    // With 0 cooldown, the comparison is elapsed >= 0, which is always true.
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 0));
-}
-
-test "cooldown expiry allows resend" {
-    var mgr = WolManager.init(std.testing.allocator);
-    defer mgr.deinit();
-
-    // Use a very short cooldown (1ms)
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 1));
-
-    // Sleep just over 1ms to allow cooldown to expire
-    compat.sleepNanos(2 * std.time.ns_per_ms);
-
-    try std.testing.expect(mgr.shouldSend("AA:BB:CC:DD:EE:FF", 1));
+    sender.release();
+    service.waitUntilIdle();
 }

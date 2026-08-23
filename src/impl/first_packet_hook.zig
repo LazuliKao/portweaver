@@ -3,23 +3,7 @@ const types = @import("../config/types.zig");
 const protocol_detector = @import("protocol_detector.zig");
 const forwarder_runtime = @import("app_forward/forwarder_runtime.zig");
 const c = forwarder_runtime.c;
-const wol = @import("wol.zig");
-const compat = @import("../compat.zig");
-
-/// Global WoL manager instance (lazy-initialized).
-/// The callback is a C function and cannot capture state, so this must be module-level.
-var g_wol_manager: ?wol.WolManager = null;
-var g_wol_init_mutex: std.Io.Mutex = .init;
-
-/// Get or initialize the global WolManager. Thread-safe via mutex.
-fn getWolManager(allocator: std.mem.Allocator) *wol.WolManager {
-    g_wol_init_mutex.lockUncancelable(compat.io());
-    defer g_wol_init_mutex.unlock(compat.io());
-    if (g_wol_manager == null) {
-        g_wol_manager = wol.WolManager.init(allocator);
-    }
-    return &g_wol_manager.?;
-}
+const build_options = @import("build_options");
 
 /// Context passed as user_data to the C first-packet callback.
 /// Stores a pointer to the project config (NOT ProjectHandle, to avoid
@@ -125,11 +109,14 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
         }
 
         // WoL: trigger if protocol is in detect list
-        if (cfg.enable_wol) {
+        if (build_options.wol_mode and cfg.enable_wol) {
             if (containsProtocol(cfg.detect_protocols, proto_str)) {
                 if (cfg.resolved_wol_macs.len > 0) {
-                    const mgr = getWolManager(ctx.allocator);
-                    wol.sendWoLWithCooldown(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, mgr, @intCast(ctx.project_id));
+                    const wol = @import("wol.zig");
+                    const result = wol.enqueueGlobal(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, @intCast(ctx.project_id));
+                    if (result.failed > 0) {
+                        std.log.warn("[WoL] failed to enqueue {d} magic packet(s)", .{result.failed});
+                    }
                 }
             }
         }

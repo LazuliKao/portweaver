@@ -13,20 +13,17 @@ const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const nftables = if (build_options.nftables_mode) @import("../nftables/mod.zig") else struct {};
 const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {
-    pub const WolManager = struct {
-        pub fn init(allocator: std.mem.Allocator) WolManager {
-            _ = allocator;
-            return .{};
-        }
-        pub fn deinit(self: *WolManager) void {
-            _ = self;
-        }
+    pub const EnqueueResult = struct {
+        queued: u32 = 0,
+        skipped: u32 = 0,
+        failed: u32 = 0,
     };
-    pub fn sendWoLWithCooldown(macs: []const []const u8, cooldown: u64, mgr: *WolManager, id: u32) void {
+    pub fn enqueueGlobal(macs: []const []const u8, cooldown: u64, log_enabled: bool, id: i32) EnqueueResult {
         _ = macs;
         _ = cooldown;
-        _ = mgr;
+        _ = log_enabled;
         _ = id;
+        return .{};
     }
 };
 const compat = @import("../compat.zig");
@@ -186,8 +183,6 @@ pub var g_state: ?*RuntimeState = null;
 var g_ctx: ?*c.ubus_context = null;
 var g_thread: ?std.Thread = null;
 var g_lifecycle_mutex: std.Io.Mutex = .init;
-var g_wol_manager: ?wol.WolManager = null;
-var g_wol_manager_mutex: std.Io.Mutex = .init;
 
 const set_enabled_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
@@ -348,11 +343,6 @@ pub fn stop() void {
     if (g_state) |state| {
         g_state = null;
         state.deinit();
-    }
-
-    if (g_wol_manager) |*mgr| {
-        mgr.deinit();
-        g_wol_manager = null;
     }
 
     g_ctx = null;
@@ -1291,17 +1281,8 @@ fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_st
     return null;
 }
 
-fn getWolManager(allocator: std.mem.Allocator) *wol.WolManager {
-    g_wol_manager_mutex.lockUncancelable(compat.io());
-    defer g_wol_manager_mutex.unlock(compat.io());
-    if (g_wol_manager == null) {
-        g_wol_manager = wol.WolManager.init(allocator);
-    }
-    return &g_wol_manager.?;
-}
-
 fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolWakeResponse {
-    const mgr = getWolManager(allocator);
+    _ = allocator;
 
     if (args.target) |target_name| {
         const cfg = reload.getConfig() orelse return error.InvalidValue;
@@ -1312,8 +1293,8 @@ fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectA
         if (target.mac_addresses.len == 0) {
             return .{ .success = true, .sent_count = 0 };
         }
-        wol.sendWoLWithCooldown(target.mac_addresses, target.cooldown_ms, target.log_enabled, mgr, 9999);
-        return .{ .success = true, .sent_count = @intCast(target.mac_addresses.len) };
+        const result = wol.enqueueGlobal(target.mac_addresses, target.cooldown_ms, target.log_enabled, -1);
+        return .{ .success = result.failed == 0, .sent_count = result.queued };
     } else if (args.project) |project_name| {
         const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
         const cfg = project.cfg;
@@ -1323,8 +1304,8 @@ fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectA
         if (cfg.resolved_wol_macs.len == 0) {
             return .{ .success = true, .sent_count = 0 };
         }
-        wol.sendWoLWithCooldown(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, mgr, @intCast(project.id));
-        return .{ .success = true, .sent_count = @intCast(cfg.resolved_wol_macs.len) };
+        const result = wol.enqueueGlobal(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, @intCast(project.id));
+        return .{ .success = result.failed == 0, .sent_count = result.queued };
     } else {
         return error.InvalidValue;
     }
