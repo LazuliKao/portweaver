@@ -29,16 +29,16 @@ const SharedTcpStartContext = struct {
         const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         const fwd = try TcpForwarder.createOnRuntimeThread(ctx.allocator, ctx.projectHandle, token, ctx.listen_port, ctx.target_port);
         try ctx.projectHandle.registerTcpHandle(fwd);
-        // Register first-packet callback if WoL or protocol filter is enabled
-        if (ctx.projectHandle.cfg.enable_wol or ctx.projectHandle.cfg.enable_protocol_filter) {
-            first_packet_hook.registerCallback(fwd.forwarder, ctx.allocator, &ctx.projectHandle.cfg, ctx.projectHandle.id);
-        }
         errdefer {
             ctx.projectHandle.deregisterTcpHandle(fwd) catch |err| {
                 std.log.warn("Failed to deregister TCP forwarder after start failure: {}", .{err});
             };
             fwd.destroyOnRuntimeThread(token);
             fwd.destroyWrapper();
+        }
+        // Register first-packet callback if WoL or protocol filter is enabled.
+        if (ctx.projectHandle.cfg.enable_wol or ctx.projectHandle.cfg.enable_protocol_filter) {
+            try first_packet_hook.registerCallback(fwd.forwarder, ctx.allocator, &ctx.projectHandle.cfg, ctx.projectHandle.id);
         }
         try fwd.startOnRuntimeThread(token, ctx.projectHandle);
     }

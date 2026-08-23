@@ -14,6 +14,14 @@ pub const Protocol = enum {
     smb,
 };
 
+pub const Detection = union(enum) {
+    matched: Protocol,
+    need_more,
+    unknown,
+};
+
+pub const MAX_INSPECTION_BYTES: usize = 16 * 1024;
+
 fn parseVarInt(data: []const u8, offset: usize) ?struct { value: i32, bytes: usize } {
     var value: u32 = 0;
     var position: usize = 0;
@@ -199,7 +207,7 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
 
     if (data.len >= 11 and data[0] == 0x03 and data[1] == 0x00) {
         const tpkt_len = (@as(usize, data[2]) << 8) | data[3];
-        if (tpkt_len >= 11 and tpkt_len <= data.len and data[5] == 0xE0) {
+        if (tpkt_len >= 11 and data[5] == 0xE0) {
             return .rdp;
         }
     }
@@ -292,6 +300,32 @@ pub fn detectProtocol(data: []const u8) ?Protocol {
     return null;
 }
 
+/// Incremental protocol inspection. A missing match remains undecided until the
+/// bounded inspection window is full; this prevents fragmented handshakes from
+/// being mistaken for allowed unknown traffic.
+pub fn inspectProtocol(data: []const u8) Detection {
+    if (detectProtocol(data)) |protocol| return .{ .matched = protocol };
+    if (data.len >= MAX_INSPECTION_BYTES) return .unknown;
+    return .need_more;
+}
+
+pub const TlsPayloadState = enum {
+    need_more,
+    complete,
+    invalid,
+};
+
+/// Reports whether the first TLS record is complete enough for SNI parsing.
+pub fn tlsPayloadState(data: []const u8) TlsPayloadState {
+    if (data.len < 5) return .need_more;
+    if (data[0] != 0x16 or data[1] != 0x03 or data[2] > 0x04) return .invalid;
+
+    const record_len = (@as(usize, data[3]) << 8) | data[4];
+    if (record_len == 0 or record_len > MAX_INSPECTION_BYTES - 5) return .invalid;
+    if (data.len < 5 + record_len) return .need_more;
+    return .complete;
+}
+
 pub fn protocolToString(p: Protocol) [:0]const u8 {
     return switch (p) {
         .ssh => "ssh",
@@ -337,6 +371,23 @@ test "detectProtocol identifies RDP and rejects invalid handshakes" {
     try std.testing.expectEqual(Protocol.rdp, detectProtocol(&valid));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&invalid_type));
     try std.testing.expectEqual(@as(?Protocol, null), detectProtocol(&too_short));
+}
+
+test "inspectProtocol waits for fragmented RDP and rejects at capacity" {
+    const valid = [_]u8{ 0x03, 0x00, 0x00, 0x0B, 0x06, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectEqual(Detection.need_more, inspectProtocol(valid[0..6]));
+    try std.testing.expectEqual(Protocol.rdp, inspectProtocol(&valid).matched);
+
+    const unknown = [_]u8{0x7f} ** MAX_INSPECTION_BYTES;
+    try std.testing.expectEqual(Detection.unknown, inspectProtocol(&unknown));
+}
+
+test "tlsPayloadState waits for a complete record" {
+    const partial = [_]u8{ 0x16, 0x03, 0x03, 0x00, 0x04, 0x01 };
+    const complete = partial ++ [_]u8{ 0x00, 0x00, 0x00 };
+    try std.testing.expectEqual(TlsPayloadState.need_more, tlsPayloadState(&partial));
+    try std.testing.expectEqual(TlsPayloadState.complete, tlsPayloadState(&complete));
+    try std.testing.expectEqual(TlsPayloadState.invalid, tlsPayloadState(&[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x01 }));
 }
 
 test "detectProtocol identifies HTTP methods and rejects unknown method prefixes" {

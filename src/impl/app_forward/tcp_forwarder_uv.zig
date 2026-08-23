@@ -85,9 +85,9 @@ pub const TcpForwarder = struct {
         }
     }
 
-    pub fn setFirstPacketCallback(self: *TcpForwarder, cb: c.tcp_first_packet_cb_t, user_data: ?*anyopaque) void {
+    pub fn setFirstPacketCallback(self: *TcpForwarder, cb: c.tcp_first_packet_cb_t, user_data: ?*anyopaque, destroy_cb: c.tcp_first_packet_destroy_cb_t) void {
         if (self.forwarder) |f| {
-            c.tcp_forwarder_set_first_packet_cb(f, cb, user_data);
+            c.tcp_forwarder_set_first_packet_cb(f, cb, user_data, destroy_cb);
         }
     }
 

@@ -117,7 +117,7 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
     void start_target_read();
     void on_client_read(const asio::error_code &ec, std::size_t bytes_transferred);
     void on_target_read(const asio::error_code &ec, std::size_t bytes_transferred);
-    void write_to_target(std::size_t bytes_transferred);
+    void write_to_target(std::size_t bytes_transferred, bool use_inspection_buffer = false);
     void write_to_client(std::size_t bytes_transferred);
     void on_target_write(const asio::error_code &ec);
     void on_client_write(const asio::error_code &ec);
@@ -131,8 +131,11 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
     bool closing;
     bool target_write_pending;
     bool client_write_pending;
+    bool target_write_uses_inspection_buffer;
     std::shared_ptr<asio::steady_timer> connect_timer;
     bool first_packet_inspected = false;
+    std::array<unsigned char, TCP_FORWARD_BUFFER_SIZE> inspection_buffer;
+    std::size_t inspection_length = 0;
 };
 
 struct tcp_forwarder
@@ -159,6 +162,7 @@ struct tcp_forwarder
     std::vector<std::shared_ptr<tcp_conn_ctx>> active_conns;
     tcp_first_packet_cb_t first_packet_cb = nullptr;
     void *first_packet_user_data = nullptr;
+    tcp_first_packet_destroy_cb_t first_packet_destroy_cb = nullptr;
 
     tcp_forwarder(forwarder_runtime_t *runtime_value, asio::io_context &io_ctx_value)
         : runtime(runtime_value), acceptor(io_ctx_value), io_ctx(io_ctx_value), target_address(nullptr), listen_port(0),
@@ -169,6 +173,11 @@ struct tcp_forwarder
 
     ~tcp_forwarder()
     {
+        if (first_packet_destroy_cb && first_packet_user_data)
+        {
+            first_packet_destroy_cb(first_packet_user_data);
+            first_packet_user_data = nullptr;
+        }
         if (target_address)
         {
             DATA_FREE(this, target_address);
@@ -267,7 +276,8 @@ struct tcp_forwarder
 
 tcp_conn_ctx::tcp_conn_ctx(asio::io_context &io_ctx, tcp_forwarder *owner_forwarder)
     : client_socket(io_ctx), target_socket(io_ctx), client_buffer(), target_buffer(), client_eof(false), target_eof(false),
-      owner(owner_forwarder), closing(false), target_write_pending(false), client_write_pending(false)
+      owner(owner_forwarder), closing(false), target_write_pending(false), client_write_pending(false),
+      target_write_uses_inspection_buffer(false), inspection_buffer()
 {
 }
 
@@ -353,19 +363,34 @@ void tcp_conn_ctx::on_client_read(const asio::error_code &ec, std::size_t bytes_
 
     if (!ec)
     {
+        if (owner->enable_stats)
+            owner->bytes_in.fetch_add(static_cast<unsigned long long>(bytes_transferred), std::memory_order_relaxed);
+
         if (bytes_transferred > 0 && !first_packet_inspected && owner->first_packet_cb != nullptr)
         {
-            const int result = owner->first_packet_cb(owner->first_packet_user_data, client_buffer.data(), bytes_transferred, 1);
-            first_packet_inspected = true;
-            if (result == 0)
+            if (bytes_transferred > inspection_buffer.size() - inspection_length)
             {
                 force_close();
                 return;
             }
+            std::memcpy(inspection_buffer.data() + inspection_length, client_buffer.data(), bytes_transferred);
+            inspection_length += bytes_transferred;
+            const int result = owner->first_packet_cb(owner->first_packet_user_data, inspection_buffer.data(), inspection_length, 1);
+            if (result == TCP_INSPECTION_NEED_MORE)
+            {
+                start_client_read();
+                return;
+            }
+            if (result != TCP_INSPECTION_ALLOW)
+            {
+                force_close();
+                return;
+            }
+            first_packet_inspected = true;
+            write_to_target(inspection_length, true);
+            return;
         }
 
-        if (owner->enable_stats)
-            owner->bytes_in.fetch_add(static_cast<unsigned long long>(bytes_transferred), std::memory_order_relaxed);
         write_to_target(bytes_transferred);
         return;
     }
@@ -403,14 +428,16 @@ void tcp_conn_ctx::on_target_read(const asio::error_code &ec, std::size_t bytes_
         force_close();
 }
 
-void tcp_conn_ctx::write_to_target(std::size_t bytes_transferred)
+void tcp_conn_ctx::write_to_target(std::size_t bytes_transferred, bool use_inspection_buffer)
 {
     if (closing)
         return;
 
     target_write_pending = true;
+    target_write_uses_inspection_buffer = use_inspection_buffer;
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
-    asio::async_write(target_socket, asio::buffer(client_buffer.data(), bytes_transferred),
+    unsigned char *data = use_inspection_buffer ? inspection_buffer.data() : client_buffer.data();
+    asio::async_write(target_socket, asio::buffer(data, bytes_transferred),
                       [self](const asio::error_code &ec, std::size_t) { self->on_target_write(ec); });
 }
 
@@ -428,6 +455,11 @@ void tcp_conn_ctx::write_to_client(std::size_t bytes_transferred)
 void tcp_conn_ctx::on_target_write(const asio::error_code &ec)
 {
     target_write_pending = false;
+    if (target_write_uses_inspection_buffer)
+    {
+        inspection_length = 0;
+        target_write_uses_inspection_buffer = false;
+    }
 
     if (closing)
         return;
@@ -704,12 +736,13 @@ extern "C" traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
     return stats;
 }
 
-extern "C" void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data)
+extern "C" void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data, tcp_first_packet_destroy_cb_t destroy_cb)
 {
     if (!fwd)
         return;
     fwd->first_packet_cb = cb;
     fwd->first_packet_user_data = user_data;
+    fwd->first_packet_destroy_cb = destroy_cb;
 }
 
 #endif

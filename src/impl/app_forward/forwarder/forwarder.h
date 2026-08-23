@@ -129,15 +129,24 @@ extern "C"
     void tcp_forwarder_destroy(tcp_forwarder_t *forwarder);
     // Returns a read-only stats snapshot.
     traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder);
-    // TCP first-packet inspection callback type: called when the first data
-    // packet arrives on a new TCP connection. Return 1 to allow, 0 to reject.
+    typedef enum
+    {
+        TCP_INSPECTION_REJECT = 0,
+        TCP_INSPECTION_ALLOW = 1,
+        TCP_INSPECTION_NEED_MORE = 2,
+    } tcp_inspection_result_t;
+
+    // TCP initial-payload inspection callback. Backends accumulate up to 16 KiB
+    // per connection and call again while the callback returns NEED_MORE.
     // `is_client_to_target` is 1 if data flows client→target, 0 if target→client.
     typedef int (*tcp_first_packet_cb_t)(void *user_data, const uint8_t *data, size_t len, int is_client_to_target);
+    typedef void (*tcp_first_packet_destroy_cb_t)(void *user_data);
 
     // Set a callback to inspect the first packet of each TCP connection.
     // `cb` receives (user_data, data, len, is_client_to_target).
-    // Return 1 to allow the connection to continue, 0 to reject/close it.
-    void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data);
+    // `destroy_cb` is invoked exactly once after all sessions have drained and
+    // the forwarder releases the callback context.
+    void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data, tcp_first_packet_destroy_cb_t destroy_cb);
 
     // UDP Forwarder API
     // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).

@@ -64,6 +64,7 @@ struct tcp_forwarder {
     struct tcp_connection *connections;
     tcp_first_packet_cb_t first_packet_cb;
     void *first_packet_user_data;
+    tcp_first_packet_destroy_cb_t first_packet_destroy_cb;
 };
 
 struct tcp_connection {
@@ -109,6 +110,10 @@ static struct io_uring_sqe *get_sqe(struct tcp_forwarder *fwd)
 
 static void free_forwarder_storage(struct tcp_forwarder *fwd)
 {
+    if (fwd->first_packet_destroy_cb != NULL && fwd->first_packet_user_data != NULL) {
+        fwd->first_packet_destroy_cb(fwd->first_packet_user_data);
+        fwd->first_packet_user_data = NULL;
+    }
     fwd_free(fwd, fwd->target_address);
     fwd_free(fwd, fwd);
 }
@@ -192,22 +197,34 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
             terminate_connection(connection);
             return;
         }
-        operation->length = (size_t)cqe->res;
-        operation->offset = 0;
+        size_t received = (size_t)cqe->res;
         if (operation->client_to_target) {
             if (fwd->enable_stats)
-                __atomic_fetch_add(&fwd->bytes_in, operation->length, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&fwd->bytes_in, received, __ATOMIC_RELAXED);
             if (!connection->first_packet_inspected && fwd->first_packet_cb != NULL) {
-                connection->first_packet_inspected = 1;
-                if (!fwd->first_packet_cb(fwd->first_packet_user_data, operation->buffer,
-                                          operation->length, 1)) {
+                operation->length += received;
+                int result = fwd->first_packet_cb(fwd->first_packet_user_data, operation->buffer,
+                                                  operation->length, 1);
+                if (result == TCP_INSPECTION_NEED_MORE) {
+                    if (submit_stream(operation) != 0)
+                        terminate_connection(connection);
+                    return;
+                }
+                if (result != TCP_INSPECTION_ALLOW) {
                     terminate_connection(connection);
                     return;
                 }
+                connection->first_packet_inspected = 1;
+            } else {
+                operation->length = received;
             }
         } else if (fwd->enable_stats) {
-            __atomic_fetch_add(&fwd->bytes_out, operation->length, __ATOMIC_RELAXED);
+            operation->length = received;
+            __atomic_fetch_add(&fwd->bytes_out, received, __ATOMIC_RELAXED);
+        } else {
+            operation->length = received;
         }
+        operation->offset = 0;
         operation->sending = 1;
     } else {
         if (cqe->res <= 0) {
@@ -215,8 +232,10 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
             return;
         }
         operation->offset += (size_t)cqe->res;
-        if (operation->offset == operation->length)
+        if (operation->offset == operation->length) {
             operation->sending = 0;
+            operation->length = 0;
+        }
     }
 
     if (submit_stream(operation) != 0)
@@ -226,6 +245,14 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
 static int submit_stream(struct stream_operation *operation)
 {
     struct tcp_connection *connection = operation->connection;
+    size_t buffered = 0;
+    if (!operation->sending && operation->client_to_target &&
+        !connection->first_packet_inspected &&
+        connection->forwarder->first_packet_cb != NULL) {
+        buffered = operation->length;
+        if (buffered >= sizeof(operation->buffer))
+            return -ENOBUFS;
+    }
     struct io_uring_sqe *sqe = get_sqe(connection->forwarder);
     if (sqe == NULL)
         return -ENOMEM;
@@ -235,8 +262,8 @@ static int submit_stream(struct stream_operation *operation)
                            operation->buffer + operation->offset,
                            operation->length - operation->offset, MSG_NOSIGNAL);
     } else {
-        io_uring_prep_recv(sqe, operation->source_fd, operation->buffer,
-                           sizeof(operation->buffer), 0);
+        io_uring_prep_recv(sqe, operation->source_fd, operation->buffer + buffered,
+                           sizeof(operation->buffer) - buffered, 0);
     }
     io_uring_sqe_set_data(sqe, operation);
     connection->pending++;
@@ -610,10 +637,12 @@ traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *fwd)
 
 void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd,
                                        tcp_first_packet_cb_t callback,
-                                       void *user_data)
+                                       void *user_data,
+                                       tcp_first_packet_destroy_cb_t destroy_cb)
 {
     if (fwd != NULL) {
         fwd->first_packet_cb = callback;
         fwd->first_packet_user_data = user_data;
+        fwd->first_packet_destroy_cb = destroy_cb;
     }
 }
