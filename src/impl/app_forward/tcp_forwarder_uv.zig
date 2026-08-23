@@ -91,6 +91,12 @@ pub const TcpForwarder = struct {
         }
     }
 
+    pub fn setWolPolicy(self: *TcpForwarder, mode: c.tcp_wol_trigger_mode_t, wake_delay_ms: u32, retry_interval_ms: u32, retry_window_ms: u32, trigger_cb: c.tcp_wol_trigger_cb_t) void {
+        if (self.forwarder) |f| {
+            c.tcp_forwarder_set_wol_policy(f, mode, wake_delay_ms, retry_interval_ms, retry_window_ms, trigger_cb);
+        }
+    }
+
     pub fn requestStop(self: *TcpForwarder) void {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());

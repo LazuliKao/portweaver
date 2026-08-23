@@ -134,19 +134,38 @@ extern "C"
         TCP_INSPECTION_REJECT = 0,
         TCP_INSPECTION_ALLOW = 1,
         TCP_INSPECTION_NEED_MORE = 2,
+        TCP_INSPECTION_ALLOW_WAKE = 3,
     } tcp_inspection_result_t;
+
+    typedef enum
+    {
+        TCP_WOL_DISABLED = 0,
+        TCP_WOL_ON_CONNECT = 1,
+        TCP_WOL_ON_PROTOCOL = 2,
+    } tcp_wol_trigger_mode_t;
 
     // TCP initial-payload inspection callback. Backends accumulate up to 16 KiB
     // per connection and call again while the callback returns NEED_MORE.
     // `is_client_to_target` is 1 if data flows client→target, 0 if target→client.
     typedef int (*tcp_first_packet_cb_t)(void *user_data, const uint8_t *data, size_t len, int is_client_to_target);
     typedef void (*tcp_first_packet_destroy_cb_t)(void *user_data);
+    // Returns non-zero when at least one wake packet was queued.
+    typedef int (*tcp_wol_trigger_cb_t)(void *user_data);
 
     // Set a callback to inspect the first packet of each TCP connection.
     // `cb` receives (user_data, data, len, is_client_to_target).
     // `destroy_cb` is invoked exactly once after all sessions have drained and
     // the forwarder releases the callback context.
     void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data, tcp_first_packet_destroy_cb_t destroy_cb);
+    // Configures optional pre-connect wake behavior. The callback shares the
+    // lifetime of `user_data` installed by tcp_forwarder_set_first_packet_cb.
+    void tcp_forwarder_set_wol_policy(
+        tcp_forwarder_t *fwd,
+        tcp_wol_trigger_mode_t mode,
+        uint32_t wake_delay_ms,
+        uint32_t retry_interval_ms,
+        uint32_t retry_window_ms,
+        tcp_wol_trigger_cb_t trigger_cb);
 
     // UDP Forwarder API
     // target_address must be a numeric IPv4/IPv6 literal (no DNS resolution).

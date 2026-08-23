@@ -7,6 +7,7 @@ const loop_manager = @import("./impl/app_forward/loop_manager.zig");
 const project_status = @import("./impl/project_status.zig");
 const forwarder_runtime = @import("./impl/app_forward/forwarder_runtime.zig");
 const compat = @import("./compat.zig");
+const build_options = @import("build_options");
 
 const run_duration_ns = 1 * std.time.ns_per_s;
 const forwarder_ready_ns = 100 * std.time.ns_per_ms;
@@ -183,6 +184,43 @@ const TcpPeerCloseClientContext = struct {
     completed: bool = false,
     err: ?anyerror = null,
 };
+
+const DelayedTcpClientContext = struct {
+    port: u16,
+    message: []const u8,
+    fragment_at: usize = 0,
+    response: ?[]const u8 = null,
+    err: ?anyerror = null,
+};
+
+const ServerFirstTestContext = struct {
+    port: u16,
+    err: ?anyerror = null,
+};
+
+const WakeTestContext = struct {
+    calls: std.atomic.Value(u32) = .init(0),
+};
+
+fn allowInspectionCallback(_: ?*anyopaque, _: [*c]const u8, _: usize, _: c_int) callconv(.c) c_int {
+    return 1;
+}
+
+fn fragmentedRdpWakeCallback(_: ?*anyopaque, _: [*c]const u8, len: usize, is_client_to_target: c_int) callconv(.c) c_int {
+    if (is_client_to_target == 0) return 0;
+    return if (len < 11) 2 else 3;
+}
+
+fn serverFirstVncCallback(_: ?*anyopaque, data: [*c]const u8, len: usize, is_client_to_target: c_int) callconv(.c) c_int {
+    if (is_client_to_target != 0 or len < 4) return 2;
+    return if (std.mem.eql(u8, data[0..4], "RFB ")) 1 else 0;
+}
+
+fn queueWakeCallback(user_data: ?*anyopaque) callconv(.c) c_int {
+    const ctx: *WakeTestContext = @ptrCast(@alignCast(user_data orelse return 0));
+    _ = ctx.calls.fetchAdd(1, .monotonic);
+    return 1;
+}
 
 fn cleanupProjectHandle(handle: *project_status.ProjectHandle) void {
     handle.deinit();
@@ -1095,6 +1133,136 @@ test "app forward: tcp 64KB data transfer" {
     try testing.expect(echo_ctx.start_error == null);
 }
 
+test "app forward: libuv on-connect wake retries until target starts" {
+    if (build_options.forward_backend != .libuv) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(82, 0);
+    const target_port = testTargetPort(82, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 82, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+
+    var wake_ctx = WakeTestContext{};
+    forwarder.setFirstPacketCallback(allowInspectionCallback, &wake_ctx, null);
+    forwarder.setWolPolicy(forwarder_runtime.c.TCP_WOL_ON_CONNECT, 100, 100, 3000, queueWakeCallback);
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    var client_ctx = DelayedTcpClientContext{ .port = listen_port, .message = "wake then forward" };
+    const client_thread = try std.Thread.spawn(app_forward.getThreadConfig(), delayedTcpClientThread, .{&client_ctx});
+
+    compat.sleepNanos(350 * std.time.ns_per_ms);
+    var echo_ctx = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_ctx});
+
+    client_thread.join();
+    echo_thread.join();
+
+    try testing.expect(client_ctx.err == null);
+    const response = client_ctx.response orelse return error.MissingResponse;
+    defer alloc.free(response);
+    try testing.expectEqualStrings(client_ctx.message, response);
+    try testing.expectEqual(@as(u32, 1), wake_ctx.calls.load(.monotonic));
+    try testing.expect(echo_ctx.start_error == null);
+}
+
+test "app forward: libuv on-protocol buffers fragments before target connect" {
+    if (build_options.forward_backend != .libuv) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(83, 0);
+    const target_port = testTargetPort(83, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 83, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+    forwarder.setFirstPacketCallback(fragmentedRdpWakeCallback, null, null);
+    forwarder.setWolPolicy(forwarder_runtime.c.TCP_WOL_ON_PROTOCOL, 100, 100, 3000, null);
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    const rdp = &[_]u8{ 0x03, 0x00, 0x00, 0x0B, 0x06, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var client_ctx = DelayedTcpClientContext{ .port = listen_port, .message = rdp, .fragment_at = 6 };
+    const client_thread = try std.Thread.spawn(app_forward.getThreadConfig(), delayedTcpClientThread, .{&client_ctx});
+
+    compat.sleepNanos(350 * std.time.ns_per_ms);
+    var echo_ctx = TcpSizedEchoServerContext{ .port = target_port, .max_connections = 1 };
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_ctx});
+
+    client_thread.join();
+    echo_thread.join();
+
+    try testing.expect(client_ctx.err == null);
+    const response = client_ctx.response orelse return error.MissingResponse;
+    defer alloc.free(response);
+    try testing.expectEqualSlices(u8, rdp, response);
+    try testing.expect(echo_ctx.start_error == null);
+}
+
+test "app forward: libuv inspects and flushes server-first protocol" {
+    if (build_options.forward_backend != .libuv) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const listen_port = testListenPort(84, 0);
+    const target_port = testTargetPort(84, 0);
+
+    var handle = try makeSinglePortHandle(alloc, 84, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+    forwarder.setFirstPacketCallback(serverFirstVncCallback, null, null);
+
+    var server_ctx = ServerFirstTestContext{ .port = target_port };
+    const server_thread = try std.Thread.spawn(app_forward.getThreadConfig(), serverFirstTcpServerThread, .{&server_ctx});
+    defer server_thread.join();
+    compat.sleepNanos(forwarder_ready_ns);
+
+    var forwarder_ctx = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    const forwarder_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpStartThread, .{&forwarder_ctx});
+    defer forwarder_thread.join();
+    defer forwarder.requestStop();
+
+    compat.sleepNanos(forwarder_ready_ns);
+    try testing.expect(forwarder_ctx.start_error == null);
+
+    var client_ctx = ServerFirstTestContext{ .port = listen_port };
+    serverFirstTcpClient(&client_ctx);
+
+    try testing.expect(client_ctx.err == null);
+    try testing.expect(server_ctx.err == null);
+}
+
 test "app forward: udp session timeout and garbage collection" {
     const alloc = testing.allocator;
     const listen_port = testListenPort(70, 0);
@@ -1392,6 +1560,13 @@ fn tcpPeerCloseClientThread(ctx: *TcpPeerCloseClientContext) void {
     ctx.completed = true;
 }
 
+fn delayedTcpClientThread(ctx: *DelayedTcpClientContext) void {
+    ctx.response = tcpClientTestFragmented(ctx.port, ctx.message, ctx.fragment_at) catch |err| {
+        ctx.err = err;
+        return;
+    };
+}
+
 fn tcpEchoServerThread(port: u16) void {
     const io = compat.io();
     var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return;
@@ -1469,6 +1644,107 @@ fn tcpSizedEchoServerThread(ctx: *TcpSizedEchoServerContext) void {
     ctx.start_error = null;
 }
 
+fn serverFirstTcpServerThread(ctx: *ServerFirstTestContext) void {
+    const io = compat.io();
+    const banner = "RFB 003.008\n";
+    const payload = "server-first-ok";
+    var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", ctx.port) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    var server = address.listen(io, .{ .reuse_address = true, .mode = .stream, .protocol = .tcp }) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    defer server.deinit(io);
+
+    const connection = server.accept(io) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    defer connection.close(io);
+
+    var write_buffer: [64]u8 = undefined;
+    var writer = connection.writer(io, &write_buffer);
+    writer.interface.writeAll(banner) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    writer.interface.flush() catch |err| {
+        ctx.err = err;
+        return;
+    };
+
+    var read_buffer: [64]u8 = undefined;
+    var reader = connection.reader(io, &read_buffer);
+    var received: [payload.len]u8 = undefined;
+    reader.interface.readSliceAll(&received) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    if (!std.mem.eql(u8, payload, &received)) {
+        ctx.err = error.UnexpectedPayload;
+        return;
+    }
+    writer.interface.writeAll(payload) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    writer.interface.flush() catch |err| {
+        ctx.err = err;
+        return;
+    };
+}
+
+fn serverFirstTcpClient(ctx: *ServerFirstTestContext) void {
+    const io = compat.io();
+    const banner = "RFB 003.008\n";
+    const payload = "server-first-ok";
+    var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", ctx.port) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    defer stream.close(io);
+
+    var read_buffer: [64]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+    var received_banner: [banner.len]u8 = undefined;
+    reader.interface.readSliceAll(&received_banner) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    if (!std.mem.eql(u8, banner, &received_banner)) {
+        ctx.err = error.UnexpectedBanner;
+        return;
+    }
+
+    var write_buffer: [64]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+    writer.interface.writeAll(payload) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    writer.interface.flush() catch |err| {
+        ctx.err = err;
+        return;
+    };
+    stream.shutdown(io, .send) catch |err| {
+        ctx.err = err;
+        return;
+    };
+
+    var received_payload: [payload.len]u8 = undefined;
+    reader.interface.readSliceAll(&received_payload) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    if (!std.mem.eql(u8, payload, &received_payload)) ctx.err = error.UnexpectedPayload;
+}
+
 fn tcpCloseServerThread(ctx: *TcpCloseServerContext) void {
     const io = compat.io();
     var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", ctx.port) catch |err| {
@@ -1491,6 +1767,10 @@ fn tcpCloseServerThread(ctx: *TcpCloseServerContext) void {
 
 fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
     _ = timeout_ns;
+    return tcpClientTestFragmented(port, message, 0);
+}
+
+fn tcpClientTestFragmented(port: u16, message: []const u8, fragment_at: usize) ![]const u8 {
     const allocator = testing.allocator;
     const io = compat.io();
     var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
@@ -1502,8 +1782,16 @@ fn tcpClientTest(port: u16, message: []const u8, timeout_ns: u64) ![]const u8 {
 
     var write_buf: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
-    try writer.interface.writeAll(message);
-    try writer.interface.flush();
+    if (fragment_at > 0 and fragment_at < message.len) {
+        try writer.interface.writeAll(message[0..fragment_at]);
+        try writer.interface.flush();
+        compat.sleepNanos(50 * std.time.ns_per_ms);
+        try writer.interface.writeAll(message[fragment_at..]);
+        try writer.interface.flush();
+    } else {
+        try writer.interface.writeAll(message);
+        try writer.interface.flush();
+    }
 
     stream.shutdown(io, .send) catch return error.ConnectionResetByPeer;
 

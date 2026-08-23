@@ -9,6 +9,7 @@ const event_log = @import("../event_log.zig");
 const INSPECTION_REJECT: c_int = 0;
 const INSPECTION_ALLOW: c_int = 1;
 const INSPECTION_NEED_MORE: c_int = 2;
+const INSPECTION_ALLOW_WAKE: c_int = 3;
 
 /// Immutable, allocator-owned policy shared by every connection on a forwarder.
 pub const CallbackContext = struct {
@@ -20,6 +21,9 @@ pub const CallbackContext = struct {
     wol_macs: []const []const u8,
     wol_cooldown_ms: u64,
     wol_log_enabled: bool,
+    wol_wake_delay_ms: u32,
+    wol_retry_interval_ms: u32,
+    wol_retry_window_ms: u32,
     enable_protocol_filter: bool,
     allowed_protocols: []protocol_detector.Protocol,
     tls_allowed_snis: []const []const u8,
@@ -43,6 +47,9 @@ pub const CallbackContext = struct {
             .wol_macs = wol_macs,
             .wol_cooldown_ms = cfg.resolved_wol_cooldown_ms,
             .wol_log_enabled = cfg.resolved_wol_log_enabled,
+            .wol_wake_delay_ms = @intCast(cfg.resolved_wol_wake_delay_ms),
+            .wol_retry_interval_ms = @intCast(cfg.resolved_wol_retry_interval_ms),
+            .wol_retry_window_ms = @intCast(cfg.resolved_wol_retry_window_ms),
             .enable_protocol_filter = cfg.enable_protocol_filter,
             .allowed_protocols = allowed_protocols,
             .tls_allowed_snis = tls_allowed_snis,
@@ -93,6 +100,20 @@ pub fn registerCallback(forwarder_ptr: ?*c.tcp_forwarder_t, allocator: std.mem.A
     ctx.* = try CallbackContext.init(allocator, cfg, project_id);
     errdefer ctx.deinit();
     c.tcp_forwarder_set_first_packet_cb(forwarder, firstPacketCallback, @ptrCast(ctx), destroyCallbackContext);
+    if (build_options.wol_mode and ctx.enable_wol) {
+        const mode: c.tcp_wol_trigger_mode_t = switch (ctx.wol_trigger_mode) {
+            .on_connect => c.TCP_WOL_ON_CONNECT,
+            .on_protocol => c.TCP_WOL_ON_PROTOCOL,
+        };
+        c.tcp_forwarder_set_wol_policy(
+            forwarder,
+            mode,
+            ctx.wol_wake_delay_ms,
+            ctx.wol_retry_interval_ms,
+            ctx.wol_retry_window_ms,
+            triggerWakeCallback,
+        );
+    }
 }
 
 fn containsProtocol(protocols: []const protocol_detector.Protocol, needle: protocol_detector.Protocol) bool {
@@ -137,13 +158,38 @@ fn destroyCallbackContext(user_data: ?*anyopaque) callconv(.c) void {
     allocator.destroy(ctx);
 }
 
-/// Incrementally inspects the accumulated initial client payload.
+fn enqueueWake(ctx: *const CallbackContext) bool {
+    if (!build_options.wol_mode or ctx.wol_macs.len == 0) return false;
+    const wol = @import("wol.zig");
+    const result = wol.enqueueGlobal(ctx.wol_macs, ctx.wol_cooldown_ms, ctx.wol_log_enabled, @intCast(ctx.project_id));
+    if (result.failed > 0) {
+        std.log.warn("[WoL] failed to enqueue {d} magic packet(s)", .{result.failed});
+    }
+    return result.queued > 0;
+}
+
+fn triggerWakeCallback(user_data: ?*anyopaque) callconv(.c) c_int {
+    const ctx: *CallbackContext = @ptrCast(@alignCast(user_data orelse return 0));
+    return if (enqueueWake(ctx)) 1 else 0;
+}
+
+fn supportsDirection(protocol: protocol_detector.Protocol, is_client_to_target: bool) bool {
+    return switch (protocol) {
+        .vnc => !is_client_to_target,
+        .ssh, .telnet => true,
+        else => is_client_to_target,
+    };
+}
+
+/// Incrementally inspects the accumulated initial payload in either direction.
 fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, is_client_to_target: c_int) callconv(.c) c_int {
     const ctx: *CallbackContext = @ptrCast(@alignCast(user_data orelse return INSPECTION_ALLOW));
     const slice = data[0..len];
 
-    // Only inspect client→target traffic; allow server→target responses
-    if (is_client_to_target == 0) return INSPECTION_ALLOW;
+    const client_to_target = is_client_to_target != 0;
+    if (!ctx.enable_protocol_filter and !(ctx.enable_wol and ctx.wol_trigger_mode == .on_protocol and client_to_target)) {
+        return INSPECTION_ALLOW;
+    }
 
     switch (protocol_detector.inspectProtocol(slice)) {
         .need_more => return INSPECTION_NEED_MORE,
@@ -155,6 +201,9 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
             return INSPECTION_ALLOW;
         },
         .matched => |protocol| {
+            if (!supportsDirection(protocol, client_to_target)) {
+                return if (len < protocol_detector.MAX_INSPECTION_BYTES) INSPECTION_NEED_MORE else INSPECTION_REJECT;
+            }
             const proto_str = protocol_detector.protocolToString(protocol);
             event_log.logEventFmt(.protocol_detected, @intCast(ctx.project_id), "Detected protocol {s}", .{proto_str});
 
@@ -191,13 +240,8 @@ fn firstPacketCallback(user_data: ?*anyopaque, data: [*c]const u8, len: usize, i
             // WoL: trigger if protocol is in detect list
             if (build_options.wol_mode and ctx.enable_wol and ctx.wol_trigger_mode == .on_protocol) {
                 if (containsProtocol(ctx.detect_protocols, protocol)) {
-                    if (ctx.wol_macs.len > 0) {
-                        const wol = @import("wol.zig");
-                        const result = wol.enqueueGlobal(ctx.wol_macs, ctx.wol_cooldown_ms, ctx.wol_log_enabled, @intCast(ctx.project_id));
-                        if (result.failed > 0) {
-                            std.log.warn("[WoL] failed to enqueue {d} magic packet(s)", .{result.failed});
-                        }
-                    }
+                    _ = enqueueWake(ctx);
+                    return INSPECTION_ALLOW_WAKE;
                 }
             }
         },

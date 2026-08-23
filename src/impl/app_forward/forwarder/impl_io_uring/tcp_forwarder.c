@@ -646,3 +646,18 @@ void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd,
         fwd->first_packet_destroy_cb = destroy_cb;
     }
 }
+
+void tcp_forwarder_set_wol_policy(tcp_forwarder_t *fwd,
+                                  tcp_wol_trigger_mode_t mode,
+                                  uint32_t wake_delay_ms,
+                                  uint32_t retry_interval_ms,
+                                  uint32_t retry_window_ms,
+                                  tcp_wol_trigger_cb_t trigger_cb)
+{
+    (void)fwd;
+    (void)mode;
+    (void)wake_delay_ms;
+    (void)retry_interval_ms;
+    (void)retry_window_ms;
+    (void)trigger_cb;
+}
