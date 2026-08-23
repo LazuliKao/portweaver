@@ -3,6 +3,7 @@ const uci = @import("../uci/mod.zig");
 const types = @import("types.zig");
 const helper = @import("helper.zig");
 const file_log = @import("../file_log.zig");
+const build_options = @import("build_options");
 fn appendZoneString(list: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator, s: []const u8) !void {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return;
@@ -779,6 +780,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         .ddns_configs = ddns_configs,
     };
     try helper.validateConfig(&cfg);
+    try helper.validateFeatureAvailability(&cfg, build_options.wol_mode);
     cfg.resolveWolTargets();
     return cfg;
 }

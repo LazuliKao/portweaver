@@ -3,6 +3,7 @@ const types = @import("types.zig");
 const helper = @import("helper.zig");
 const file_log = @import("../file_log.zig");
 const compat = @import("../compat.zig");
+const build_options = @import("build_options");
 
 // ── JSON value helpers ──────────────────────────────────────────────────
 
@@ -1095,6 +1096,9 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
     };
     helper.validateConfig(&validation_config) catch {
         ec.add("wol/protocol_filter", .conflict, "valid WoL and protocol-filter configuration", "", "invalid feature configuration");
+    };
+    helper.validateFeatureAvailability(&validation_config, build_options.wol_mode) catch {
+        ec.add("projects[].enable_wol", .conflict, "WoL support enabled at build time", "false", "WoL is not available in this build");
     };
 
     // ── Final check ─────────────────────────────────────────────────────
@@ -2317,6 +2321,7 @@ test "json: no leak - port 0 and negative ports" {
 }
 
 test "json: wol and protocol filter fields" {
+    if (!build_options.wol_mode) return error.SkipZigTest;
     const alloc = testing.allocator;
     const path = try writeTmpJson(alloc,
         \\{

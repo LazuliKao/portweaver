@@ -277,6 +277,14 @@ pub fn validateConfig(config: *const types.Config) !void {
     }
 }
 
+/// Reject runtime configuration that requests features omitted from this build.
+pub fn validateFeatureAvailability(config: *const types.Config, wol_available: bool) !void {
+    if (wol_available) return;
+    for (config.projects) |project| {
+        if (project.enable_wol) return types.ConfigError.UnsupportedFeature;
+    }
+}
+
 /// Result of WoL config validation. Collects errors without requiring an allocator.
 pub const WolValidationResult = struct {
     mac_errors: u32 = 0,
