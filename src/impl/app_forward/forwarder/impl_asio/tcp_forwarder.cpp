@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -101,8 +102,7 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
 
     static std::shared_ptr<tcp_conn_ctx> create(tcp_forwarder *owner_forwarder);
 
-    void async_connect_to_target();
-    void start_forwarding();
+    void start();
     void force_close();
 
     asio::ip::tcp::socket client_socket;
@@ -113,12 +113,20 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
     bool target_eof;
 
   private:
+    void schedule_connect(uint32_t delay_ms);
+    void async_connect_to_target();
+    void handle_connect_failure();
+    void start_inspection_timer();
+    void cancel_inspection_timer();
     void start_client_read();
     void start_target_read();
     void on_client_read(const asio::error_code &ec, std::size_t bytes_transferred);
     void on_target_read(const asio::error_code &ec, std::size_t bytes_transferred);
-    void write_to_target(std::size_t bytes_transferred, bool use_inspection_buffer = false);
-    void write_to_client(std::size_t bytes_transferred);
+    void inspect_data(const unsigned char *data, std::size_t length, bool client_to_target);
+    void finish_inspection(int result);
+    void maybe_start_forwarding();
+    void write_to_target(const unsigned char *data, std::size_t length, bool inspection_data);
+    void write_to_client(const unsigned char *data, std::size_t length, bool inspection_data);
     void on_target_write(const asio::error_code &ec);
     void on_client_write(const asio::error_code &ec);
     void handle_client_eof();
@@ -129,13 +137,23 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
 
     tcp_forwarder *owner;
     bool closing;
+    bool target_connected;
+    bool client_read_pending;
+    bool target_read_pending;
     bool target_write_pending;
     bool client_write_pending;
     bool target_write_uses_inspection_buffer;
-    std::shared_ptr<asio::steady_timer> connect_timer;
+    bool client_write_uses_inspection_buffer;
+    asio::steady_timer action_timer;
+    asio::steady_timer connect_timer;
+    asio::steady_timer inspection_timer;
+    std::chrono::steady_clock::time_point retry_deadline;
+    bool retry_enabled;
     bool first_packet_inspected = false;
-    std::array<unsigned char, TCP_FORWARD_BUFFER_SIZE> inspection_buffer;
-    std::size_t inspection_length = 0;
+    std::array<unsigned char, TCP_FORWARD_BUFFER_SIZE> client_inspection_buffer;
+    std::size_t client_inspection_length = 0;
+    std::array<unsigned char, TCP_FORWARD_BUFFER_SIZE> target_inspection_buffer;
+    std::size_t target_inspection_length = 0;
 };
 
 struct tcp_forwarder
@@ -163,6 +181,11 @@ struct tcp_forwarder
     tcp_first_packet_cb_t first_packet_cb = nullptr;
     void *first_packet_user_data = nullptr;
     tcp_first_packet_destroy_cb_t first_packet_destroy_cb = nullptr;
+    tcp_wol_trigger_mode_t wol_mode = TCP_WOL_DISABLED;
+    uint32_t wol_wake_delay_ms = 0;
+    uint32_t wol_retry_interval_ms = 0;
+    uint32_t wol_retry_window_ms = 0;
+    tcp_wol_trigger_cb_t wol_trigger_cb = nullptr;
 
     tcp_forwarder(forwarder_runtime_t *runtime_value, asio::io_context &io_ctx_value)
         : runtime(runtime_value), acceptor(io_ctx_value), io_ctx(io_ctx_value), target_address(nullptr), listen_port(0),
@@ -211,7 +234,7 @@ struct tcp_forwarder
                     }
                     active_sessions.fetch_add(1u, std::memory_order_relaxed);
                     pending_close_count.fetch_add(1, std::memory_order_release);
-                    conn->async_connect_to_target();
+                    conn->start();
                 }
             }
 
@@ -276,8 +299,10 @@ struct tcp_forwarder
 
 tcp_conn_ctx::tcp_conn_ctx(asio::io_context &io_ctx, tcp_forwarder *owner_forwarder)
     : client_socket(io_ctx), target_socket(io_ctx), client_buffer(), target_buffer(), client_eof(false), target_eof(false),
-      owner(owner_forwarder), closing(false), target_write_pending(false), client_write_pending(false),
-      target_write_uses_inspection_buffer(false), inspection_buffer()
+      owner(owner_forwarder), closing(false), target_connected(false), client_read_pending(false), target_read_pending(false),
+      target_write_pending(false), client_write_pending(false), target_write_uses_inspection_buffer(false),
+      client_write_uses_inspection_buffer(false), action_timer(io_ctx), connect_timer(io_ctx), inspection_timer(io_ctx),
+      retry_deadline(), retry_enabled(false), client_inspection_buffer(), target_inspection_buffer()
 {
 }
 
@@ -298,47 +323,142 @@ std::shared_ptr<tcp_conn_ctx> tcp_conn_ctx::create(tcp_forwarder *owner_forwarde
     return std::shared_ptr<tcp_conn_ctx>(new (memory) tcp_conn_ctx(owner_forwarder->io_ctx, owner_forwarder), deleter);
 }
 
-void tcp_conn_ctx::async_connect_to_target()
+void tcp_conn_ctx::start()
 {
-    std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
-
-    if (owner->connect_timeout_ms > 0)
+    if (owner->wol_mode == TCP_WOL_ON_PROTOCOL && owner->first_packet_cb)
     {
-        connect_timer = std::make_shared<asio::steady_timer>(target_socket.get_executor());
-        connect_timer->expires_after(std::chrono::milliseconds(owner->connect_timeout_ms));
-        connect_timer->async_wait([self](const asio::error_code &ec) {
-            if (ec || self->closing)
-                return;
-            self->target_socket.close();
-        });
+        start_inspection_timer();
+        start_client_read();
+        return;
     }
 
-    target_socket.async_connect(owner->cached_dest_addr, [self](const asio::error_code &ec) {
-        if (self->connect_timer)
-        {
-            self->connect_timer->cancel();
-            self->connect_timer.reset();
-        }
-        if (ec)
+    if (owner->wol_mode == TCP_WOL_ON_CONNECT)
+    {
+        retry_enabled = true;
+        retry_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(owner->wol_retry_window_ms);
+        const bool wake_queued = owner->wol_trigger_cb && owner->wol_trigger_cb(owner->first_packet_user_data) != 0;
+        if (owner->first_packet_cb)
+            start_client_read();
+        schedule_connect(wake_queued ? owner->wol_wake_delay_ms : 0);
+        return;
+    }
+
+    schedule_connect(0);
+}
+
+void tcp_conn_ctx::schedule_connect(uint32_t delay_ms)
+{
+    if (closing)
+        return;
+
+    if (retry_enabled && std::chrono::steady_clock::now() >= retry_deadline)
+    {
+        force_close();
+        return;
+    }
+
+    if (delay_ms == 0)
+    {
+        async_connect_to_target();
+        return;
+    }
+
+    std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
+    action_timer.expires_after(std::chrono::milliseconds(delay_ms));
+    action_timer.async_wait([self](const asio::error_code &ec) {
+        if (ec || self->closing)
+            return;
+        if (self->retry_enabled && std::chrono::steady_clock::now() >= self->retry_deadline)
         {
             self->force_close();
             return;
         }
-        self->start_forwarding();
+        self->async_connect_to_target();
     });
 }
 
-void tcp_conn_ctx::start_forwarding()
+void tcp_conn_ctx::async_connect_to_target()
 {
-    start_client_read();
-    start_target_read();
+    if (closing || target_connected)
+        return;
+
+    asio::error_code ignored;
+    if (target_socket.is_open())
+        target_socket.close(ignored);
+    target_socket = asio::ip::tcp::socket(owner->io_ctx);
+
+    std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
+
+    if (owner->connect_timeout_ms > 0)
+    {
+        connect_timer.expires_after(std::chrono::milliseconds(owner->connect_timeout_ms));
+        connect_timer.async_wait([self](const asio::error_code &ec) {
+            if (ec || self->closing)
+                return;
+            asio::error_code ignored;
+            self->target_socket.close(ignored);
+        });
+    }
+
+    target_socket.async_connect(owner->cached_dest_addr, [self](const asio::error_code &ec) {
+        self->connect_timer.cancel();
+        if (self->closing)
+            return;
+        if (ec)
+        {
+            self->handle_connect_failure();
+            return;
+        }
+        self->target_connected = true;
+        if (!self->first_packet_inspected && self->owner->first_packet_cb)
+            self->start_inspection_timer();
+        self->maybe_start_forwarding();
+    });
+}
+
+void tcp_conn_ctx::handle_connect_failure()
+{
+    if (!retry_enabled)
+    {
+        force_close();
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= retry_deadline || now + std::chrono::milliseconds(owner->wol_retry_interval_ms) >= retry_deadline)
+    {
+        force_close();
+        return;
+    }
+    schedule_connect(owner->wol_retry_interval_ms);
+}
+
+void tcp_conn_ctx::start_inspection_timer()
+{
+    if (closing || first_packet_inspected || !owner->first_packet_cb)
+        return;
+    inspection_timer.cancel();
+    std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
+    inspection_timer.expires_after(std::chrono::seconds(2));
+    inspection_timer.async_wait([self](const asio::error_code &ec) {
+        if (!ec && !self->closing && !self->first_packet_inspected)
+            self->force_close();
+    });
+}
+
+void tcp_conn_ctx::cancel_inspection_timer()
+{
+    inspection_timer.cancel();
 }
 
 void tcp_conn_ctx::start_client_read()
 {
-    if (closing || client_eof)
+    if (closing || client_eof || client_read_pending || target_write_pending)
+        return;
+    if (!target_connected && first_packet_inspected)
         return;
 
+    client_read_pending = true;
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
     client_socket.async_read_some(asio::buffer(client_buffer), [self](const asio::error_code &ec, std::size_t bytes_transferred) {
         self->on_client_read(ec, bytes_transferred);
@@ -347,9 +467,10 @@ void tcp_conn_ctx::start_client_read()
 
 void tcp_conn_ctx::start_target_read()
 {
-    if (closing || target_eof)
+    if (closing || target_eof || !target_connected || target_read_pending || client_write_pending)
         return;
 
+    target_read_pending = true;
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
     target_socket.async_read_some(asio::buffer(target_buffer), [self](const asio::error_code &ec, std::size_t bytes_transferred) {
         self->on_target_read(ec, bytes_transferred);
@@ -358,6 +479,7 @@ void tcp_conn_ctx::start_target_read()
 
 void tcp_conn_ctx::on_client_read(const asio::error_code &ec, std::size_t bytes_transferred)
 {
+    client_read_pending = false;
     if (closing)
         return;
 
@@ -368,45 +490,57 @@ void tcp_conn_ctx::on_client_read(const asio::error_code &ec, std::size_t bytes_
 
         if (bytes_transferred > 0 && !first_packet_inspected && owner->first_packet_cb != nullptr)
         {
-            if (bytes_transferred > inspection_buffer.size() - inspection_length)
-            {
-                force_close();
-                return;
-            }
-            std::memcpy(inspection_buffer.data() + inspection_length, client_buffer.data(), bytes_transferred);
-            inspection_length += bytes_transferred;
-            const int result = owner->first_packet_cb(owner->first_packet_user_data, inspection_buffer.data(), inspection_length, 1);
-            if (result == TCP_INSPECTION_NEED_MORE)
-            {
-                start_client_read();
-                return;
-            }
-            if (result != TCP_INSPECTION_ALLOW)
-            {
-                force_close();
-                return;
-            }
-            first_packet_inspected = true;
-            write_to_target(inspection_length, true);
+            inspect_data(client_buffer.data(), bytes_transferred, true);
             return;
         }
 
-        write_to_target(bytes_transferred);
+        if (client_inspection_length > 0)
+        {
+            if (bytes_transferred > client_inspection_buffer.size() - client_inspection_length)
+            {
+                force_close();
+                return;
+            }
+            std::memcpy(client_inspection_buffer.data() + client_inspection_length, client_buffer.data(), bytes_transferred);
+            client_inspection_length += bytes_transferred;
+            maybe_start_forwarding();
+            return;
+        }
+
+        if (!target_connected)
+        {
+            force_close();
+            return;
+        }
+        write_to_target(client_buffer.data(), bytes_transferred, false);
         return;
     }
 
     if (ec == asio::error::eof)
     {
+        if (!first_packet_inspected && owner->wol_mode == TCP_WOL_ON_PROTOCOL)
+        {
+            force_close();
+            return;
+        }
         handle_client_eof();
+        if (first_packet_inspected)
+            maybe_start_forwarding();
         return;
     }
 
+    if (ec == asio::error::operation_aborted && first_packet_inspected)
+    {
+        maybe_start_forwarding();
+        return;
+    }
     if (ec != asio::error::operation_aborted)
         force_close();
 }
 
 void tcp_conn_ctx::on_target_read(const asio::error_code &ec, std::size_t bytes_transferred)
 {
+    target_read_pending = false;
     if (closing)
         return;
 
@@ -414,41 +548,151 @@ void tcp_conn_ctx::on_target_read(const asio::error_code &ec, std::size_t bytes_
     {
         if (owner->enable_stats)
             owner->bytes_out.fetch_add(static_cast<unsigned long long>(bytes_transferred), std::memory_order_relaxed);
-        write_to_client(bytes_transferred);
+        if (bytes_transferred > 0 && !first_packet_inspected && owner->first_packet_cb != nullptr)
+        {
+            inspect_data(target_buffer.data(), bytes_transferred, false);
+            return;
+        }
+        if (target_inspection_length > 0)
+        {
+            if (bytes_transferred > target_inspection_buffer.size() - target_inspection_length)
+            {
+                force_close();
+                return;
+            }
+            std::memcpy(target_inspection_buffer.data() + target_inspection_length, target_buffer.data(), bytes_transferred);
+            target_inspection_length += bytes_transferred;
+            maybe_start_forwarding();
+            return;
+        }
+        write_to_client(target_buffer.data(), bytes_transferred, false);
         return;
     }
 
     if (ec == asio::error::eof)
     {
+        if (!first_packet_inspected && owner->first_packet_cb)
+        {
+            force_close();
+            return;
+        }
         handle_target_eof();
+        if (first_packet_inspected)
+            maybe_start_forwarding();
         return;
     }
 
+    if (ec == asio::error::operation_aborted && first_packet_inspected)
+    {
+        maybe_start_forwarding();
+        return;
+    }
     if (ec != asio::error::operation_aborted)
         force_close();
 }
 
-void tcp_conn_ctx::write_to_target(std::size_t bytes_transferred, bool use_inspection_buffer)
+void tcp_conn_ctx::inspect_data(const unsigned char *data, std::size_t length, bool client_to_target)
 {
-    if (closing)
+    std::array<unsigned char, TCP_FORWARD_BUFFER_SIZE> &buffer = client_to_target ? client_inspection_buffer : target_inspection_buffer;
+    std::size_t &buffer_length = client_to_target ? client_inspection_length : target_inspection_length;
+    if (length > buffer.size() - buffer_length)
+    {
+        force_close();
+        return;
+    }
+
+    std::memcpy(buffer.data() + buffer_length, data, length);
+    buffer_length += length;
+    const int result = owner->first_packet_cb(owner->first_packet_user_data, buffer.data(), buffer_length, client_to_target ? 1 : 0);
+    if (result == TCP_INSPECTION_NEED_MORE)
+    {
+        if (client_to_target)
+            start_client_read();
+        else
+            start_target_read();
+        return;
+    }
+    finish_inspection(result);
+}
+
+void tcp_conn_ctx::finish_inspection(int result)
+{
+    if (result != TCP_INSPECTION_ALLOW && result != TCP_INSPECTION_ALLOW_WAKE)
+    {
+        force_close();
+        return;
+    }
+
+    first_packet_inspected = true;
+    cancel_inspection_timer();
+
+    asio::error_code ignored;
+    if (client_read_pending)
+        client_socket.cancel(ignored);
+    if (target_read_pending)
+        target_socket.cancel(ignored);
+
+    if (!target_connected && owner->wol_mode == TCP_WOL_ON_PROTOCOL)
+    {
+        if (result == TCP_INSPECTION_ALLOW_WAKE)
+        {
+            retry_enabled = true;
+            retry_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(owner->wol_retry_window_ms);
+            schedule_connect(owner->wol_wake_delay_ms);
+        }
+        else
+        {
+            schedule_connect(0);
+        }
+        return;
+    }
+    maybe_start_forwarding();
+}
+
+void tcp_conn_ctx::maybe_start_forwarding()
+{
+    if (closing || !target_connected || client_read_pending || target_read_pending)
+        return;
+
+    if (!first_packet_inspected && owner->first_packet_cb)
+    {
+        start_client_read();
+        start_target_read();
+        return;
+    }
+
+    if (client_inspection_length > 0 && !target_write_pending)
+        write_to_target(client_inspection_buffer.data(), client_inspection_length, true);
+    else if (!target_write_pending)
+        start_client_read();
+
+    if (target_inspection_length > 0 && !client_write_pending)
+        write_to_client(target_inspection_buffer.data(), target_inspection_length, true);
+    else if (!client_write_pending)
+        start_target_read();
+}
+
+void tcp_conn_ctx::write_to_target(const unsigned char *data, std::size_t length, bool inspection_data)
+{
+    if (closing || !target_connected || target_write_pending)
         return;
 
     target_write_pending = true;
-    target_write_uses_inspection_buffer = use_inspection_buffer;
+    target_write_uses_inspection_buffer = inspection_data;
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
-    unsigned char *data = use_inspection_buffer ? inspection_buffer.data() : client_buffer.data();
-    asio::async_write(target_socket, asio::buffer(data, bytes_transferred),
+    asio::async_write(target_socket, asio::buffer(data, length),
                       [self](const asio::error_code &ec, std::size_t) { self->on_target_write(ec); });
 }
 
-void tcp_conn_ctx::write_to_client(std::size_t bytes_transferred)
+void tcp_conn_ctx::write_to_client(const unsigned char *data, std::size_t length, bool inspection_data)
 {
-    if (closing)
+    if (closing || client_write_pending)
         return;
 
     client_write_pending = true;
+    client_write_uses_inspection_buffer = inspection_data;
     std::shared_ptr<tcp_conn_ctx> self = shared_from_this();
-    asio::async_write(client_socket, asio::buffer(target_buffer.data(), bytes_transferred),
+    asio::async_write(client_socket, asio::buffer(data, length),
                       [self](const asio::error_code &ec, std::size_t) { self->on_client_write(ec); });
 }
 
@@ -457,7 +701,7 @@ void tcp_conn_ctx::on_target_write(const asio::error_code &ec)
     target_write_pending = false;
     if (target_write_uses_inspection_buffer)
     {
-        inspection_length = 0;
+        client_inspection_length = 0;
         target_write_uses_inspection_buffer = false;
     }
 
@@ -473,6 +717,7 @@ void tcp_conn_ctx::on_target_write(const asio::error_code &ec)
 
     if (client_eof)
     {
+        shutdown_socket_write(target_socket);
         maybe_finish();
         return;
     }
@@ -483,6 +728,11 @@ void tcp_conn_ctx::on_target_write(const asio::error_code &ec)
 void tcp_conn_ctx::on_client_write(const asio::error_code &ec)
 {
     client_write_pending = false;
+    if (client_write_uses_inspection_buffer)
+    {
+        target_inspection_length = 0;
+        client_write_uses_inspection_buffer = false;
+    }
 
     if (closing)
         return;
@@ -496,6 +746,7 @@ void tcp_conn_ctx::on_client_write(const asio::error_code &ec)
 
     if (target_eof)
     {
+        shutdown_socket_write(client_socket);
         maybe_finish();
         return;
     }
@@ -509,7 +760,8 @@ void tcp_conn_ctx::handle_client_eof()
         return;
 
     client_eof = true;
-    shutdown_socket_write(target_socket);
+    if (target_connected && client_inspection_length == 0 && !target_write_pending)
+        shutdown_socket_write(target_socket);
     maybe_finish();
 }
 
@@ -519,7 +771,8 @@ void tcp_conn_ctx::handle_target_eof()
         return;
 
     target_eof = true;
-    shutdown_socket_write(client_socket);
+    if (target_inspection_length == 0 && !client_write_pending)
+        shutdown_socket_write(client_socket);
     maybe_finish();
 }
 
@@ -546,13 +799,10 @@ void tcp_conn_ctx::close_internal()
 
     closing = true;
 
-    if (connect_timer)
-    {
-        connect_timer->cancel();
-        connect_timer.reset();
-    }
-
     asio::error_code ec;
+    action_timer.cancel();
+    connect_timer.cancel();
+    inspection_timer.cancel();
     client_socket.cancel(ec);
     target_socket.cancel(ec);
     client_socket.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
@@ -752,12 +1002,13 @@ extern "C" void tcp_forwarder_set_wol_policy(tcp_forwarder_t *fwd,
                                                uint32_t retry_window_ms,
                                                tcp_wol_trigger_cb_t trigger_cb)
 {
-    (void)fwd;
-    (void)mode;
-    (void)wake_delay_ms;
-    (void)retry_interval_ms;
-    (void)retry_window_ms;
-    (void)trigger_cb;
+    if (!fwd)
+        return;
+    fwd->wol_mode = mode;
+    fwd->wol_wake_delay_ms = wake_delay_ms;
+    fwd->wol_retry_interval_ms = retry_interval_ms;
+    fwd->wol_retry_window_ms = retry_window_ms;
+    fwd->wol_trigger_cb = trigger_cb;
 }
 
 #endif
