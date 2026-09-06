@@ -15,9 +15,8 @@ on:
 
 jobs:
   test:
-    name: Test ${{ matrix.backend }} backend
+    name: Test ${{ matrix.backend }} backend (WoL ${{ matrix.wol }})
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.backend == 'io_uring' }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +24,9 @@ jobs:
           - libuv
           - asio
           - io_uring
+        wol:
+          - false
+          - true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -44,7 +46,7 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          zig build test -Dforward_backend=${{ matrix.backend }} -Dfrpc=true -Dfrps=true -Dddns=true --test-timeout 10s --summary all
+          zig build test -Dforward_backend=${{ matrix.backend }} -Dwol=${{ matrix.wol }} -Duci=true -Dubus=true -Dnftables=true -Dfrpc=true -Dfrps=true -Dddns=true --test-timeout 30s --summary all
 
   build:
     name: Build ${{ matrix.name }}
