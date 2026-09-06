@@ -12,6 +12,16 @@ pub const EnqueueResult = struct {
     failed: u32 = 0,
 };
 
+pub const Status = struct {
+    queue_depth: u32 = 0,
+    active_jobs: u32 = 0,
+    pending_count: u32 = 0,
+    cooldown_remaining_ms: u64 = 0,
+    last_attempt_ms_ago: ?u64 = null,
+    last_success_ms_ago: ?u64 = null,
+    last_error: ?[]const u8 = null,
+};
+
 const Job = struct {
     mac: [6]u8,
     cooldown_ms: u64,
@@ -22,10 +32,18 @@ const Job = struct {
 const CooldownEntry = struct {
     cooldown_until_ms: ?i64 = null,
     pending: bool = false,
+    last_attempt_ms: ?i64 = null,
+    last_success_ms: ?i64 = null,
+    last_error: ?ErrorClass = null,
+};
+
+const ErrorClass = enum {
+    send_failed,
 };
 
 const SendFn = *const fn (?*anyopaque, [6]u8) anyerror!void;
 const ClockFn = *const fn (?*anyopaque) i64;
+const STATUS_RETENTION_MS = 5 * std.time.ms_per_min;
 
 /// Process-wide asynchronous WoL sender. The service owns its queue, worker,
 /// and cooldown state; callers only enqueue value-owned jobs.
@@ -147,6 +165,51 @@ pub const WolService = struct {
         return result;
     }
 
+    /// Returns aggregate state for the supplied MACs without exposing them.
+    pub fn status(self: *WolService, mac_list: []const []const u8) Status {
+        self.mutex.lockUncancelable(compat.io());
+        defer self.mutex.unlock(compat.io());
+
+        const now = self.clock_fn(self.clock_context);
+        self.pruneExpired(now);
+        var result = Status{
+            .queue_depth = @intCast(self.queue.items.len),
+            .active_jobs = @intCast(self.active_jobs),
+        };
+        var latest_attempt: ?i64 = null;
+        var latest_success: ?i64 = null;
+        var latest_error: ?struct { time: i64, value: ErrorClass } = null;
+
+        for (mac_list) |mac_str| {
+            const mac = parseMac(mac_str) orelse continue;
+            const entry = self.cooldowns.get(mac) orelse continue;
+            if (entry.pending) result.pending_count += 1;
+            if (entry.cooldown_until_ms) |until| {
+                if (until > now) {
+                    const remaining: u64 = @intCast(until - now);
+                    result.cooldown_remaining_ms = @max(result.cooldown_remaining_ms, remaining);
+                }
+            }
+            if (entry.last_attempt_ms) |attempt| {
+                if (latest_attempt == null or attempt > latest_attempt.?) latest_attempt = attempt;
+            }
+            if (entry.last_success_ms) |success| {
+                if (latest_success == null or success > latest_success.?) latest_success = success;
+            }
+            if (entry.last_error) |err| {
+                const error_time = entry.last_attempt_ms orelse continue;
+                if (latest_error == null or error_time > latest_error.?.time) {
+                    latest_error = .{ .time = error_time, .value = err };
+                }
+            }
+        }
+
+        if (latest_attempt) |attempt| result.last_attempt_ms_ago = elapsedMillis(now, attempt);
+        if (latest_success) |success| result.last_success_ms_ago = elapsedMillis(now, success);
+        if (latest_error) |err| result.last_error = @tagName(err.value);
+        return result;
+    }
+
     fn workerMain(self: *WolService) void {
         while (true) {
             self.mutex.lockUncancelable(compat.io());
@@ -179,13 +242,17 @@ pub const WolService = struct {
         defer self.mutex.unlock(compat.io());
 
         if (self.cooldowns.getPtr(job.mac)) |entry| {
+            const now = self.clock_fn(self.clock_context);
             entry.pending = false;
+            entry.last_attempt_ms = now;
             if (succeeded) {
-                const now = self.clock_fn(self.clock_context);
                 const cooldown: i64 = @intCast(job.cooldown_ms);
                 entry.cooldown_until_ms = std.math.add(i64, now, cooldown) catch std.math.maxInt(i64);
-            } else if (!cooldownActive(entry.cooldown_until_ms, self.clock_fn(self.clock_context))) {
-                _ = self.cooldowns.remove(job.mac);
+                entry.last_success_ms = now;
+                entry.last_error = null;
+            } else {
+                entry.cooldown_until_ms = null;
+                entry.last_error = .send_failed;
             }
         }
         self.active_jobs -= 1;
@@ -205,7 +272,9 @@ pub const WolService = struct {
             var iterator = self.cooldowns.iterator();
             var expired_key: ?[6]u8 = null;
             while (iterator.next()) |entry| {
-                if (!entry.value_ptr.pending and !cooldownActive(entry.value_ptr.cooldown_until_ms, now)) {
+                const last_attempt = entry.value_ptr.last_attempt_ms orelse std.math.minInt(i64);
+                const status_expired = now -| last_attempt >= STATUS_RETENTION_MS;
+                if (!entry.value_ptr.pending and !cooldownActive(entry.value_ptr.cooldown_until_ms, now) and status_expired) {
                     expired_key = entry.key_ptr.*;
                     break;
                 }
@@ -245,9 +314,21 @@ pub fn enqueueGlobal(mac_list: []const []const u8, cooldown_ms: u64, log_enabled
     return service.enqueue(mac_list, cooldown_ms, log_enabled, project_id);
 }
 
+pub fn statusGlobal(mac_list: []const []const u8) Status {
+    global_mutex.lockUncancelable(compat.io());
+    defer global_mutex.unlock(compat.io());
+    const service = global_service orelse return .{};
+    return service.status(mac_list);
+}
+
 fn cooldownActive(cooldown_until_ms: ?i64, now: i64) bool {
     const cooldown_until = cooldown_until_ms orelse return false;
     return now < cooldown_until;
+}
+
+fn elapsedMillis(now: i64, then: i64) u64 {
+    if (now <= then) return 0;
+    return @intCast(now - then);
 }
 
 fn defaultClock(_: ?*anyopaque) i64 {
@@ -365,6 +446,37 @@ test "service shares cooldown and commits only successful sends" {
     try std.testing.expectEqual(@as(u32, 1), service.enqueue(macs, 1000, false, 1).queued);
     service.waitUntilIdle();
     try std.testing.expectEqual(@as(usize, 3), sender.calls);
+}
+
+test "service status reports cooldown and the latest send result" {
+    var sender = FakeSender{};
+    var clock = FakeClock{};
+    const service = try WolService.initWithOptions(std.testing.allocator, .{
+        .send_fn = FakeSender.send,
+        .send_context = &sender,
+        .clock_fn = FakeClock.read,
+        .clock_context = &clock,
+    });
+    defer service.deinit();
+
+    const macs = &[_][]const u8{"AA:BB:CC:DD:EE:FF"};
+    _ = service.enqueue(macs, 1000, false, 1);
+    service.waitUntilIdle();
+
+    var status = service.status(macs);
+    try std.testing.expectEqual(@as(u64, 1000), status.cooldown_remaining_ms);
+    try std.testing.expectEqual(@as(?u64, 0), status.last_attempt_ms_ago);
+    try std.testing.expectEqual(@as(?u64, 0), status.last_success_ms_ago);
+    try std.testing.expect(status.last_error == null);
+
+    clock.now += 1000;
+    sender.fail = true;
+    _ = service.enqueue(macs, 1000, false, 1);
+    service.waitUntilIdle();
+
+    status = service.status(macs);
+    try std.testing.expectEqual(@as(?[]const u8, "send_failed"), status.last_error);
+    try std.testing.expectEqual(@as(?u64, 0), status.last_attempt_ms_ago);
 }
 
 const BlockingSender = struct {

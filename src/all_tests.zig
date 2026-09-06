@@ -35,4 +35,9 @@ test {
     if (build_options.frps_mode) {
         _ = @import("./impl/frps/libfrps.zig");
     }
+
+    if (build_options.ubus_mode) {
+        _ = @import("./ubus/server.zig");
+        _ = @import("./ubus/serialization.zig");
+    }
 }

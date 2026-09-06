@@ -181,7 +181,7 @@ pub fn parseArgs(comptime T: type, msg: ?*c.blob_attr, comptime policy: []const 
 pub fn mapZigErrorToUbus(err: anyerror) c_int {
     return switch (err) {
         error.OutOfMemory => c.UBUS_STATUS_NO_MEMORY,
-        error.InvalidArgument => c.UBUS_STATUS_INVALID_ARGUMENT,
+        error.InvalidArgument, error.InvalidValue => c.UBUS_STATUS_INVALID_ARGUMENT,
         error.NotFound => c.UBUS_STATUS_NOT_FOUND,
         error.PermissionDenied => c.UBUS_STATUS_PERMISSION_DENIED,
         else => c.UBUS_STATUS_UNKNOWN_ERROR,

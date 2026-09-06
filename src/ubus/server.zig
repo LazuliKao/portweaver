@@ -18,11 +18,24 @@ const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {
         skipped: u32 = 0,
         failed: u32 = 0,
     };
+    pub const Status = struct {
+        queue_depth: u32 = 0,
+        active_jobs: u32 = 0,
+        pending_count: u32 = 0,
+        cooldown_remaining_ms: u64 = 0,
+        last_attempt_ms_ago: ?u64 = null,
+        last_success_ms_ago: ?u64 = null,
+        last_error: ?[]const u8 = null,
+    };
     pub fn enqueueGlobal(macs: []const []const u8, cooldown: u64, log_enabled: bool, id: i32) EnqueueResult {
         _ = macs;
         _ = cooldown;
         _ = log_enabled;
         _ = id;
+        return .{};
+    }
+    pub fn statusGlobal(macs: []const []const u8) Status {
+        _ = macs;
         return .{};
     }
 };
@@ -785,7 +798,11 @@ const WolProjectArgs = struct {
 
 const WolWakeResponse = struct {
     success: bool,
+    /// Legacy alias for queued packets retained for existing RPC consumers.
     sent_count: u32,
+    queued_count: u32,
+    skipped_count: u32,
+    failed_count: u32,
 };
 
 const WolStatusResponse = struct {
@@ -793,6 +810,13 @@ const WolStatusResponse = struct {
     mac_count: u32,
     cooldown_ms: u64,
     detect_protocols: []const []const u8,
+    queue_depth: u32,
+    active_jobs: u32,
+    pending_count: u32,
+    cooldown_remaining_ms: u64,
+    last_attempt_ms_ago: ?u64,
+    last_success_ms_ago: ?u64,
+    last_error: ?[]const u8,
 };
 
 fn getStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetStatusResponse {
@@ -1270,7 +1294,7 @@ fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !Reloa
 
 fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
     for (state.projects.items) |project| {
-        if (std.mem.eql(u8, project.cfg.remark, name)) {
+        if (std.mem.eql(u8, project.cfg.section_name, name)) {
             return project;
         }
     }
@@ -1281,59 +1305,72 @@ fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_st
     return null;
 }
 
+fn validateWolSelector(args: WolProjectArgs) !void {
+    const has_project = args.project != null and args.project.?.len > 0;
+    const has_target = args.target != null and args.target.?.len > 0;
+    if (has_project == has_target) return error.InvalidArgument;
+}
+
+fn wakeResponse(result: wol.EnqueueResult) WolWakeResponse {
+    return .{
+        .success = result.failed == 0,
+        .sent_count = result.queued,
+        .queued_count = result.queued,
+        .skipped_count = result.skipped,
+        .failed_count = result.failed,
+    };
+}
+
+fn statusResponse(enabled: bool, mac_list: []const []const u8, cooldown_ms: u64, detect_protocols: []const []const u8) WolStatusResponse {
+    const status = wol.statusGlobal(mac_list);
+    return .{
+        .enabled = enabled,
+        .mac_count = @intCast(mac_list.len),
+        .cooldown_ms = cooldown_ms,
+        .detect_protocols = detect_protocols,
+        .queue_depth = status.queue_depth,
+        .active_jobs = status.active_jobs,
+        .pending_count = status.pending_count,
+        .cooldown_remaining_ms = status.cooldown_remaining_ms,
+        .last_attempt_ms_ago = status.last_attempt_ms_ago,
+        .last_success_ms_ago = status.last_success_ms_ago,
+        .last_error = status.last_error,
+    };
+}
+
 fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolWakeResponse {
     _ = allocator;
+    try validateWolSelector(args);
 
     if (args.target) |target_name| {
         const cfg = reload.getConfig() orelse return error.InvalidValue;
         const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
-        if (!target.enabled) {
-            return .{ .success = false, .sent_count = 0 };
-        }
-        if (target.mac_addresses.len == 0) {
-            return .{ .success = true, .sent_count = 0 };
-        }
+        if (!target.enabled) return error.InvalidArgument;
         const result = wol.enqueueGlobal(target.mac_addresses, target.cooldown_ms, target.log_enabled, -1);
-        return .{ .success = result.failed == 0, .sent_count = result.queued };
-    } else if (args.project) |project_name| {
+        return wakeResponse(result);
+    } else {
+        const project_name = args.project.?;
         const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
         const cfg = project.cfg;
-        if (!cfg.enable_wol) {
-            return .{ .success = false, .sent_count = 0 };
-        }
-        if (cfg.resolved_wol_macs.len == 0) {
-            return .{ .success = true, .sent_count = 0 };
-        }
+        if (!cfg.enable_wol) return error.InvalidArgument;
         const result = wol.enqueueGlobal(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, @intCast(project.id));
-        return .{ .success = result.failed == 0, .sent_count = result.queued };
-    } else {
-        return error.InvalidValue;
+        return wakeResponse(result);
     }
 }
 
 fn wolStatus(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolStatusResponse {
     _ = allocator;
+    try validateWolSelector(args);
 
     if (args.target) |target_name| {
         const cfg = reload.getConfig() orelse return error.InvalidValue;
         const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
-        return .{
-            .enabled = target.enabled,
-            .mac_count = @intCast(target.mac_addresses.len),
-            .cooldown_ms = target.cooldown_ms,
-            .detect_protocols = &[_][]const u8{},
-        };
-    } else if (args.project) |project_name| {
+        return statusResponse(target.enabled, target.mac_addresses, target.cooldown_ms, &[_][]const u8{});
+    } else {
+        const project_name = args.project.?;
         const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
         const cfg = project.cfg;
-        return .{
-            .enabled = cfg.enable_wol,
-            .mac_count = @intCast(cfg.resolved_wol_macs.len),
-            .cooldown_ms = cfg.resolved_wol_cooldown_ms,
-            .detect_protocols = cfg.detect_protocols,
-        };
-    } else {
-        return error.InvalidValue;
+        return statusResponse(cfg.enable_wol, cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.detect_protocols);
     }
 }
 
@@ -1351,4 +1388,20 @@ pub fn notifyReload() void {
             std.log.err("ubus: failed to sync state after reload: {any}", .{err});
         };
     }
+}
+
+test "WoL requests require exactly one selector" {
+    try std.testing.expectError(error.InvalidArgument, validateWolSelector(.{}));
+    try std.testing.expectError(error.InvalidArgument, validateWolSelector(.{ .project = "cfg123", .target = "target_1" }));
+    try validateWolSelector(.{ .project = "cfg123" });
+    try validateWolSelector(.{ .target = "target_1" });
+}
+
+test "WoL wake response preserves enqueue outcomes" {
+    const response = wakeResponse(.{ .queued = 1, .skipped = 2, .failed = 3 });
+    try std.testing.expect(!response.success);
+    try std.testing.expectEqual(@as(u32, 1), response.sent_count);
+    try std.testing.expectEqual(@as(u32, 1), response.queued_count);
+    try std.testing.expectEqual(@as(u32, 2), response.skipped_count);
+    try std.testing.expectEqual(@as(u32, 3), response.failed_count);
 }
