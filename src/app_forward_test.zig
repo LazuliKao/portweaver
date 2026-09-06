@@ -1134,8 +1134,6 @@ test "app forward: tcp 64KB data transfer" {
 }
 
 test "app forward: tcp on-connect wake retries until target starts" {
-    if (build_options.forward_backend == .io_uring) return error.SkipZigTest;
-
     const alloc = testing.allocator;
     const listen_port = testListenPort(82, 0);
     const target_port = testTargetPort(82, 0);
@@ -1181,8 +1179,6 @@ test "app forward: tcp on-connect wake retries until target starts" {
 }
 
 test "app forward: tcp on-protocol buffers fragments before target connect" {
-    if (build_options.forward_backend == .io_uring) return error.SkipZigTest;
-
     const alloc = testing.allocator;
     const listen_port = testListenPort(83, 0);
     const target_port = testTargetPort(83, 0);
@@ -1226,8 +1222,6 @@ test "app forward: tcp on-protocol buffers fragments before target connect" {
 }
 
 test "app forward: tcp inspects and flushes server-first protocol" {
-    if (build_options.forward_backend == .io_uring) return error.SkipZigTest;
-
     const alloc = testing.allocator;
     const listen_port = testListenPort(84, 0);
     const target_port = testTargetPort(84, 0);

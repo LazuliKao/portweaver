@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TCP_BUFFER_SIZE 16384
+#define TCP_INSPECTION_TIMEOUT_MS 2000
 
 struct tcp_connection;
 
@@ -22,11 +24,27 @@ struct accept_operation {
 struct connect_operation {
     struct uring_op op;
     struct tcp_connection *connection;
+    int pending;
 };
 
 struct timeout_operation {
     struct uring_op op;
     struct tcp_connection *connection;
+    int pending;
+};
+
+enum timer_purpose {
+    TIMER_WAKE_DELAY,
+    TIMER_RETRY_DELAY,
+    TIMER_INSPECTION,
+};
+
+struct timer_operation {
+    struct uring_op op;
+    struct tcp_connection *connection;
+    struct __kernel_timespec timeout;
+    enum timer_purpose purpose;
+    int pending;
 };
 
 struct stream_operation {
@@ -37,6 +55,7 @@ struct stream_operation {
     int client_to_target;
     int sending;
     int finished;
+    int pending;
     size_t length;
     size_t offset;
     unsigned char buffer[TCP_BUFFER_SIZE];
@@ -65,6 +84,11 @@ struct tcp_forwarder {
     tcp_first_packet_cb_t first_packet_cb;
     void *first_packet_user_data;
     tcp_first_packet_destroy_cb_t first_packet_destroy_cb;
+    tcp_wol_trigger_mode_t wol_mode;
+    uint32_t wol_wake_delay_ms;
+    uint32_t wol_retry_interval_ms;
+    uint32_t wol_retry_window_ms;
+    tcp_wol_trigger_cb_t wol_trigger_cb;
 };
 
 struct tcp_connection {
@@ -74,10 +98,17 @@ struct tcp_connection {
     int target_fd;
     int closing;
     int pending;
+    int target_connected;
     int first_packet_inspected;
+    int retry_enabled;
+    uint64_t retry_deadline_ms;
+    int connect_result;
+    int connect_timed_out;
     struct connect_operation connect_op;
     struct timeout_operation timeout_op;
     struct __kernel_timespec timeout;
+    struct timer_operation action_timer;
+    struct timer_operation inspection_timer;
     struct stream_operation client_to_target;
     struct stream_operation target_to_client;
 };
@@ -146,11 +177,25 @@ static void maybe_free_connection(struct tcp_connection *connection)
         remove_connection(connection);
 }
 
+static void cancel_operation(struct tcp_forwarder *fwd, void *operation);
+
 static void terminate_connection(struct tcp_connection *connection)
 {
     if (connection == NULL || connection->closing)
         return;
     connection->closing = 1;
+    if (connection->connect_op.pending)
+        cancel_operation(connection->forwarder, &connection->connect_op);
+    if (connection->timeout_op.pending)
+        cancel_operation(connection->forwarder, &connection->timeout_op);
+    if (connection->action_timer.pending)
+        cancel_operation(connection->forwarder, &connection->action_timer);
+    if (connection->inspection_timer.pending)
+        cancel_operation(connection->forwarder, &connection->inspection_timer);
+    if (connection->client_to_target.pending)
+        cancel_operation(connection->forwarder, &connection->client_to_target);
+    if (connection->target_to_client.pending)
+        cancel_operation(connection->forwarder, &connection->target_to_client);
     if (connection->client_fd >= 0) {
         shutdown(connection->client_fd, SHUT_RDWR);
         close(connection->client_fd);
@@ -171,6 +216,54 @@ static void maybe_finish_streams(struct tcp_connection *connection)
 }
 
 static int submit_stream(struct stream_operation *operation);
+static int start_connect(struct tcp_connection *connection);
+static void maybe_start_forwarding(struct tcp_connection *connection);
+
+static uint64_t monotonic_millis(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_nsec / 1000000ULL;
+}
+
+static void set_timeout_ms(struct __kernel_timespec *timeout, uint32_t timeout_ms)
+{
+    timeout->tv_sec = timeout_ms / 1000;
+    timeout->tv_nsec = (timeout_ms % 1000) * 1000000ULL;
+}
+
+static int submit_timer(struct timer_operation *operation, enum timer_purpose purpose, uint32_t timeout_ms);
+
+static void finish_inspection(struct tcp_connection *connection, int result)
+{
+    struct tcp_forwarder *fwd = connection->forwarder;
+    if (result != TCP_INSPECTION_ALLOW && result != TCP_INSPECTION_ALLOW_WAKE) {
+        terminate_connection(connection);
+        return;
+    }
+
+    connection->first_packet_inspected = 1;
+    if (connection->inspection_timer.pending)
+        cancel_operation(fwd, &connection->inspection_timer);
+    if (connection->client_to_target.pending)
+        cancel_operation(fwd, &connection->client_to_target);
+    if (connection->target_to_client.pending)
+        cancel_operation(fwd, &connection->target_to_client);
+
+    if (!connection->target_connected && fwd->wol_mode == TCP_WOL_ON_PROTOCOL) {
+        if (result == TCP_INSPECTION_ALLOW_WAKE) {
+            connection->retry_enabled = 1;
+            connection->retry_deadline_ms = monotonic_millis() + fwd->wol_retry_window_ms;
+            if (submit_timer(&connection->action_timer, TIMER_WAKE_DELAY, fwd->wol_wake_delay_ms) != 0)
+                terminate_connection(connection);
+        } else if (start_connect(connection) != 0) {
+            terminate_connection(connection);
+        }
+        return;
+    }
+    maybe_start_forwarding(connection);
+}
 
 static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
 {
@@ -178,6 +271,7 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
     struct stream_operation *operation = (struct stream_operation *)io_uring_cqe_get_data(cqe);
     struct tcp_connection *connection = operation->connection;
     struct tcp_forwarder *fwd = connection->forwarder;
+    operation->pending = 0;
     connection->pending--;
     forwarder_runtime_dec_active(fwd->runtime);
 
@@ -188,42 +282,56 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
 
     if (!operation->sending) {
         if (cqe->res == 0) {
+            if (!connection->first_packet_inspected && fwd->first_packet_cb != NULL) {
+                terminate_connection(connection);
+                return;
+            }
             operation->finished = 1;
-            (void)shutdown(operation->destination_fd, SHUT_WR);
+            if (operation->length > 0) {
+                maybe_start_forwarding(connection);
+                return;
+            }
+            if (operation->destination_fd >= 0)
+                (void)shutdown(operation->destination_fd, SHUT_WR);
             maybe_finish_streams(connection);
             return;
         }
         if (cqe->res < 0) {
+            if (cqe->res == -ECANCELED && connection->first_packet_inspected) {
+                maybe_start_forwarding(connection);
+                return;
+            }
             terminate_connection(connection);
             return;
         }
         size_t received = (size_t)cqe->res;
-        if (operation->client_to_target) {
-            if (fwd->enable_stats)
+        if (fwd->enable_stats) {
+            if (operation->client_to_target)
                 __atomic_fetch_add(&fwd->bytes_in, received, __ATOMIC_RELAXED);
-            if (!connection->first_packet_inspected && fwd->first_packet_cb != NULL) {
-                operation->length += received;
-                int result = fwd->first_packet_cb(fwd->first_packet_user_data, operation->buffer,
-                                                  operation->length, 1);
-                if (result == TCP_INSPECTION_NEED_MORE) {
-                    if (submit_stream(operation) != 0)
-                        terminate_connection(connection);
-                    return;
-                }
-                if (result != TCP_INSPECTION_ALLOW) {
-                    terminate_connection(connection);
-                    return;
-                }
-                connection->first_packet_inspected = 1;
-            } else {
-                operation->length = received;
-            }
-        } else if (fwd->enable_stats) {
-            operation->length = received;
-            __atomic_fetch_add(&fwd->bytes_out, received, __ATOMIC_RELAXED);
-        } else {
-            operation->length = received;
+            else
+                __atomic_fetch_add(&fwd->bytes_out, received, __ATOMIC_RELAXED);
         }
+
+        if (!connection->first_packet_inspected && fwd->first_packet_cb != NULL) {
+            operation->length += received;
+            int result = fwd->first_packet_cb(fwd->first_packet_user_data, operation->buffer,
+                                              operation->length, operation->client_to_target);
+            if (result == TCP_INSPECTION_NEED_MORE) {
+                if (submit_stream(operation) != 0)
+                    terminate_connection(connection);
+                return;
+            }
+            finish_inspection(connection, result);
+            return;
+        }
+
+        if (connection->first_packet_inspected && operation->length > 0) {
+            operation->length += received;
+            maybe_start_forwarding(connection);
+            return;
+        }
+
+        operation->length = received;
         operation->offset = 0;
         operation->sending = 1;
     } else {
@@ -235,6 +343,12 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
         if (operation->offset == operation->length) {
             operation->sending = 0;
             operation->length = 0;
+            if (operation->finished) {
+                if (operation->destination_fd >= 0)
+                    (void)shutdown(operation->destination_fd, SHUT_WR);
+                maybe_finish_streams(connection);
+                return;
+            }
         }
     }
 
@@ -245,10 +359,12 @@ static void stream_complete(struct io_uring_cqe *cqe, void *runtime_context)
 static int submit_stream(struct stream_operation *operation)
 {
     struct tcp_connection *connection = operation->connection;
+    if (operation->pending || connection->closing)
+        return 0;
     size_t buffered = 0;
-    if (!operation->sending && operation->client_to_target &&
-        !connection->first_packet_inspected &&
-        connection->forwarder->first_packet_cb != NULL) {
+    if (!operation->sending &&
+        ((!connection->first_packet_inspected && connection->forwarder->first_packet_cb != NULL) ||
+         operation->length > 0)) {
         buffered = operation->length;
         if (buffered >= sizeof(operation->buffer))
             return -ENOBUFS;
@@ -266,22 +382,29 @@ static int submit_stream(struct stream_operation *operation)
                            sizeof(operation->buffer) - buffered, 0);
     }
     io_uring_sqe_set_data(sqe, operation);
+    operation->pending = 1;
     connection->pending++;
     forwarder_runtime_inc_active(connection->forwarder->runtime);
     return 0;
 }
+
+static void maybe_finish_connect(struct tcp_connection *connection);
 
 static void timeout_complete(struct io_uring_cqe *cqe, void *runtime_context)
 {
     (void)runtime_context;
     struct timeout_operation *operation = (struct timeout_operation *)io_uring_cqe_get_data(cqe);
     struct tcp_connection *connection = operation->connection;
+    operation->pending = 0;
     connection->pending--;
     forwarder_runtime_dec_active(connection->forwarder->runtime);
-    if (!connection->closing && cqe->res == -ETIME)
-        terminate_connection(connection);
-    else
+    if (cqe->res == -ETIME)
+        connection->connect_timed_out = 1;
+    if (connection->closing) {
         maybe_free_connection(connection);
+        return;
+    }
+    maybe_finish_connect(connection);
 }
 
 static void connect_complete(struct io_uring_cqe *cqe, void *runtime_context)
@@ -289,6 +412,8 @@ static void connect_complete(struct io_uring_cqe *cqe, void *runtime_context)
     (void)runtime_context;
     struct connect_operation *operation = (struct connect_operation *)io_uring_cqe_get_data(cqe);
     struct tcp_connection *connection = operation->connection;
+    operation->pending = 0;
+    connection->connect_result = cqe->res;
     connection->pending--;
     forwarder_runtime_dec_active(connection->forwarder->runtime);
 
@@ -296,13 +421,175 @@ static void connect_complete(struct io_uring_cqe *cqe, void *runtime_context)
         maybe_free_connection(connection);
         return;
     }
-    if (cqe->res < 0) {
+    maybe_finish_connect(connection);
+}
+
+static void handle_connect_failure(struct tcp_connection *connection)
+{
+    struct tcp_forwarder *fwd = connection->forwarder;
+    if (connection->target_fd >= 0) {
+        close(connection->target_fd);
+        connection->target_fd = -1;
+    }
+    connection->client_to_target.destination_fd = -1;
+    connection->target_to_client.source_fd = -1;
+
+    uint64_t now = monotonic_millis();
+    if (!connection->retry_enabled || now >= connection->retry_deadline_ms ||
+        now + fwd->wol_retry_interval_ms >= connection->retry_deadline_ms) {
         terminate_connection(connection);
         return;
     }
+    if (submit_timer(&connection->action_timer, TIMER_RETRY_DELAY, fwd->wol_retry_interval_ms) != 0)
+        terminate_connection(connection);
+}
 
-    if (submit_stream(&connection->client_to_target) != 0 ||
-        submit_stream(&connection->target_to_client) != 0)
+static void maybe_finish_connect(struct tcp_connection *connection)
+{
+    if (connection->connect_op.pending || connection->timeout_op.pending)
+        return;
+    if (connection->connect_result < 0 || connection->connect_timed_out) {
+        handle_connect_failure(connection);
+        return;
+    }
+    connection->target_connected = 1;
+    maybe_start_forwarding(connection);
+}
+
+static int start_connect(struct tcp_connection *connection)
+{
+    struct tcp_forwarder *fwd = connection->forwarder;
+    if (connection->closing)
+        return -ECANCELED;
+    if (connection->retry_enabled && monotonic_millis() >= connection->retry_deadline_ms)
+        return -ETIMEDOUT;
+
+    int domain = fwd->destination.ss_family;
+    connection->target_fd = socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (connection->target_fd < 0)
+        return -errno;
+    connection->client_to_target.destination_fd = connection->target_fd;
+    connection->target_to_client.source_fd = connection->target_fd;
+    connection->connect_result = -EINPROGRESS;
+    connection->connect_timed_out = 0;
+
+    struct io_uring_sqe *connect_sqe = get_sqe(fwd);
+    if (connect_sqe == NULL)
+        return -ENOMEM;
+    connection->connect_op.op.callback = connect_complete;
+    io_uring_prep_connect(connect_sqe, connection->target_fd,
+                          (const struct sockaddr *)&fwd->destination,
+                          fwd->destination_len);
+    io_uring_sqe_set_data(connect_sqe, &connection->connect_op);
+    connection->connect_op.pending = 1;
+    connection->pending++;
+    forwarder_runtime_inc_active(fwd->runtime);
+
+    if (fwd->connect_timeout_ms > 0) {
+        struct io_uring_sqe *timeout_sqe = get_sqe(fwd);
+        if (timeout_sqe == NULL) {
+            return -ENOMEM;
+        }
+        connect_sqe->flags |= IOSQE_IO_LINK;
+        set_timeout_ms(&connection->timeout, fwd->connect_timeout_ms);
+        connection->timeout_op.op.callback = timeout_complete;
+        io_uring_prep_link_timeout(timeout_sqe, &connection->timeout, 0);
+        io_uring_sqe_set_data(timeout_sqe, &connection->timeout_op);
+        connection->timeout_op.pending = 1;
+        connection->pending++;
+        forwarder_runtime_inc_active(fwd->runtime);
+    }
+    return 0;
+}
+
+static void timer_complete(struct io_uring_cqe *cqe, void *runtime_context)
+{
+    (void)runtime_context;
+    struct timer_operation *operation = (struct timer_operation *)io_uring_cqe_get_data(cqe);
+    struct tcp_connection *connection = operation->connection;
+    operation->pending = 0;
+    connection->pending--;
+    forwarder_runtime_dec_active(connection->forwarder->runtime);
+
+    if (connection->closing) {
+        maybe_free_connection(connection);
+        return;
+    }
+    if (cqe->res != -ETIME)
+        return;
+    if (operation->purpose == TIMER_INSPECTION) {
+        if (!connection->first_packet_inspected)
+            terminate_connection(connection);
+        return;
+    }
+    if (connection->retry_enabled && monotonic_millis() >= connection->retry_deadline_ms) {
+        terminate_connection(connection);
+        return;
+    }
+    if (start_connect(connection) != 0)
+        handle_connect_failure(connection);
+}
+
+static int submit_timer(struct timer_operation *operation, enum timer_purpose purpose, uint32_t timeout_ms)
+{
+    struct tcp_connection *connection = operation->connection;
+    if (operation->pending || connection->closing)
+        return -EBUSY;
+    if (timeout_ms == 0) {
+        if (purpose == TIMER_INSPECTION)
+            return -EINVAL;
+        return start_connect(connection);
+    }
+    struct io_uring_sqe *sqe = get_sqe(connection->forwarder);
+    if (sqe == NULL)
+        return -ENOMEM;
+    operation->op.callback = timer_complete;
+    operation->purpose = purpose;
+    set_timeout_ms(&operation->timeout, timeout_ms);
+    io_uring_prep_timeout(sqe, &operation->timeout, 0, 0);
+    io_uring_sqe_set_data(sqe, operation);
+    operation->pending = 1;
+    connection->pending++;
+    forwarder_runtime_inc_active(connection->forwarder->runtime);
+    return 0;
+}
+
+static void maybe_start_forwarding(struct tcp_connection *connection)
+{
+    struct tcp_forwarder *fwd = connection->forwarder;
+    if (connection->closing || !connection->target_connected ||
+        connection->client_to_target.pending || connection->target_to_client.pending)
+        return;
+
+    if (!connection->first_packet_inspected && fwd->first_packet_cb != NULL) {
+        if (!connection->inspection_timer.pending &&
+            submit_timer(&connection->inspection_timer, TIMER_INSPECTION, TCP_INSPECTION_TIMEOUT_MS) != 0) {
+            terminate_connection(connection);
+            return;
+        }
+    }
+
+    struct stream_operation *client = &connection->client_to_target;
+    struct stream_operation *target = &connection->target_to_client;
+    if (connection->first_packet_inspected && client->length > 0) {
+        client->sending = 1;
+        client->offset = 0;
+    }
+    if (connection->first_packet_inspected && target->length > 0) {
+        target->sending = 1;
+        target->offset = 0;
+    }
+    int client_rc = 0;
+    int target_rc = 0;
+    if (client->length > 0 || !client->finished)
+        client_rc = submit_stream(client);
+    else if (client->destination_fd >= 0)
+        (void)shutdown(client->destination_fd, SHUT_WR);
+    if (target->length > 0 || !target->finished)
+        target_rc = submit_stream(target);
+    else if (target->destination_fd >= 0)
+        (void)shutdown(target->destination_fd, SHUT_WR);
+    if (client_rc != 0 || target_rc != 0)
         terminate_connection(connection);
 }
 
@@ -323,57 +610,42 @@ static int start_connection(struct tcp_forwarder *fwd, int client_fd)
     connection->forwarder = fwd;
     connection->client_fd = client_fd;
     connection->target_fd = -1;
-
-    int domain = fwd->destination.ss_family;
-    connection->target_fd = socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (connection->target_fd < 0) {
-        close(client_fd);
-        fwd_free(fwd, connection);
-        return -errno;
-    }
-
     connection->client_to_target.connection = connection;
     connection->client_to_target.source_fd = client_fd;
-    connection->client_to_target.destination_fd = connection->target_fd;
+    connection->client_to_target.destination_fd = -1;
     connection->client_to_target.client_to_target = 1;
     connection->target_to_client.connection = connection;
-    connection->target_to_client.source_fd = connection->target_fd;
+    connection->target_to_client.source_fd = -1;
     connection->target_to_client.destination_fd = client_fd;
     connection->connect_op.connection = connection;
     connection->timeout_op.connection = connection;
+    connection->action_timer.connection = connection;
+    connection->inspection_timer.connection = connection;
     connection->next = fwd->connections;
     fwd->connections = connection;
     __atomic_fetch_add(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
 
-    struct io_uring_sqe *connect_sqe = get_sqe(fwd);
-    if (connect_sqe == NULL) {
+    int rc;
+    if (fwd->wol_mode == TCP_WOL_ON_PROTOCOL && fwd->first_packet_cb != NULL) {
+        rc = submit_timer(&connection->inspection_timer, TIMER_INSPECTION, TCP_INSPECTION_TIMEOUT_MS);
+        if (rc == 0)
+            rc = submit_stream(&connection->client_to_target);
+    } else if (fwd->wol_mode == TCP_WOL_ON_CONNECT) {
+        connection->retry_enabled = 1;
+        connection->retry_deadline_ms = monotonic_millis() + fwd->wol_retry_window_ms;
+        int wake_queued = fwd->wol_trigger_cb != NULL && fwd->wol_trigger_cb(fwd->first_packet_user_data) != 0;
+        rc = 0;
+        if (fwd->first_packet_cb != NULL)
+            rc = submit_stream(&connection->client_to_target);
+        if (rc == 0)
+            rc = submit_timer(&connection->action_timer, TIMER_WAKE_DELAY,
+                              wake_queued ? fwd->wol_wake_delay_ms : 0);
+    } else {
+        rc = start_connect(connection);
+    }
+    if (rc != 0)
         terminate_connection(connection);
-        return -ENOMEM;
-    }
-    connection->connect_op.op.callback = connect_complete;
-    io_uring_prep_connect(connect_sqe, connection->target_fd,
-                          (const struct sockaddr *)&fwd->destination,
-                          fwd->destination_len);
-    io_uring_sqe_set_data(connect_sqe, &connection->connect_op);
-    connection->pending++;
-    forwarder_runtime_inc_active(fwd->runtime);
-
-    if (fwd->connect_timeout_ms > 0) {
-        struct io_uring_sqe *timeout_sqe = get_sqe(fwd);
-        if (timeout_sqe == NULL) {
-            terminate_connection(connection);
-            return -ENOMEM;
-        }
-        connect_sqe->flags |= IOSQE_IO_LINK;
-        connection->timeout.tv_sec = fwd->connect_timeout_ms / 1000;
-        connection->timeout.tv_nsec = (fwd->connect_timeout_ms % 1000) * 1000000ULL;
-        connection->timeout_op.op.callback = timeout_complete;
-        io_uring_prep_link_timeout(timeout_sqe, &connection->timeout, 0);
-        io_uring_sqe_set_data(timeout_sqe, &connection->timeout_op);
-        connection->pending++;
-        forwarder_runtime_inc_active(fwd->runtime);
-    }
-    return 0;
+    return rc;
 }
 
 static int submit_accept(struct tcp_forwarder *fwd);
@@ -402,10 +674,6 @@ static void accept_complete(struct io_uring_cqe *cqe, void *runtime_context)
         struct tcp_connection *connection = fwd->connections;
         while (connection != NULL) {
             struct tcp_connection *next = connection->next;
-            cancel_operation(fwd, &connection->connect_op);
-            cancel_operation(fwd, &connection->timeout_op);
-            cancel_operation(fwd, &connection->client_to_target);
-            cancel_operation(fwd, &connection->target_to_client);
             terminate_connection(connection);
             connection = next;
         }
@@ -610,10 +878,6 @@ void tcp_forwarder_destroy(tcp_forwarder_t *fwd)
     struct tcp_connection *connection = fwd->connections;
     while (connection != NULL) {
         struct tcp_connection *next = connection->next;
-        cancel_operation(fwd, &connection->connect_op);
-        cancel_operation(fwd, &connection->timeout_op);
-        cancel_operation(fwd, &connection->client_to_target);
-        cancel_operation(fwd, &connection->target_to_client);
         terminate_connection(connection);
         connection = next;
     }
@@ -654,10 +918,11 @@ void tcp_forwarder_set_wol_policy(tcp_forwarder_t *fwd,
                                   uint32_t retry_window_ms,
                                   tcp_wol_trigger_cb_t trigger_cb)
 {
-    (void)fwd;
-    (void)mode;
-    (void)wake_delay_ms;
-    (void)retry_interval_ms;
-    (void)retry_window_ms;
-    (void)trigger_cb;
+    if (fwd == NULL)
+        return;
+    fwd->wol_mode = mode;
+    fwd->wol_wake_delay_ms = wake_delay_ms;
+    fwd->wol_retry_interval_ms = retry_interval_ms;
+    fwd->wol_retry_window_ms = retry_window_ms;
+    fwd->wol_trigger_cb = trigger_cb;
 }
