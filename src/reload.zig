@@ -267,9 +267,17 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         };
     }
 
-    // 8) Reload FRPS nodes
+    // 8) Reload FRPS configuration. An external file is always rebuilt so
+    // `service portweaver reload` applies file changes at an unchanged path.
     if (build_options.frps_mode) {
-        reloadFrpsNodes(alloc, old_cfg, new_cfg);
+        if (old_cfg.frps_config_mode == .builtin and new_cfg.frps_config_mode == .builtin) {
+            reloadFrpsNodes(alloc, old_cfg, new_cfg);
+        } else {
+            frps_forward.stopAll();
+            frps_forward.startConfiguredServers(alloc, new_cfg) catch |err| {
+                std.log.warn("Reload: failed to start configured FRPS servers: {any}", .{err});
+            };
+        }
     }
 
     // 9) Swap configs: free old, adopt new

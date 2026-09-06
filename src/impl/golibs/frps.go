@@ -31,6 +31,7 @@ import (
 	"time"
 	"unsafe"
 
+	frpconfig "github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/version"
@@ -55,6 +56,49 @@ type serverWrapper struct {
 	lastError string
 	logs      []string
 	logMutex  sync.Mutex
+}
+
+func createServer(cfg *v1.ServerConfig, name string) C.int {
+	serversMutex.Lock()
+	defer serversMutex.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if name == "" {
+		name = fmt.Sprintf("server-%d", nextServerID)
+	}
+
+	wrapper := &serverWrapper{
+		ctx:       ctx,
+		cancel:    cancel,
+		config:    cfg,
+		name:      name,
+		routingID: "",
+		status:    "stopped",
+		lastError: "",
+		logs:      make([]string, 0),
+		logMutex:  sync.Mutex{},
+	}
+
+	serverID := nextServerID
+	nextServerID++
+	servers[serverID] = wrapper
+	return C.int(serverID)
+}
+
+func parseServerConfig(content []byte, format string) (*v1.ServerConfig, error) {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "toml" && format != "yaml" && format != "json" {
+		return nil, fmt.Errorf("unsupported FRPS configuration format %q", format)
+	}
+
+	cfg := &v1.ServerConfig{}
+	if err := frpconfig.LoadConfigure(content, cfg, true, format); err != nil {
+		return nil, err
+	}
+	if err := cfg.Complete(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 type serverRingBufferLogger struct {
@@ -85,9 +129,6 @@ func FrpsCreateServer(cConfig *C.FrpsConfig) C.int {
 	if cConfig == nil {
 		return -1
 	}
-
-	serversMutex.Lock()
-	defer serversMutex.Unlock()
 
 	cfg := v1.ServerConfig{}
 
@@ -174,33 +215,60 @@ func FrpsCreateServer(cConfig *C.FrpsConfig) C.int {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	name := ""
 	if cConfig.server_name != nil {
 		name = C.GoString(cConfig.server_name)
 	}
-	if name == "" {
-		name = fmt.Sprintf("server-%d", nextServerID)
+
+	return createServer(&cfg, name)
+}
+
+//export FrpsCreateServerFromFile
+func FrpsCreateServerFromFile(path *C.char, format *C.char, name *C.char) C.int {
+	if path == nil || format == nil {
+		return -1
 	}
 
-	wrapper := &serverWrapper{
-		ctx:       ctx,
-		cancel:    cancel,
-		config:    &cfg,
-		name:      name,
-		routingID: "",
-		status:    "stopped",
-		lastError: "",
-		logs:      make([]string, 0),
-		logMutex:  sync.Mutex{},
+	content, err := frpconfig.LoadFileContentWithTemplate(C.GoString(path), frpconfig.GetValues())
+	if err != nil {
+		fmt.Printf("Failed to load FRPS configuration file: %v\n", err)
+		return -1
+	}
+	cfg, err := parseServerConfig(content, C.GoString(format))
+	if err != nil {
+		fmt.Printf("Failed to parse FRPS configuration file: %v\n", err)
+		return -1
 	}
 
-	serverID := nextServerID
-	nextServerID++
-	servers[serverID] = wrapper
+	serverName := ""
+	if name != nil {
+		serverName = C.GoString(name)
+	}
+	return createServer(cfg, serverName)
+}
 
-	return C.int(serverID)
+//export FrpsCreateServerFromContent
+func FrpsCreateServerFromContent(content *C.char, format *C.char, name *C.char) C.int {
+	if content == nil || format == nil {
+		return -1
+	}
+
+	rendered, err := frpconfig.RenderWithTemplate([]byte(C.GoString(content)), frpconfig.GetValues())
+	if err != nil {
+		fmt.Printf("Failed to render FRPS configuration content: %v\n", err)
+		return -1
+	}
+	cfg, err := parseServerConfig(rendered, C.GoString(format))
+	if err != nil {
+		fmt.Printf("Failed to parse FRPS configuration content: %v\n", err)
+		return -1
+	}
+
+	serverName := ""
+	if name != nil {
+		serverName = C.GoString(name)
+	}
+	return createServer(cfg, serverName)
 }
 
 //export FrpsStartServer

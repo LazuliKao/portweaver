@@ -8,6 +8,8 @@ pub const ConfigError = types.ConfigError;
 pub const AddressFamily = types.AddressFamily;
 pub const Protocol = types.Protocol;
 pub const FrpcNode = types.FrpcNode;
+pub const FrpsConfigMode = types.FrpsConfigMode;
+pub const FrpsConfigFormat = types.FrpsConfigFormat;
 pub const FrpcForward = types.FrpcForward;
 pub const PortMapping = types.PortMapping;
 pub const Project = types.Project;
@@ -52,6 +54,8 @@ test "config mod: type and function re-exports match source modules" {
     try std.testing.expect(AddressFamily == types.AddressFamily);
     try std.testing.expect(Protocol == types.Protocol);
     try std.testing.expect(FrpcNode == types.FrpcNode);
+    try std.testing.expect(FrpsConfigMode == types.FrpsConfigMode);
+    try std.testing.expect(FrpsConfigFormat == types.FrpsConfigFormat);
     try std.testing.expect(FrpcForward == types.FrpcForward);
     try std.testing.expect(PortMapping == types.PortMapping);
     try std.testing.expect(Project == types.Project);

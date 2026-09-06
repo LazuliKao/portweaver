@@ -69,6 +69,8 @@ pub const FrpsServer = struct {
 
     // Override the C import signature manually since the header might not be updated yet
     extern fn FrpsCreateServer(config: *const CFrpsConfig) c_int;
+    extern fn FrpsCreateServerFromFile(path: [*:0]const u8, format: [*:0]const u8, server_name: [*:0]const u8) c_int;
+    extern fn FrpsCreateServerFromContent(content: [*:0]const u8, format: [*:0]const u8, server_name: [*:0]const u8) c_int;
 
     pub fn init(allocator: std.mem.Allocator, config: Config, server_name: []const u8) !FrpsServer {
         try ensureFrpsInit();
@@ -166,6 +168,48 @@ pub const FrpsServer = struct {
             .id = server_id,
             .allocator = allocator,
         };
+    }
+
+    /// Creates a server from an official FRPS configuration file.
+    pub fn initFromFile(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        format: []const u8,
+        server_name: []const u8,
+    ) !FrpsServer {
+        try ensureFrpsInit();
+
+        const c_path = try allocator.dupeZ(u8, path);
+        defer allocator.free(c_path);
+        const c_format = try allocator.dupeZ(u8, format);
+        defer allocator.free(c_format);
+        const c_name = try allocator.dupeZ(u8, server_name);
+        defer allocator.free(c_name);
+
+        const server_id = FrpsCreateServerFromFile(c_path.ptr, c_format.ptr, c_name.ptr);
+        if (server_id < 0) return FrpsError.CreateServerFailed;
+        return .{ .id = server_id, .allocator = allocator };
+    }
+
+    /// Creates a server from official FRPS configuration text stored in UCI.
+    pub fn initFromContent(
+        allocator: std.mem.Allocator,
+        content: []const u8,
+        format: []const u8,
+        server_name: []const u8,
+    ) !FrpsServer {
+        try ensureFrpsInit();
+
+        const c_content = try allocator.dupeZ(u8, content);
+        defer allocator.free(c_content);
+        const c_format = try allocator.dupeZ(u8, format);
+        defer allocator.free(c_format);
+        const c_name = try allocator.dupeZ(u8, server_name);
+        defer allocator.free(c_name);
+
+        const server_id = FrpsCreateServerFromContent(c_content.ptr, c_format.ptr, c_name.ptr);
+        if (server_id < 0) return FrpsError.CreateServerFailed;
+        return .{ .id = server_id, .allocator = allocator };
     }
 
     pub fn start(self: *FrpsServer) !void {

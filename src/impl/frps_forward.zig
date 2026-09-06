@@ -17,6 +17,9 @@ var servers: ?std.StringHashMap(*ServerHolder) = null;
 var servers_allocator: ?std.mem.Allocator = null;
 var servers_lock: std.Io.Mutex = .init;
 
+/// Reserved server name used by the mutually exclusive external FRPS source.
+pub const EXTERNAL_SERVER_NAME = "__external_frps__";
+
 fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) void {
     if (holder.started) {
         std.log.debug("[FRPS] Server {s} already started", .{node_name});
@@ -120,6 +123,84 @@ pub fn startServer(
     startFrpsServer(holder, node_name);
 }
 
+fn getOrCreateExternalServer(allocator: std.mem.Allocator, cfg: *const types.Config) !*ServerHolder {
+    servers_lock.lockUncancelable(compat.io());
+    var map = try getServerMap(allocator);
+    if (map.get(EXTERNAL_SERVER_NAME)) |holder_ptr| {
+        servers_lock.unlock(compat.io());
+        return holder_ptr;
+    }
+    servers_lock.unlock(compat.io());
+
+    const holder = try allocator.create(ServerHolder);
+    errdefer allocator.destroy(holder);
+
+    const format = cfg.frps_config_format.toString();
+    const server = switch (cfg.frps_config_mode) {
+        .external_file => try libfrps.FrpsServer.initFromFile(
+            allocator,
+            cfg.frps_config_path,
+            format,
+            EXTERNAL_SERVER_NAME,
+        ),
+        .external_uci => try libfrps.FrpsServer.initFromContent(
+            allocator,
+            cfg.frps_config_content,
+            format,
+            EXTERNAL_SERVER_NAME,
+        ),
+        .builtin => return error.InvalidExternalConfigMode,
+    };
+    errdefer {
+        var owned_server = server;
+        owned_server.deinit();
+    }
+    holder.* = .{
+        .server = server,
+        .started = false,
+        .lock = .init,
+    };
+
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
+    map = try getServerMap(allocator);
+    if (map.get(EXTERNAL_SERVER_NAME)) |existing| {
+        holder.server.deinit();
+        allocator.destroy(holder);
+        return existing;
+    }
+
+    const key = try allocator.dupe(u8, EXTERNAL_SERVER_NAME);
+    try map.put(key, holder);
+    return holder;
+}
+
+fn startExternalServer(allocator: std.mem.Allocator, cfg: *const types.Config) !void {
+    const holder = try getOrCreateExternalServer(allocator, cfg);
+    holder.lock.lockUncancelable(compat.io());
+    defer holder.lock.unlock(compat.io());
+    startFrpsServer(holder, EXTERNAL_SERVER_NAME);
+}
+
+/// Starts FRPS using the configured source. External sources are exclusive of
+/// the legacy `frps_node` entries and expose one reserved status/log server.
+pub fn startConfiguredServers(allocator: std.mem.Allocator, cfg: *const types.Config) !void {
+    switch (cfg.frps_config_mode) {
+        .builtin => {
+            var frps_it = cfg.frps_nodes.iterator();
+            while (frps_it.next()) |entry| {
+                const node_name = entry.key_ptr.*;
+                const node = entry.value_ptr.*;
+                if (!node.enabled) continue;
+                startServer(allocator, node_name, node) catch |err| {
+                    std.log.warn("Failed to start FRPS server {s}: {any}", .{ node_name, err });
+                };
+            }
+        },
+        .external_file, .external_uci => try startExternalServer(allocator, cfg),
+    }
+}
+
 pub fn stopServer(node_name: []const u8) void {
     std.log.info("[FRPS] Stopping server {s}...", .{node_name});
     servers_lock.lockUncancelable(compat.io());
@@ -153,7 +234,9 @@ pub fn stopAll() void {
     var count: usize = 0;
     while (it.next()) |entry| {
         if (entry.value_ptr.*.started) {
-            entry.value_ptr.*.server.stop() catch {};
+            entry.value_ptr.*.server.stop() catch |err| {
+                std.log.warn("[FRPS] Failed to stop server during cleanup: {any}", .{err});
+            };
             count += 1;
         }
         entry.value_ptr.*.server.deinit();
