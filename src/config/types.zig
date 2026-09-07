@@ -274,6 +274,148 @@ pub const FrpsNode = struct {
     }
 };
 
+/// Rathole control-channel transport. Service payloads remain TCP or UDP.
+pub const RatholeTransport = enum {
+    tcp,
+    noise,
+
+    pub fn fromString(value: []const u8) !RatholeTransport {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (eqlIgnoreCase(trimmed, "tcp")) return .tcp;
+        if (eqlIgnoreCase(trimmed, "noise")) return .noise;
+        return ConfigError.InvalidValue;
+    }
+
+    pub fn toString(self: RatholeTransport) []const u8 {
+        return @tagName(self);
+    }
+};
+
+/// Rathole exposes TCP and UDP services as separate named endpoints.
+pub const RatholeServiceProtocol = enum {
+    tcp,
+    udp,
+
+    pub fn fromString(value: []const u8) !RatholeServiceProtocol {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (eqlIgnoreCase(trimmed, "tcp")) return .tcp;
+        if (eqlIgnoreCase(trimmed, "udp")) return .udp;
+        return ConfigError.InvalidValue;
+    }
+};
+
+pub const RatholeClientNode = struct {
+    enabled: bool = true,
+    remote_addr: []const u8,
+    default_token: []const u8 = "",
+    transport: RatholeTransport = .tcp,
+    noise_local_private_key: []const u8 = "",
+    noise_remote_public_key: []const u8 = "",
+
+    pub fn deinit(self: *RatholeClientNode, allocator: std.mem.Allocator) void {
+        if (self.remote_addr.len != 0) allocator.free(self.remote_addr);
+        if (self.default_token.len != 0) allocator.free(self.default_token);
+        if (self.noise_local_private_key.len != 0) allocator.free(self.noise_local_private_key);
+        if (self.noise_remote_public_key.len != 0) allocator.free(self.noise_remote_public_key);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.remote_addr, b.remote_addr) and
+            std.mem.eql(u8, a.default_token, b.default_token) and
+            a.transport == b.transport and
+            std.mem.eql(u8, a.noise_local_private_key, b.noise_local_private_key) and
+            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key);
+    }
+};
+
+pub const RatholeServerNode = struct {
+    enabled: bool = true,
+    bind_addr: []const u8,
+    default_token: []const u8 = "",
+    transport: RatholeTransport = .tcp,
+    noise_local_private_key: []const u8 = "",
+    noise_remote_public_key: []const u8 = "",
+
+    pub fn deinit(self: *RatholeServerNode, allocator: std.mem.Allocator) void {
+        if (self.bind_addr.len != 0) allocator.free(self.bind_addr);
+        if (self.default_token.len != 0) allocator.free(self.default_token);
+        if (self.noise_local_private_key.len != 0) allocator.free(self.noise_local_private_key);
+        if (self.noise_remote_public_key.len != 0) allocator.free(self.noise_remote_public_key);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.bind_addr, b.bind_addr) and
+            std.mem.eql(u8, a.default_token, b.default_token) and
+            a.transport == b.transport and
+            std.mem.eql(u8, a.noise_local_private_key, b.noise_local_private_key) and
+            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key);
+    }
+};
+
+pub const RatholeClientService = struct {
+    enabled: bool = true,
+    node_name: []const u8,
+    service_name: []const u8,
+    protocol: RatholeServiceProtocol = .tcp,
+    token: []const u8 = "",
+    local_address: []const u8 = "",
+    local_port: u16 = 0,
+    /// Retained for configuration identity; local_address/local_port are resolved at load time.
+    project_name: []const u8 = "",
+
+    pub fn deinit(self: *RatholeClientService, allocator: std.mem.Allocator) void {
+        if (self.node_name.len != 0) allocator.free(self.node_name);
+        if (self.service_name.len != 0) allocator.free(self.service_name);
+        if (self.token.len != 0) allocator.free(self.token);
+        if (self.local_address.len != 0) allocator.free(self.local_address);
+        if (self.project_name.len != 0) allocator.free(self.project_name);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.node_name, b.node_name) and
+            std.mem.eql(u8, a.service_name, b.service_name) and
+            a.protocol == b.protocol and
+            std.mem.eql(u8, a.token, b.token) and
+            std.mem.eql(u8, a.local_address, b.local_address) and
+            a.local_port == b.local_port and
+            std.mem.eql(u8, a.project_name, b.project_name);
+    }
+};
+
+pub const RatholeServerService = struct {
+    enabled: bool = true,
+    node_name: []const u8,
+    service_name: []const u8,
+    protocol: RatholeServiceProtocol = .tcp,
+    token: []const u8 = "",
+    bind_address: []const u8,
+    bind_port: u16,
+
+    pub fn deinit(self: *RatholeServerService, allocator: std.mem.Allocator) void {
+        if (self.node_name.len != 0) allocator.free(self.node_name);
+        if (self.service_name.len != 0) allocator.free(self.service_name);
+        if (self.token.len != 0) allocator.free(self.token);
+        if (self.bind_address.len != 0) allocator.free(self.bind_address);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.enabled == b.enabled and
+            std.mem.eql(u8, a.node_name, b.node_name) and
+            std.mem.eql(u8, a.service_name, b.service_name) and
+            a.protocol == b.protocol and
+            std.mem.eql(u8, a.token, b.token) and
+            std.mem.eql(u8, a.bind_address, b.bind_address) and
+            a.bind_port == b.bind_port;
+    }
+};
+
 /// FRP 配置来源。外置配置与内置节点配置互斥。
 pub const FrpConfigMode = enum {
     builtin,
@@ -678,7 +820,6 @@ pub const Config = struct {
     frps_config_path: []const u8 = "",
     /// external_uci 模式下的原始 FRPS 配置。由 Config 持有。
     frps_config_content: []const u8 = "",
-    log_config: file_log.LogConfig,
     /// FRPC 使用内置节点、外置文件或 UCI 内嵌文本配置。
     frpc_config_mode: FrpConfigMode = .builtin,
     /// 外置 FRPC 配置的格式。
@@ -689,11 +830,18 @@ pub const Config = struct {
     frpc_config_content: []const u8 = "",
     /// 外置 FRP 文件的可信根目录。null 使用 DEFAULT_FRP_CONFIG_ROOT。
     frp_config_root: ?[]const u8 = null,
+    log_config: file_log.LogConfig,
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
     frpc_nodes: std.StringHashMap(FrpcNode),
     /// FRPS 节点配置（key 为节点名称）
     frps_nodes: std.StringHashMap(FrpsNode),
+    /// Rathole client nodes and their independently configured services.
+    rathole_client_nodes: std.StringHashMap(RatholeClientNode),
+    rathole_client_services: []RatholeClientService,
+    /// Rathole server nodes and their independently configured services.
+    rathole_server_nodes: std.StringHashMap(RatholeServerNode),
+    rathole_server_services: []RatholeServerService,
     /// DDNS 配置列表
     ddns_configs: []DdnsConfig,
     /// Wake-on-LAN 目标配置（key 为目标名称）
@@ -703,11 +851,11 @@ pub const Config = struct {
         self.log_config.deinit(allocator);
         if (self.frps_config_path.len != 0) allocator.free(self.frps_config_path);
         if (self.frps_config_content.len != 0) allocator.free(self.frps_config_content);
-
-        for (self.projects) |*p| p.deinit(allocator);
         if (self.frpc_config_path.len != 0) allocator.free(self.frpc_config_path);
         if (self.frpc_config_content.len != 0) allocator.free(self.frpc_config_content);
         if (self.frp_config_root) |root| allocator.free(root);
+
+        for (self.projects) |*p| p.deinit(allocator);
         allocator.free(self.projects);
 
         var it = self.frpc_nodes.iterator();
@@ -723,6 +871,24 @@ pub const Config = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.frps_nodes.deinit();
+
+        var rathole_client_it = self.rathole_client_nodes.iterator();
+        while (rathole_client_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.rathole_client_nodes.deinit();
+        for (self.rathole_client_services) |*service| service.deinit(allocator);
+        allocator.free(self.rathole_client_services);
+
+        var rathole_server_it = self.rathole_server_nodes.iterator();
+        while (rathole_server_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.rathole_server_nodes.deinit();
+        for (self.rathole_server_services) |*service| service.deinit(allocator);
+        allocator.free(self.rathole_server_services);
 
         var wol_it = self.wol_targets.iterator();
         while (wol_it.next()) |entry| {
@@ -756,25 +922,29 @@ pub const Config = struct {
         return a.app_forward_loop_mode == b.app_forward_loop_mode and
             a.use_nftables == b.use_nftables and
             a.watch == b.watch and
+            a.frps_config_mode == b.frps_config_mode and
+            a.frps_config_format == b.frps_config_format and
+            std.mem.eql(u8, a.frps_config_path, b.frps_config_path) and
+            std.mem.eql(u8, a.frps_config_content, b.frps_config_content) and
             a.frpc_config_mode == b.frpc_config_mode and
             a.frpc_config_format == b.frpc_config_format and
             std.mem.eql(u8, a.frpc_config_path, b.frpc_config_path) and
             std.mem.eql(u8, a.frpc_config_content, b.frpc_config_content) and
             eqlOptionalString(a.frp_config_root, b.frp_config_root) and
-            a.frps_config_mode == b.frps_config_mode and
-            a.frps_config_format == b.frps_config_format and
-            std.mem.eql(u8, a.frps_config_path, b.frps_config_path) and
-            std.mem.eql(u8, a.frps_config_content, b.frps_config_content) and
             a.log_config.eql(b.log_config) and
             PortMapping.eqlSlice(Project, a.projects, b.projects) and
             eqlNodeHashMap(FrpcNode, a.frpc_nodes, b.frpc_nodes) and
             eqlNodeHashMap(FrpsNode, a.frps_nodes, b.frps_nodes) and
-    pub fn frpConfigRoot(self: *const Config) []const u8 {
-        return self.frp_config_root orelse DEFAULT_FRP_CONFIG_ROOT;
-    }
-
+            eqlNodeHashMap(RatholeClientNode, a.rathole_client_nodes, b.rathole_client_nodes) and
+            PortMapping.eqlSlice(RatholeClientService, a.rathole_client_services, b.rathole_client_services) and
+            eqlNodeHashMap(RatholeServerNode, a.rathole_server_nodes, b.rathole_server_nodes) and
+            PortMapping.eqlSlice(RatholeServerService, a.rathole_server_services, b.rathole_server_services) and
             eqlNodeHashMap(WolTarget, a.wol_targets, b.wol_targets) and
             PortMapping.eqlSlice(DdnsConfig, a.ddns_configs, b.ddns_configs);
+    }
+
+    pub fn frpConfigRoot(self: *const Config) []const u8 {
+        return self.frp_config_root orelse DEFAULT_FRP_CONFIG_ROOT;
     }
 
     pub fn resolveWolTargets(self: *Config) void {
@@ -936,6 +1106,10 @@ test "config: app forward loop mode defaults and effective override" {
         .projects = &[_]Project{},
         .frpc_nodes = undefined,
         .frps_nodes = undefined,
+        .rathole_client_nodes = undefined,
+        .rathole_client_services = undefined,
+        .rathole_server_nodes = undefined,
+        .rathole_server_services = undefined,
         .wol_targets = undefined,
         .ddns_configs = &[_]DdnsConfig{},
     };
@@ -1063,12 +1237,22 @@ test "config: Config.eql with hashmaps" {
     const wol_a = std.StringHashMap(WolTarget).init(allocator);
     const wol_b = std.StringHashMap(WolTarget).init(allocator);
     const wol_c = std.StringHashMap(WolTarget).init(allocator);
+    const rathole_client_a = std.StringHashMap(RatholeClientNode).init(allocator);
+    const rathole_client_b = std.StringHashMap(RatholeClientNode).init(allocator);
+    const rathole_client_c = std.StringHashMap(RatholeClientNode).init(allocator);
+    const rathole_server_a = std.StringHashMap(RatholeServerNode).init(allocator);
+    const rathole_server_b = std.StringHashMap(RatholeServerNode).init(allocator);
+    const rathole_server_c = std.StringHashMap(RatholeServerNode).init(allocator);
 
     var cfg_a = Config{
         .log_config = .{ .file_path = "/tmp/test.log" },
         .projects = &[_]Project{},
         .frpc_nodes = frpc_a,
         .frps_nodes = frps_a,
+        .rathole_client_nodes = rathole_client_a,
+        .rathole_client_services = &.{},
+        .rathole_server_nodes = rathole_server_a,
+        .rathole_server_services = &.{},
         .wol_targets = wol_a,
         .ddns_configs = &[_]DdnsConfig{},
     };
@@ -1077,6 +1261,10 @@ test "config: Config.eql with hashmaps" {
         .projects = &[_]Project{},
         .frpc_nodes = frpc_b,
         .frps_nodes = frps_b,
+        .rathole_client_nodes = rathole_client_b,
+        .rathole_client_services = &.{},
+        .rathole_server_nodes = rathole_server_b,
+        .rathole_server_services = &.{},
         .wol_targets = wol_b,
         .ddns_configs = &[_]DdnsConfig{},
     };
@@ -1085,6 +1273,10 @@ test "config: Config.eql with hashmaps" {
         .projects = &[_]Project{},
         .frpc_nodes = frpc_c,
         .frps_nodes = frps_c,
+        .rathole_client_nodes = rathole_client_c,
+        .rathole_client_services = &.{},
+        .rathole_server_nodes = rathole_server_c,
+        .rathole_server_services = &.{},
         .wol_targets = wol_c,
         .ddns_configs = &[_]DdnsConfig{},
     };
@@ -1095,11 +1287,17 @@ test "config: Config.eql with hashmaps" {
     // Clean up HashMap internals (keys are comptime literals, no free needed)
     cfg_a.frpc_nodes.deinit();
     cfg_a.frps_nodes.deinit();
+    cfg_a.rathole_client_nodes.deinit();
+    cfg_a.rathole_server_nodes.deinit();
     cfg_a.wol_targets.deinit();
     cfg_b.frpc_nodes.deinit();
     cfg_b.frps_nodes.deinit();
+    cfg_b.rathole_client_nodes.deinit();
+    cfg_b.rathole_server_nodes.deinit();
     cfg_b.wol_targets.deinit();
     cfg_c.frpc_nodes.deinit();
     cfg_c.frps_nodes.deinit();
+    cfg_c.rathole_client_nodes.deinit();
+    cfg_c.rathole_server_nodes.deinit();
     cfg_c.wol_targets.deinit();
 }

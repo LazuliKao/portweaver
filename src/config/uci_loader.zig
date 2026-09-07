@@ -236,6 +236,139 @@ fn parseProjectFromSection(allocator: std.mem.Allocator, sec: uci.UciSection) !t
     return project;
 }
 
+fn findProject(projects: []const types.Project, name: []const u8) ?types.Project {
+    for (projects) |project| {
+        if (std.mem.eql(u8, project.section_name, name)) return project;
+    }
+    return null;
+}
+
+fn parseRatholeClientNode(allocator: std.mem.Allocator, sec: uci.UciSection) !struct { name: []const u8, node: types.RatholeClientNode } {
+    var name = uci.cStr(sec.name());
+    var node = types.RatholeClientNode{ .remote_addr = "" };
+    errdefer node.deinit(allocator);
+
+    var opt_it = sec.options();
+    while (opt_it.next()) |opt| {
+        if (!opt.isString()) continue;
+        const option_name = uci.cStr(opt.name());
+        const value = uci.cStr(opt.getString());
+        if (std.mem.eql(u8, option_name, "name")) {
+            name = value;
+        } else if (std.mem.eql(u8, option_name, "enabled")) {
+            node.enabled = try types.parseBool(value);
+        } else if (std.mem.eql(u8, option_name, "remote_addr")) {
+            if (node.remote_addr.len != 0) allocator.free(node.remote_addr);
+            node.remote_addr = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "default_token")) {
+            if (node.default_token.len != 0) allocator.free(node.default_token);
+            node.default_token = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "transport")) {
+            node.transport = try types.RatholeTransport.fromString(value);
+        } else if (std.mem.eql(u8, option_name, "noise_local_private_key")) {
+            if (node.noise_local_private_key.len != 0) allocator.free(node.noise_local_private_key);
+            node.noise_local_private_key = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "noise_remote_public_key")) {
+            if (node.noise_remote_public_key.len != 0) allocator.free(node.noise_remote_public_key);
+            node.noise_remote_public_key = try types.dupeIfNonEmpty(allocator, value);
+        }
+    }
+    if (name.len == 0 or node.remote_addr.len == 0) return types.ConfigError.MissingField;
+    return .{ .name = name, .node = node };
+}
+
+fn parseRatholeServerNode(allocator: std.mem.Allocator, sec: uci.UciSection) !struct { name: []const u8, node: types.RatholeServerNode } {
+    var name = uci.cStr(sec.name());
+    var node = types.RatholeServerNode{ .bind_addr = "" };
+    errdefer node.deinit(allocator);
+
+    var opt_it = sec.options();
+    while (opt_it.next()) |opt| {
+        if (!opt.isString()) continue;
+        const option_name = uci.cStr(opt.name());
+        const value = uci.cStr(opt.getString());
+        if (std.mem.eql(u8, option_name, "name")) {
+            name = value;
+        } else if (std.mem.eql(u8, option_name, "enabled")) {
+            node.enabled = try types.parseBool(value);
+        } else if (std.mem.eql(u8, option_name, "bind_addr")) {
+            if (node.bind_addr.len != 0) allocator.free(node.bind_addr);
+            node.bind_addr = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "default_token")) {
+            if (node.default_token.len != 0) allocator.free(node.default_token);
+            node.default_token = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "transport")) {
+            node.transport = try types.RatholeTransport.fromString(value);
+        } else if (std.mem.eql(u8, option_name, "noise_local_private_key")) {
+            if (node.noise_local_private_key.len != 0) allocator.free(node.noise_local_private_key);
+            node.noise_local_private_key = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "noise_remote_public_key")) {
+            if (node.noise_remote_public_key.len != 0) allocator.free(node.noise_remote_public_key);
+            node.noise_remote_public_key = try types.dupeIfNonEmpty(allocator, value);
+        }
+    }
+    if (name.len == 0 or node.bind_addr.len == 0) return types.ConfigError.MissingField;
+    return .{ .name = name, .node = node };
+}
+
+fn parseRatholeClientService(allocator: std.mem.Allocator, sec: uci.UciSection, projects: []const types.Project) !types.RatholeClientService {
+    var node_name: []const u8 = "";
+    var service_name: []const u8 = uci.cStr(sec.name());
+    var project_name: []const u8 = "";
+    var local_address: []const u8 = "";
+    var local_port: u16 = 0;
+    var project_target_port: ?u16 = null;
+    var service = types.RatholeClientService{ .node_name = "", .service_name = "", .local_address = "", .local_port = 0 };
+    errdefer service.deinit(allocator);
+
+    var opt_it = sec.options();
+    while (opt_it.next()) |opt| {
+        if (!opt.isString()) continue;
+        const option_name = uci.cStr(opt.name());
+        const value = uci.cStr(opt.getString());
+        if (std.mem.eql(u8, option_name, "name") or std.mem.eql(u8, option_name, "service_name")) service_name = value else if (std.mem.eql(u8, option_name, "node")) node_name = value else if (std.mem.eql(u8, option_name, "enabled")) service.enabled = try types.parseBool(value) else if (std.mem.eql(u8, option_name, "protocol")) service.protocol = try types.RatholeServiceProtocol.fromString(value) else if (std.mem.eql(u8, option_name, "token")) service.token = try types.dupeIfNonEmpty(allocator, value) else if (std.mem.eql(u8, option_name, "local_address")) local_address = value else if (std.mem.eql(u8, option_name, "local_port")) local_port = try types.parsePort(value) else if (std.mem.eql(u8, option_name, "project")) project_name = value else if (std.mem.eql(u8, option_name, "project_target_port")) project_target_port = try types.parsePort(value);
+    }
+
+    if (node_name.len == 0 or service_name.len == 0) return types.ConfigError.MissingField;
+    if (project_name.len != 0) {
+        if (local_address.len != 0 or local_port != 0) return types.ConfigError.InvalidValue;
+        const project = findProject(projects, project_name) orelse return types.ConfigError.InvalidValue;
+        service.local_address = try allocator.dupe(u8, project.target_address);
+        service.local_port = project_target_port orelse if (project.port_mappings.len == 0) project.target_port else return types.ConfigError.MissingField;
+        service.project_name = try allocator.dupe(u8, project_name);
+    } else {
+        if (local_address.len == 0 or local_port == 0) return types.ConfigError.MissingField;
+        service.local_address = try allocator.dupe(u8, std.mem.trim(u8, local_address, " \t\r\n"));
+        service.local_port = local_port;
+    }
+    service.node_name = try allocator.dupe(u8, std.mem.trim(u8, node_name, " \t\r\n"));
+    service.service_name = try allocator.dupe(u8, std.mem.trim(u8, service_name, " \t\r\n"));
+    return service;
+}
+
+fn parseRatholeServerService(allocator: std.mem.Allocator, sec: uci.UciSection) !types.RatholeServerService {
+    var node_name: []const u8 = "";
+    var service_name: []const u8 = uci.cStr(sec.name());
+    var bind_address: []const u8 = "";
+    var bind_port: u16 = 0;
+    var service = types.RatholeServerService{ .node_name = "", .service_name = "", .bind_address = "", .bind_port = 0 };
+    errdefer service.deinit(allocator);
+
+    var opt_it = sec.options();
+    while (opt_it.next()) |opt| {
+        if (!opt.isString()) continue;
+        const option_name = uci.cStr(opt.name());
+        const value = uci.cStr(opt.getString());
+        if (std.mem.eql(u8, option_name, "name") or std.mem.eql(u8, option_name, "service_name")) service_name = value else if (std.mem.eql(u8, option_name, "node")) node_name = value else if (std.mem.eql(u8, option_name, "enabled")) service.enabled = try types.parseBool(value) else if (std.mem.eql(u8, option_name, "protocol")) service.protocol = try types.RatholeServiceProtocol.fromString(value) else if (std.mem.eql(u8, option_name, "token")) service.token = try types.dupeIfNonEmpty(allocator, value) else if (std.mem.eql(u8, option_name, "bind_address")) bind_address = value else if (std.mem.eql(u8, option_name, "bind_port")) bind_port = try types.parsePort(value);
+    }
+    if (node_name.len == 0 or service_name.len == 0 or bind_address.len == 0 or bind_port == 0) return types.ConfigError.MissingField;
+    service.node_name = try allocator.dupe(u8, std.mem.trim(u8, node_name, " \t\r\n"));
+    service.service_name = try allocator.dupe(u8, std.mem.trim(u8, service_name, " \t\r\n"));
+    service.bind_address = try allocator.dupe(u8, std.mem.trim(u8, bind_address, " \t\r\n"));
+    service.bind_port = bind_port;
+    return service;
+}
+
 /// Load projects from a UCI config package (e.g. `/etc/config/portweaver`).
 ///
 /// Expected schema (one section per project):
@@ -348,7 +481,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             }
         },
     }
-
     switch (frpc_config_mode) {
         .builtin => {},
         .external_file => if (std.mem.trim(u8, frpc_config_path, " \t\r\n").len == 0) return types.ConfigError.MissingField,
@@ -357,6 +489,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     if (frp_config_root) |root| {
         if (!std.fs.path.isAbsolute(root) or std.mem.eql(u8, root, "/")) return types.ConfigError.InvalidValue;
     }
+
     var list = std.array_list.Managed(types.Project).init(allocator);
     errdefer {
         for (list.items) |*p| p.deinit(allocator);
@@ -377,6 +510,62 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         }
 
         try list.append(project);
+    }
+
+    var rathole_client_nodes = std.StringHashMap(types.RatholeClientNode).init(allocator);
+    errdefer {
+        var it = rathole_client_nodes.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        rathole_client_nodes.deinit();
+    }
+    var rathole_client_node_sections = uci.sections(pkg);
+    while (rathole_client_node_sections.next()) |sec| {
+        if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_client_node")) continue;
+        const parsed_node = try parseRatholeClientNode(allocator, sec);
+        const key = try allocator.dupe(u8, parsed_node.name);
+        errdefer allocator.free(key);
+        if (rathole_client_nodes.contains(key)) return types.ConfigError.InvalidValue;
+        try rathole_client_nodes.put(key, parsed_node.node);
+    }
+
+    var rathole_server_nodes = std.StringHashMap(types.RatholeServerNode).init(allocator);
+    errdefer {
+        var it = rathole_server_nodes.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        rathole_server_nodes.deinit();
+    }
+    var rathole_server_node_sections = uci.sections(pkg);
+    while (rathole_server_node_sections.next()) |sec| {
+        if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_server_node")) continue;
+        const parsed_node = try parseRatholeServerNode(allocator, sec);
+        const key = try allocator.dupe(u8, parsed_node.name);
+        errdefer allocator.free(key);
+        if (rathole_server_nodes.contains(key)) return types.ConfigError.InvalidValue;
+        try rathole_server_nodes.put(key, parsed_node.node);
+    }
+
+    var rathole_client_services_list = std.array_list.Managed(types.RatholeClientService).init(allocator);
+    defer rathole_client_services_list.deinit();
+    errdefer for (rathole_client_services_list.items) |*service| service.deinit(allocator);
+    var rathole_client_service_sections = uci.sections(pkg);
+    while (rathole_client_service_sections.next()) |sec| {
+        if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_client_service")) continue;
+        try rathole_client_services_list.append(try parseRatholeClientService(allocator, sec, list.items));
+    }
+
+    var rathole_server_services_list = std.array_list.Managed(types.RatholeServerService).init(allocator);
+    defer rathole_server_services_list.deinit();
+    errdefer for (rathole_server_services_list.items) |*service| service.deinit(allocator);
+    var rathole_server_service_sections = uci.sections(pkg);
+    while (rathole_server_service_sections.next()) |sec| {
+        if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_server_service")) continue;
+        try rathole_server_services_list.append(try parseRatholeServerService(allocator, sec));
     }
 
     // Parse WOL targets from UCI config
@@ -480,6 +669,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     errdefer {
         var it = frpc_nodes.iterator();
         while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
         frpc_nodes.deinit();
@@ -562,11 +752,10 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         var project_idx: ?usize = null;
         const sec_name = uci.cStr(sec.name());
         for (list.items, 0..) |*proj, idx| {
-            // Match by section name or order (this is simplified)
-            _ = proj;
-            _ = sec_name;
-            project_idx = idx;
-            break;
+            if (sec_name.len > 0 and std.mem.eql(u8, proj.section_name, sec_name)) {
+                project_idx = idx;
+                break;
+            }
         }
 
         if (project_idx == null) continue;
@@ -632,6 +821,7 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     errdefer {
         var it = frps_nodes.iterator();
         while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
         frps_nodes.deinit();
@@ -832,6 +1022,16 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         for (ddns_configs) |*ddns| ddns.deinit(allocator);
         allocator.free(ddns_configs);
     }
+    const rathole_client_services = try rathole_client_services_list.toOwnedSlice();
+    errdefer {
+        for (rathole_client_services) |*service| service.deinit(allocator);
+        allocator.free(rathole_client_services);
+    }
+    const rathole_server_services = try rathole_server_services_list.toOwnedSlice();
+    errdefer {
+        for (rathole_server_services) |*service| service.deinit(allocator);
+        allocator.free(rathole_server_services);
+    }
 
     var cfg = types.Config{
         .log_config = log_config,
@@ -841,17 +1041,23 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         .frps_config_format = frps_config_format,
         .frps_config_path = frps_config_path,
         .frps_config_content = frps_config_content,
-        .projects = projects,
-        .frpc_nodes = frpc_nodes,
         .frpc_config_mode = frpc_config_mode,
         .frpc_config_format = frpc_config_format,
         .frpc_config_path = frpc_config_path,
         .frpc_config_content = frpc_config_content,
         .frp_config_root = frp_config_root,
+        .projects = projects,
+        .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
+        .rathole_client_nodes = rathole_client_nodes,
+        .rathole_client_services = rathole_client_services,
+        .rathole_server_nodes = rathole_server_nodes,
+        .rathole_server_services = rathole_server_services,
         .wol_targets = wol_targets,
         .ddns_configs = ddns_configs,
     };
+    errdefer cfg.deinit(allocator);
+
     try helper.validateConfig(&cfg);
     try helper.validateFeatureAvailability(&cfg, build_options.wol_mode);
     cfg.resolveWolTargets();

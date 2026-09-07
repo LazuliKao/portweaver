@@ -1,5 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const rathole_enabled = build_options.rathole_client_mode or build_options.rathole_server_mode;
+const rathole_forward = if (rathole_enabled) @import("impl/rathole_forward.zig") else struct {};
 const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
 const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
@@ -53,6 +55,8 @@ const VersionInfo = struct {
     ubus_mode: bool = build_options.ubus_mode,
     frpc_mode: bool = build_options.frpc_mode,
     frps_mode: bool = build_options.frps_mode,
+    rathole_client_mode: bool = build_options.rathole_client_mode,
+    rathole_server_mode: bool = build_options.rathole_server_mode,
     ddns_mode: bool = build_options.ddns_mode,
     nftables_mode: bool = build_options.nftables_mode,
     wol_mode: bool = build_options.wol_mode,
@@ -194,6 +198,10 @@ pub fn main(init: std.process.Init) !void {
             ubus_server.stop();
         }
         project_status.stopAll(&handles);
+        if (rathole_enabled) {
+            rathole_forward.stop_all();
+            @import("impl/librathole.zig").cleanup();
+        }
         handles.deinit();
         if (build_options.frpc_mode) {
             frpc_forward.stopAll();
@@ -233,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("PortWeaver started successfully.", .{});
 
     // 保持程序运行（如果有应用层转发或 UBUS 服务）
-    if (has_app_forward or build_options.ubus_mode) {
+    if (has_app_forward or build_options.ubus_mode or rathole_enabled) {
         const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
         std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
 
@@ -314,6 +322,7 @@ fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *project_statu
 }
 /// 应用配置：设置防火墙规则并启动应用层转发
 fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHandleList, cfg: *const config.Config) !bool {
+    if (rathole_enabled) try rathole_forward.apply_config(allocator, cfg);
     // 设置所有项目
     for (cfg.projects, 0..) |project, i| {
         setupProject(allocator, i, handles, project, cfg.use_nftables) catch |err| {
@@ -344,7 +353,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHan
     // 启动 FRPS 服务（如果启用）
     if (build_options.frps_mode) {
         std.log.info("Starting FRPS servers...", .{});
-        frps_forward.startConfiguredServers(allocator, &cfg) catch |err| {
+        frps_forward.startConfiguredServers(allocator, cfg) catch |err| {
             std.log.warn("Failed to start configured FRPS servers: {any}", .{err});
         };
     }

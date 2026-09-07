@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const rathole_enabled = build_options.rathole_client_mode or build_options.rathole_server_mode;
+const rathole_forward = if (rathole_enabled) @import("impl/rathole_forward.zig") else struct {};
 const config = @import("config/mod.zig");
 const app_forward = @import("impl/app_forward.zig");
 const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
@@ -296,6 +298,12 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         }
     }
 
+    if (rathole_enabled) {
+        rathole_forward.apply_config(alloc, new_cfg) catch |err| {
+            std.log.err("Reload: failed to apply Rathole configuration: {any}", .{err});
+        };
+    }
+
     // 9) Swap configs: free old, adopt new
     old_cfg.deinit(alloc);
     current_cfg = new_cfg.*;
@@ -439,6 +447,10 @@ fn makeTestConfig(alloc: std.mem.Allocator, projects: []const types.Project) !ty
         .projects = try alloc.dupe(types.Project, projects),
         .frpc_nodes = std.StringHashMap(types.FrpcNode).init(alloc),
         .frps_nodes = std.StringHashMap(types.FrpsNode).init(alloc),
+        .rathole_client_nodes = std.StringHashMap(types.RatholeClientNode).init(alloc),
+        .rathole_client_services = try alloc.alloc(types.RatholeClientService, 0),
+        .rathole_server_nodes = std.StringHashMap(types.RatholeServerNode).init(alloc),
+        .rathole_server_services = try alloc.alloc(types.RatholeServerService, 0),
         .wol_targets = std.StringHashMap(types.WolTarget).init(alloc),
         .ddns_configs = try alloc.alloc(types.DdnsConfig, 0),
         .log_config = .{ .enabled = false, .file_path = "", .max_size = 0, .max_files = 0 },

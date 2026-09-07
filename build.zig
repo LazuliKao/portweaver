@@ -850,6 +850,119 @@ fn goCArchiveSupported(os_tag: std.Target.Os.Tag, arch_tag: std.Target.Cpu.Arch)
 }
 
 const LibResult = struct { step: *std.Build.Step, dir: std.Build.LazyPath, libname: []const u8, libfilename: []const u8 };
+const RatholeLibResult = struct { archive: LibResult, root: std.Build.LazyPath };
+
+fn ratholeRustTarget(target: std.Build.ResolvedTarget) ?[]const u8 {
+    // Rust's MSVC archive must not be linked against Zig's GNU Windows CRT.
+    if (target.result.os.tag == .windows and target.result.abi != .msvc) return null;
+    const arch = target.result.cpu.arch;
+    const os = target.result.os.tag;
+    const musl = target.result.abi.isMusl();
+    return switch (os) {
+        .windows => switch (arch) {
+            .x86 => "i686-pc-windows-msvc",
+            .x86_64 => "x86_64-pc-windows-msvc",
+            .aarch64 => "aarch64-pc-windows-msvc",
+            else => null,
+        },
+        .linux => switch (arch) {
+            .x86 => if (musl) "i686-unknown-linux-musl" else "i686-unknown-linux-gnu",
+            .x86_64 => if (musl) "x86_64-unknown-linux-musl" else "x86_64-unknown-linux-gnu",
+            .aarch64 => if (musl) "aarch64-unknown-linux-musl" else "aarch64-unknown-linux-gnu",
+            .arm => switch (target.result.abi) {
+                .musleabi => "arm-unknown-linux-musleabi",
+                .musleabihf => "armv7-unknown-linux-musleabihf",
+                .gnueabi => "arm-unknown-linux-gnueabi",
+                .gnueabihf => "armv7-unknown-linux-gnueabihf",
+                else => null,
+            },
+            .loongarch64 => if (musl) "loongarch64-unknown-linux-musl" else "loongarch64-unknown-linux-gnu",
+            .riscv64 => if (musl) "riscv64gc-unknown-linux-musl" else "riscv64gc-unknown-linux-gnu",
+            else => null,
+        },
+        .macos => switch (arch) {
+            .x86_64 => "x86_64-apple-darwin",
+            .aarch64 => "aarch64-apple-darwin",
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn addRatholeLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) RatholeLibResult {
+    const rust_target = ratholeRustTarget(target) orelse {
+        return .{
+            .archive = .{
+                .step = &b.addFail("Rathole static embedding is not supported for this target; on Windows use -Dtarget=x86_64-windows-msvc; otherwise disable Rathole or choose a supported Rust target").step,
+                .dir = b.path("."),
+                .libname = "rathole",
+                .libfilename = "librathole.a",
+            },
+            .root = b.path("."),
+        };
+    };
+    const rathole_dep = b.lazyDependency("rathole", .{}) orelse {
+        return .{
+            .archive = .{
+                .step = &b.addFail("Rathole dependency is being fetched; rerun Zig after it is available").step,
+                .dir = b.path("."),
+                .libname = "rathole",
+                .libfilename = "librathole.a",
+            },
+            .root = b.path("."),
+        };
+    };
+    const profile_name = if (optimize == .ReleaseSmall) "minimal" else "debug";
+    const libfilename = if (target.result.os.tag == .windows) "rathole.lib" else "librathole.a";
+    const cargo_cmd = b.addSystemCommand(&.{
+        "cargo",
+        "build",
+        "--manifest-path",
+        "Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--features",
+        "client,server,noise,embedded-ffi",
+        "--target",
+        rust_target,
+    });
+    if (optimize == .ReleaseSmall) cargo_cmd.addArgs(&.{ "--profile", "minimal" });
+    cargo_cmd.addArg("--target-dir");
+    const cargo_target_dir = cargo_cmd.addOutputDirectoryArg("rathole-target");
+    cargo_cmd.setCwd(rathole_dep.path(""));
+    cargo_cmd.setEnvironmentVariable("CARGO_TERM_COLOR", "never");
+
+    return .{
+        .archive = .{
+            .step = &cargo_cmd.step,
+            .dir = cargo_target_dir.join(b.allocator, b.fmt("{s}/{s}", .{ rust_target, profile_name })) catch @panic("Failed to determine Rathole archive directory"),
+            .libname = "rathole",
+            .libfilename = libfilename,
+        },
+        .root = rathole_dep.path(""),
+    };
+}
+
+fn linkRatholeLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    module: *std.Build.Module,
+    step: *std.Build.Step,
+) void {
+    const rathole = addRatholeLibrary(b, target, optimize);
+    if (target.result.os.tag == .windows) {
+        module.linkSystemLibrary("bcrypt", .{});
+    }
+    module.addIncludePath(rathole.root.join(b.allocator, "include") catch @panic("Failed to get Rathole include path"));
+    module.addObjectFile(rathole.archive.dir.join(b.allocator, rathole.archive.libfilename) catch @panic("Failed to get Rathole archive path"));
+    step.dependOn(rathole.archive.step);
+}
+
 fn addCombinedGoLib(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -1088,6 +1201,12 @@ pub fn build(b: *std.Build) void {
     const frps = b.option(bool, "frps", "FRP Server Support") orelse false;
     options.addOption(bool, "frps_mode", frps);
 
+    const rathole_client = b.option(bool, "rathole_client", "Rathole Client Support") orelse false;
+    options.addOption(bool, "rathole_client_mode", rathole_client);
+
+    const rathole_server = b.option(bool, "rathole_server", "Rathole Server Support") orelse false;
+    options.addOption(bool, "rathole_server_mode", rathole_server);
+
     const nftables = b.option(bool, "nftables", "nftables Support") orelse false;
     options.addOption(bool, "nftables_mode", nftables);
 
@@ -1231,6 +1350,10 @@ pub fn build(b: *std.Build) void {
         exe.step.dependOn(libgolibs_build_step.step);
     }
 
+    if (rathole_client or rathole_server) {
+        linkRatholeLibrary(b, target, optimize, exe.root_module, &exe.step);
+    }
+
     // Add C/C++ forwarder implementation (selected via -Dforward_backend)
     addForwarderBackend(b, target, optimize, forward_backend, exe.root_module);
 
@@ -1350,6 +1473,9 @@ pub fn build(b: *std.Build) void {
         mod_tests.root_module.addObjectFile(libgolibs_path);
         mod_tests.step.dependOn(libgolibs_build_step.step);
     }
+    if (rathole_client or rathole_server) {
+        linkRatholeLibrary(b, target, optimize, mod_tests.root_module, &mod_tests.step);
+    }
 
     addForwarderBackend(b, target, optimize, forward_backend, mod_tests.root_module);
     mod_tests.root_module.addIncludePath(b.path("deps/uci"));
@@ -1411,6 +1537,9 @@ pub fn build(b: *std.Build) void {
         const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
         exe_tests.root_module.addObjectFile(libgolibs_path);
         exe_tests.step.dependOn(libgolibs_build_step.step);
+    }
+    if (rathole_client or rathole_server) {
+        linkRatholeLibrary(b, target, optimize, exe_tests.root_module, &exe_tests.step);
     }
     addForwarderBackend(b, target, optimize, forward_backend, exe_tests.root_module);
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));

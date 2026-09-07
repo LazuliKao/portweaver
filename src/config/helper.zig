@@ -222,7 +222,37 @@ fn isValidSniPattern(pattern: []const u8) bool {
 }
 
 /// Validate all WoL targets and project feature invariants after parsing.
-pub fn validateConfig(config: *const types.Config) !void {
+pub fn validateConfig(config: *types.Config) !void {
+    var rathole_client_nodes = config.rathole_client_nodes.iterator();
+    while (rathole_client_nodes.next()) |entry| {
+        const node = entry.value_ptr.*;
+        if (entry.key_ptr.*.len == 0 or node.remote_addr.len == 0) return types.ConfigError.InvalidValue;
+        if (node.transport == .noise and node.noise_remote_public_key.len == 0) return types.ConfigError.InvalidValue;
+    }
+    for (config.rathole_client_services, 0..) |service, index| {
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.local_address.len == 0 or service.local_port == 0) return types.ConfigError.InvalidValue;
+        const node = config.rathole_client_nodes.get(service.node_name) orelse return types.ConfigError.InvalidValue;
+        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) return types.ConfigError.InvalidValue;
+        for (config.rathole_client_services[index + 1 ..]) |other| {
+            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) return types.ConfigError.InvalidValue;
+        }
+    }
+
+    var rathole_server_nodes = config.rathole_server_nodes.iterator();
+    while (rathole_server_nodes.next()) |entry| {
+        const node = entry.value_ptr.*;
+        if (entry.key_ptr.*.len == 0 or node.bind_addr.len == 0) return types.ConfigError.InvalidValue;
+        if (node.transport == .noise and node.noise_local_private_key.len == 0) return types.ConfigError.InvalidValue;
+    }
+    for (config.rathole_server_services, 0..) |service, index| {
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.bind_address.len == 0 or service.bind_port == 0) return types.ConfigError.InvalidValue;
+        const node = config.rathole_server_nodes.get(service.node_name) orelse return types.ConfigError.InvalidValue;
+        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) return types.ConfigError.InvalidValue;
+        for (config.rathole_server_services[index + 1 ..]) |other| {
+            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) return types.ConfigError.InvalidValue;
+        }
+    }
+
     var target_it = config.wol_targets.iterator();
     while (target_it.next()) |entry| {
         const target = entry.value_ptr;
@@ -278,7 +308,7 @@ pub fn validateConfig(config: *const types.Config) !void {
 }
 
 /// Reject runtime configuration that requests features omitted from this build.
-pub fn validateFeatureAvailability(config: *const types.Config, wol_available: bool) !void {
+pub fn validateFeatureAvailability(config: *types.Config, wol_available: bool) !void {
     if (wol_available) return;
     for (config.projects) |project| {
         if (project.enable_wol) return types.ConfigError.UnsupportedFeature;

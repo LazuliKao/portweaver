@@ -58,6 +58,10 @@ test "config provider: loadFrom delegates to source load" {
                 .projects = projects,
                 .frpc_nodes = std.StringHashMap(types.FrpcNode).init(allocator),
                 .frps_nodes = std.StringHashMap(types.FrpsNode).init(allocator),
+                .rathole_client_nodes = std.StringHashMap(types.RatholeClientNode).init(allocator),
+                .rathole_client_services = try allocator.alloc(types.RatholeClientService, 0),
+                .rathole_server_nodes = std.StringHashMap(types.RatholeServerNode).init(allocator),
+                .rathole_server_services = try allocator.alloc(types.RatholeServerService, 0),
                 .wol_targets = std.StringHashMap(types.WolTarget).init(allocator),
                 .ddns_configs = ddns_configs,
             };

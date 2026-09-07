@@ -2,6 +2,9 @@
 const build_options = @import("build_options");
 
 test {
+    if (build_options.rathole_client_mode or build_options.rathole_server_mode) {
+        _ = @import("./impl/rathole_forward.zig");
+    }
     _ = @import("./impl/frp_status.zig");
     _ = @import("./config/mod.zig");
     _ = @import("./config/helper.zig");

@@ -45,6 +45,11 @@
             .hash = "N-V-__8AAH3zJwAufzty7Auov111zug2tXWcHE_SoBi05Jo5",
             .lazy = true,
         },
+        .rathole = .{
+            .url = "git+https://github.com/LazuliKao/rathole?ref=f2e208f5a2bac4a77277df49142e5e724511e584#f2e208f5a2bac4a77277df49142e5e724511e584",
+            .hash = "N-V-__8AAEPuCgC9CsTnGgvMhTzMVRWTfMDT54jMuq-g6ekG",
+            .lazy = true,
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

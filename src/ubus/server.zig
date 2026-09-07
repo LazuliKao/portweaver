@@ -893,7 +893,9 @@ fn getRatholeStatus(allocator: std.mem.Allocator, state: *RuntimeState) !Rathole
     return .{ .instances = try std.json.parseFromSliceLeaky([]RatholeInstanceStatus, allocator, json, .{ .allocate = .alloc_always }) };
 }
 
-fn getRatholeInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !GetFrpInfoResponse {
+const RatholeInfoResponse = struct { status: []const u8, last_error: []const u8, logs: []const []const u8 };
+
+fn getRatholeInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !RatholeInfoResponse {
     _ = state;
     const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
     const info = try rathole_forward.get_info(allocator, mode, args.name);

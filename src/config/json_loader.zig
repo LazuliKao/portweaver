@@ -5,6 +5,65 @@ const file_log = @import("../file_log.zig");
 const compat = @import("../compat.zig");
 const build_options = @import("build_options");
 
+// Rathole records contain only scalars and owned strings. Keep the returned
+// records independent of the JSON parser's arena and input buffer.
+fn parseRatholeRecord(comptime T: type, allocator: std.mem.Allocator, value: std.json.Value) !T {
+    const parsed = try std.json.parseFromValue(T, allocator, value, .{});
+    defer parsed.deinit();
+    var result = parsed.value;
+    inline for (std.meta.fields(T)) |field| {
+        if (field.type == []const u8) @field(result, field.name) = "";
+    }
+    errdefer result.deinit(allocator);
+    inline for (std.meta.fields(T)) |field| {
+        if (field.type == []const u8) @field(result, field.name) = try types.dupeIfNonEmpty(allocator, @field(parsed.value, field.name));
+    }
+    return result;
+}
+
+fn parseRatholeNodes(comptime T: type, allocator: std.mem.Allocator, root: std.json.Value, key: []const u8) !std.StringHashMap(T) {
+    var result = std.StringHashMap(T).init(allocator);
+    errdefer {
+        var it = result.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        result.deinit();
+    }
+    if (root != .object) return result;
+    const value = root.object.get(key) orelse return result;
+    if (value != .object) return types.ConfigError.InvalidValue;
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        const name = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(name);
+        var node = try parseRatholeRecord(T, allocator, entry.value_ptr.*);
+        errdefer node.deinit(allocator);
+        try result.put(name, node);
+    }
+    return result;
+}
+
+fn parseRatholeServices(comptime T: type, allocator: std.mem.Allocator, root: std.json.Value, key: []const u8) ![]T {
+    var result: std.ArrayList(T) = .empty;
+    errdefer {
+        for (result.items) |*service| service.deinit(allocator);
+        result.deinit(allocator);
+    }
+    if (root == .object) {
+        if (root.object.get(key)) |value| {
+            if (value != .array) return types.ConfigError.InvalidValue;
+            for (value.array.items) |item| {
+                var service = try parseRatholeRecord(T, allocator, item);
+                errdefer service.deinit(allocator);
+                try result.append(allocator, service);
+            }
+        }
+    }
+    return result.toOwnedSlice(allocator);
+}
+
 // ── JSON value helpers ──────────────────────────────────────────────────
 
 fn jsonValueTypeName(v: std.json.Value) []const u8 {
@@ -398,6 +457,13 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
             if (parseJsonString(v, ec.fieldPath("{s}.remark", .{prefix}), ec)) |s| {
                 project.remark = types.dupeIfNonEmpty(a, s) catch "";
                 if (project.remark.len > 0) project_has_allocs = true;
+            }
+        }
+
+        if (obj.get("section_name")) |v| {
+            if (parseJsonString(v, ec.fieldPath("{s}.section_name", .{prefix}), ec)) |s| {
+                project.section_name = try types.dupeIfNonEmpty(a, s);
+                if (project.section_name.len > 0) project_has_allocs = true;
             }
         }
 
@@ -1083,7 +1149,50 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         }
     }
 
-    const validation_config = types.Config{
+    var rathole_client_nodes = try parseRatholeNodes(types.RatholeClientNode, a, root, "rathole_client_nodes");
+    errdefer {
+        var it = rathole_client_nodes.iterator();
+        while (it.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(a);
+        }
+        rathole_client_nodes.deinit();
+    }
+    var rathole_server_nodes = try parseRatholeNodes(types.RatholeServerNode, a, root, "rathole_server_nodes");
+    errdefer {
+        var it = rathole_server_nodes.iterator();
+        while (it.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(a);
+        }
+        rathole_server_nodes.deinit();
+    }
+    const rathole_client_services = try parseRatholeServices(types.RatholeClientService, a, root, "rathole_client_services");
+    errdefer {
+        for (rathole_client_services) |*service| service.deinit(a);
+        a.free(rathole_client_services);
+    }
+    const rathole_server_services = try parseRatholeServices(types.RatholeServerService, a, root, "rathole_server_services");
+    errdefer {
+        for (rathole_server_services) |*service| service.deinit(a);
+        a.free(rathole_server_services);
+    }
+    for (rathole_client_services) |*service| {
+        if (service.project_name.len == 0) continue;
+        if (service.local_address.len != 0) return types.ConfigError.InvalidValue;
+        var found: ?types.Project = null;
+        for (list.items) |project| {
+            if (std.mem.eql(u8, project.section_name, service.project_name)) {
+                if (found != null) return types.ConfigError.InvalidValue;
+                found = project;
+            }
+        }
+        const project = found orelse return types.ConfigError.InvalidValue;
+        service.local_address = try a.dupe(u8, project.target_address);
+        if (service.local_port == 0) service.local_port = if (project.port_mappings.len == 0) project.target_port else return types.ConfigError.MissingField;
+    }
+
+    var validation_config = types.Config{
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
         .watch = watch,
@@ -1091,11 +1200,15 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         .projects = list.items,
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
+        .rathole_client_nodes = rathole_client_nodes,
+        .rathole_client_services = rathole_client_services,
+        .rathole_server_nodes = rathole_server_nodes,
+        .rathole_server_services = rathole_server_services,
         .wol_targets = wol_targets,
         .ddns_configs = ddns_list.items,
     };
     helper.validateConfig(&validation_config) catch {
-        ec.add("wol/protocol_filter", .conflict, "valid WoL and protocol-filter configuration", "", "invalid feature configuration");
+        ec.add("features", .conflict, "valid Rathole, WoL and protocol-filter configuration", "", "invalid feature configuration");
     };
     helper.validateFeatureAvailability(&validation_config, build_options.wol_mode) catch {
         ec.add("projects[].enable_wol", .conflict, "WoL support enabled at build time", "false", "WoL is not available in this build");
@@ -1115,6 +1228,10 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         .projects = list.toOwnedSlice(a) catch return error.OutOfMemory,
         .frpc_nodes = frpc_nodes,
         .frps_nodes = frps_nodes,
+        .rathole_client_nodes = rathole_client_nodes,
+        .rathole_client_services = rathole_client_services,
+        .rathole_server_nodes = rathole_server_nodes,
+        .rathole_server_services = rathole_server_services,
         .wol_targets = wol_targets,
         .ddns_configs = ddns_list.toOwnedSlice(a) catch return error.OutOfMemory,
     };
