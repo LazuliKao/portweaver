@@ -16,6 +16,7 @@ test {
     _ = @import("./uci/mod.zig");
     _ = @import("./impl/project_status.zig");
     _ = @import("./impl/frp_common.zig");
+    _ = @import("./impl/frp_config_file.zig");
     _ = @import("./impl/frps_forward.zig");
     _ = @import("./impl/app_forward/common.zig");
     _ = @import("./reload.zig");

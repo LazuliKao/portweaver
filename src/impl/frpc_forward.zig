@@ -17,6 +17,9 @@ const ClientHolder = struct {
 var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Io.Mutex = .init;
+
+/// Reserved client name used by the mutually exclusive external FRPC source.
+pub const EXTERNAL_CLIENT_NAME = "__external_frpc__";
 pub fn flushAllClients() void {
     if (clients == null) return;
     clients_lock.lockUncancelable(compat.io());
@@ -94,6 +97,54 @@ fn getOrCreateClient(
     const key = try allocator.dupe(u8, node_name);
     try map.put(key, holder);
     return holder;
+}
+
+fn getOrCreateExternalClient(allocator: std.mem.Allocator, cfg: *const types.Config) !*ClientHolder {
+    clients_lock.lockUncancelable(compat.io());
+    var map = try getClientMap(allocator);
+    if (map.get(EXTERNAL_CLIENT_NAME)) |holder| {
+        clients_lock.unlock(compat.io());
+        return holder;
+    }
+    clients_lock.unlock(compat.io());
+
+    const holder = try allocator.create(ClientHolder);
+    errdefer allocator.destroy(holder);
+    const format = cfg.frpc_config_format.toString();
+    const client = switch (cfg.frpc_config_mode) {
+        .external_file => try libfrp.FrpcClient.initFromFile(allocator, cfg.frpc_config_path, format, EXTERNAL_CLIENT_NAME),
+        .external_uci => try libfrp.FrpcClient.initFromContent(allocator, cfg.frpc_config_content, format, EXTERNAL_CLIENT_NAME),
+        .builtin => return error.InvalidExternalConfigMode,
+    };
+    errdefer {
+        var owned_client = client;
+        owned_client.deinit();
+    }
+    holder.* = .{ .client = client, .started = false, .lock = .init };
+
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
+    map = try getClientMap(allocator);
+    if (map.get(EXTERNAL_CLIENT_NAME)) |existing| {
+        holder.client.deinit();
+        allocator.destroy(holder);
+        return existing;
+    }
+    const key = try allocator.dupe(u8, EXTERNAL_CLIENT_NAME);
+    try map.put(key, holder);
+    return holder;
+}
+
+pub fn startConfiguredClients(allocator: std.mem.Allocator, cfg: *const types.Config) !void {
+    switch (cfg.frpc_config_mode) {
+        .builtin => flushAllClients(),
+        .external_file, .external_uci => {
+            const holder = try getOrCreateExternalClient(allocator, cfg);
+            holder.lock.lockUncancelable(compat.io());
+            defer holder.lock.unlock(compat.io());
+            flushFrpcClient(holder, EXTERNAL_CLIENT_NAME);
+        },
+    }
 }
 
 fn addProxyForPorts(
@@ -215,7 +266,9 @@ pub fn stopAll() void {
     var it = map.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.*.started) {
-            entry.value_ptr.*.client.stop() catch {};
+            entry.value_ptr.*.client.stop() catch |err| {
+                std.log.warn("[FRPC] Failed to stop client {s}: {any}", .{ entry.key_ptr.*, err });
+            };
         }
         entry.value_ptr.*.client.deinit();
         allocator.free(entry.key_ptr.*);

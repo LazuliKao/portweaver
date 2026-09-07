@@ -256,12 +256,20 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     errdefer log_config.deinit(allocator);
     var app_forward_loop_mode: types.LoopMode = .per_project;
     var use_nftables: bool = false;
-    var frps_config_mode: types.FrpsConfigMode = .builtin;
-    var frps_config_format: types.FrpsConfigFormat = .toml;
+    var frps_config_mode: types.FrpConfigMode = .builtin;
+    var frps_config_format: types.FrpConfigFormat = .toml;
     var frps_config_path: []const u8 = "";
     errdefer if (frps_config_path.len != 0) allocator.free(frps_config_path);
     var frps_config_content: []const u8 = "";
     errdefer if (frps_config_content.len != 0) allocator.free(frps_config_content);
+    var frpc_config_mode: types.FrpConfigMode = .builtin;
+    var frpc_config_format: types.FrpConfigFormat = .toml;
+    var frpc_config_path: []const u8 = "";
+    errdefer if (frpc_config_path.len != 0) allocator.free(frpc_config_path);
+    var frpc_config_content: []const u8 = "";
+    errdefer if (frpc_config_content.len != 0) allocator.free(frpc_config_content);
+    var frp_config_root: ?[]const u8 = null;
+    errdefer if (frp_config_root) |root| allocator.free(root);
 
     var global_sec_it = uci.sections(pkg);
     while (global_sec_it.next()) |sec| {
@@ -295,9 +303,9 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
             } else if (std.mem.eql(u8, opt_name, "use_nftables")) {
                 use_nftables = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "frps_config_mode")) {
-                frps_config_mode = try types.FrpsConfigMode.fromString(opt_val);
+                frps_config_mode = try types.FrpConfigMode.fromString(opt_val);
             } else if (std.mem.eql(u8, opt_name, "frps_config_format")) {
-                frps_config_format = try types.FrpsConfigFormat.fromString(opt_val);
+                frps_config_format = try types.FrpConfigFormat.fromString(opt_val);
             } else if (std.mem.eql(u8, opt_name, "frps_config_path")) {
                 const path = try types.dupeIfNonEmpty(allocator, opt_val);
                 if (frps_config_path.len != 0) allocator.free(frps_config_path);
@@ -306,6 +314,22 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 const content = try types.dupeIfNonEmpty(allocator, opt_val);
                 if (frps_config_content.len != 0) allocator.free(frps_config_content);
                 frps_config_content = content;
+            } else if (std.mem.eql(u8, opt_name, "frpc_config_mode")) {
+                frpc_config_mode = try types.FrpConfigMode.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "frpc_config_format")) {
+                frpc_config_format = try types.FrpConfigFormat.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "frpc_config_path")) {
+                const path = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frpc_config_path.len != 0) allocator.free(frpc_config_path);
+                frpc_config_path = path;
+            } else if (std.mem.eql(u8, opt_name, "frpc_config_content")) {
+                const content = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frpc_config_content.len != 0) allocator.free(frpc_config_content);
+                frpc_config_content = content;
+            } else if (std.mem.eql(u8, opt_name, "frp_config_root")) {
+                const root = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frp_config_root) |old_root| allocator.free(old_root);
+                frp_config_root = if (root.len == 0) null else root;
             }
         }
         break;
@@ -325,6 +349,14 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         },
     }
 
+    switch (frpc_config_mode) {
+        .builtin => {},
+        .external_file => if (std.mem.trim(u8, frpc_config_path, " \t\r\n").len == 0) return types.ConfigError.MissingField,
+        .external_uci => if (std.mem.trim(u8, frpc_config_content, " \t\r\n").len == 0) return types.ConfigError.MissingField,
+    }
+    if (frp_config_root) |root| {
+        if (!std.fs.path.isAbsolute(root) or std.mem.eql(u8, root, "/")) return types.ConfigError.InvalidValue;
+    }
     var list = std.array_list.Managed(types.Project).init(allocator);
     errdefer {
         for (list.items) |*p| p.deinit(allocator);
@@ -811,6 +843,11 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         .frps_config_content = frps_config_content,
         .projects = projects,
         .frpc_nodes = frpc_nodes,
+        .frpc_config_mode = frpc_config_mode,
+        .frpc_config_format = frpc_config_format,
+        .frpc_config_path = frpc_config_path,
+        .frpc_config_content = frpc_config_content,
+        .frp_config_root = frp_config_root,
         .frps_nodes = frps_nodes,
         .wol_targets = wol_targets,
         .ddns_configs = ddns_configs,

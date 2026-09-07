@@ -252,9 +252,25 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         h.shrinkRetainingCapacity(new_projects.len);
     }
 
-    // 5) Flush FRPC clients after all changes
+    // 5) Apply FRPC configuration. Any transition involving an external
+    // source rebuilds all clients so an unchanged file path is reread.
     if (build_options.frpc_mode) {
-        frpc_forward.flushAllClients();
+        if (old_cfg.frpc_config_mode == .builtin and new_cfg.frpc_config_mode == .builtin) {
+            frpc_forward.flushAllClients();
+        } else {
+            frpc_forward.stopAll();
+            if (new_cfg.frpc_config_mode == .builtin) {
+                for (h.items) |handle| {
+                    if (!handle.cfg.enabled) continue;
+                    frpc_forward.startForwarding(alloc, handle, &new_cfg.frpc_nodes) catch |err| {
+                        std.log.warn("Reload: failed to rebuild FRPC project {d}: {any}", .{ handle.id + 1, err });
+                    };
+                }
+            }
+            frpc_forward.startConfiguredClients(alloc, new_cfg) catch |err| {
+                std.log.warn("Reload: failed to start configured FRPC clients: {any}", .{err});
+            };
+        }
     }
 
     // 6) Refresh firewall rules
@@ -300,7 +316,7 @@ fn startForwardingForHandle(
         };
     }
 
-    if (build_options.frpc_mode) {
+    if (build_options.frpc_mode and cfg.frpc_config_mode == .builtin) {
         frpc_forward.startForwarding(alloc, handle, &cfg.frpc_nodes) catch |err| {
             std.log.err("Reload: failed to start FRPC for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
         };

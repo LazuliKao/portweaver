@@ -34,6 +34,8 @@ import (
 	frpconfig "github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/config/v1/validation"
+	"github.com/fatedier/frp/pkg/policy/security"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server"
@@ -96,6 +98,10 @@ func parseServerConfig(content []byte, format string) (*v1.ServerConfig, error) 
 		return nil, err
 	}
 	if err := cfg.Complete(); err != nil {
+		return nil, err
+	}
+	validator := validation.NewConfigValidator(security.NewUnsafeFeatures(nil))
+	if _, err := validator.ValidateServerConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -269,6 +275,21 @@ func FrpsCreateServerFromContent(content *C.char, format *C.char, name *C.char) 
 		serverName = C.GoString(name)
 	}
 	return createServer(cfg, serverName)
+}
+
+//export FrpsValidateConfig
+func FrpsValidateConfig(content *C.char, format *C.char) *C.char {
+	if content == nil || format == nil {
+		return C.CString("content and format are required")
+	}
+	rendered, err := frpconfig.RenderWithTemplate([]byte(C.GoString(content)), frpconfig.GetValues())
+	if err == nil {
+		_, err = parseServerConfig(rendered, C.GoString(format))
+	}
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	return C.CString("")
 }
 
 //export FrpsStartServer

@@ -351,7 +351,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHan
 
     // 所有handle添加完成后，启动线程
     // 这样可以确保handles数组不会在线程运行时重新分配
-    return try startForwardingThreads(allocator, handles, &cfg.frpc_nodes);
+    return try startForwardingThreads(allocator, handles, cfg);
 }
 
 /// 配置防火墙规则（仅 UCI 模式）
@@ -443,7 +443,7 @@ fn logProjectConfig(project: config.Project) void {
 fn startForwardingThreads(
     allocator: std.mem.Allocator,
     handles: *project_status.ProjectHandleList,
-    frpc_nodes: *const std.StringHashMap(config.FrpcNode),
+    cfg: *const config.Config,
 ) !bool {
     std.log.info("Starting forwarding threads...", .{});
     var has_app_forward = false;
@@ -455,10 +455,12 @@ fn startForwardingThreads(
         if (handle.cfg.enable_app_forward) {
             has_app_forward = true;
         }
-        startForwarding(allocator, handle, frpc_nodes);
+        startForwarding(allocator, handle, cfg);
     }
     if (build_options.frpc_mode) {
-        frpc_forward.flushAllClients();
+        frpc_forward.startConfiguredClients(allocator, cfg) catch |err| {
+            std.log.warn("Failed to start configured FRPC clients: {any}", .{err});
+        };
     }
     return has_app_forward;
 }
@@ -467,7 +469,7 @@ fn startForwardingThreads(
 fn startForwarding(
     allocator: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
-    frpc_nodes: *const std.StringHashMap(config.FrpcNode),
+    cfg: *const config.Config,
 ) void {
     std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, app_stats={}, firewall_stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_app_stats, handle.cfg.enable_firewall_stats });
     // 启动应用层转发
@@ -482,8 +484,8 @@ fn startForwarding(
         };
     }
     // 启动 FRPC 转发（如果启用）
-    if (build_options.frpc_mode) {
-        frpc_forward.startForwarding(allocator, handle, frpc_nodes) catch |err| {
+    if (build_options.frpc_mode and cfg.frpc_config_mode == .builtin) {
+        frpc_forward.startForwarding(allocator, handle, &cfg.frpc_nodes) catch |err| {
             std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
             if (compat.isDebugBuild()) {
                 if (@errorReturnTrace()) |trace| {

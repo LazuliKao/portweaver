@@ -39,6 +39,10 @@ pub const FrpcClient = struct {
     use_encryption: bool,
     use_compression: bool,
 
+    extern fn FrpcCreateClientFromFile(path: [*:0]const u8, format: [*:0]const u8, client_name: [*:0]const u8) c_int;
+    extern fn FrpcCreateClientFromContent(content: [*:0]const u8, format: [*:0]const u8, client_name: [*:0]const u8) c_int;
+    extern fn FrpcValidateConfig(content: [*:0]const u8, format: [*:0]const u8) [*:0]u8;
+
     pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
         const c_addr = try allocator.dupeZ(u8, server_addr);
@@ -81,6 +85,34 @@ pub const FrpcClient = struct {
             .use_encryption = use_encryption,
             .use_compression = use_compression,
         };
+    }
+
+    pub fn initFromFile(allocator: std.mem.Allocator, path: []const u8, format: []const u8, client_name: []const u8) !FrpcClient {
+        try ensureFrpcInit();
+        const c_path = try allocator.dupeZ(u8, path);
+        defer allocator.free(c_path);
+        const c_format = try allocator.dupeZ(u8, format);
+        defer allocator.free(c_format);
+        const c_name = try allocator.dupeZ(u8, client_name);
+        defer allocator.free(c_name);
+
+        const client_id = FrpcCreateClientFromFile(c_path.ptr, c_format.ptr, c_name.ptr);
+        if (client_id < 0) return FrpcError.CreateClientFailed;
+        return .{ .id = client_id, .allocator = allocator, .use_encryption = false, .use_compression = false };
+    }
+
+    pub fn initFromContent(allocator: std.mem.Allocator, content: []const u8, format: []const u8, client_name: []const u8) !FrpcClient {
+        try ensureFrpcInit();
+        const c_content = try allocator.dupeZ(u8, content);
+        defer allocator.free(c_content);
+        const c_format = try allocator.dupeZ(u8, format);
+        defer allocator.free(c_format);
+        const c_name = try allocator.dupeZ(u8, client_name);
+        defer allocator.free(c_name);
+
+        const client_id = FrpcCreateClientFromContent(c_content.ptr, c_format.ptr, c_name.ptr);
+        if (client_id < 0) return FrpcError.CreateClientFailed;
+        return .{ .id = client_id, .allocator = allocator, .use_encryption = false, .use_compression = false };
     }
 
     pub fn addTcpProxy(self: *FrpcClient, proxy_name: []const u8, local_ip: []const u8, local_port: u16, remote_port: u16) !void {
@@ -161,6 +193,18 @@ pub const FrpcClient = struct {
         return try allocator.dupe(u8, c_result[0..len]);
     }
 };
+
+/// Returns an allocated parser error, or an empty slice when configuration is valid.
+pub fn validateConfig(allocator: std.mem.Allocator, content: []const u8, format: []const u8) ![]const u8 {
+    const c_content = try allocator.dupeZ(u8, content);
+    defer allocator.free(c_content);
+    const c_format = try allocator.dupeZ(u8, format);
+    defer allocator.free(c_format);
+
+    const c_error = FrpcClient.FrpcValidateConfig(c_content.ptr, c_format.ptr);
+    defer c.FrpcFreeString(c_error);
+    return allocator.dupe(u8, std.mem.span(c_error));
+}
 
 pub fn getVersion(allocator: std.mem.Allocator) ![]const u8 {
     const c_version = c.FrpcGetVersion();

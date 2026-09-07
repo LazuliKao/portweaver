@@ -274,13 +274,13 @@ pub const FrpsNode = struct {
     }
 };
 
-/// FRPS 配置来源。外置配置与内置 FRPS 节点配置互斥。
-pub const FrpsConfigMode = enum {
+/// FRP 配置来源。外置配置与内置节点配置互斥。
+pub const FrpConfigMode = enum {
     builtin,
     external_file,
     external_uci,
 
-    pub fn fromString(value: []const u8) !FrpsConfigMode {
+    pub fn fromString(value: []const u8) !FrpConfigMode {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
         if (eqlIgnoreCase(trimmed, "builtin")) return .builtin;
         if (eqlIgnoreCase(trimmed, "external_file")) return .external_file;
@@ -290,12 +290,12 @@ pub const FrpsConfigMode = enum {
 };
 
 /// 官方 FRP 外置配置支持的格式。
-pub const FrpsConfigFormat = enum {
+pub const FrpConfigFormat = enum {
     toml,
     yaml,
     json,
 
-    pub fn fromString(value: []const u8) !FrpsConfigFormat {
+    pub fn fromString(value: []const u8) !FrpConfigFormat {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
         if (eqlIgnoreCase(trimmed, "toml")) return .toml;
         if (eqlIgnoreCase(trimmed, "yaml") or eqlIgnoreCase(trimmed, "yml")) return .yaml;
@@ -303,7 +303,7 @@ pub const FrpsConfigFormat = enum {
         return ConfigError.InvalidValue;
     }
 
-    pub fn toString(self: FrpsConfigFormat) []const u8 {
+    pub fn toString(self: FrpConfigFormat) []const u8 {
         return switch (self) {
             .toml => "toml",
             .yaml => "yaml",
@@ -663,20 +663,32 @@ pub const DdnsConfig = struct {
 };
 
 pub const Config = struct {
+    pub const DEFAULT_FRP_CONFIG_ROOT = "/etc/portweaver";
+
     app_forward_loop_mode: LoopMode = .per_project,
     /// 是否使用 nftables 作为防火墙后端（默认使用 OpenWrt fw4）
     use_nftables: bool = false,
     /// JSON 模式下是否启用配置文件监听自动重载（默认关闭）
     watch: bool = false,
     /// FRPS 使用内置节点、外置文件或 UCI 内嵌文本配置。
-    frps_config_mode: FrpsConfigMode = .builtin,
+    frps_config_mode: FrpConfigMode = .builtin,
     /// 外置 FRPS 配置的格式。
-    frps_config_format: FrpsConfigFormat = .toml,
+    frps_config_format: FrpConfigFormat = .toml,
     /// external_file 模式下的配置路径。由 Config 持有。
     frps_config_path: []const u8 = "",
     /// external_uci 模式下的原始 FRPS 配置。由 Config 持有。
     frps_config_content: []const u8 = "",
     log_config: file_log.LogConfig,
+    /// FRPC 使用内置节点、外置文件或 UCI 内嵌文本配置。
+    frpc_config_mode: FrpConfigMode = .builtin,
+    /// 外置 FRPC 配置的格式。
+    frpc_config_format: FrpConfigFormat = .toml,
+    /// external_file 模式下的配置路径。由 Config 持有。
+    frpc_config_path: []const u8 = "",
+    /// external_uci 模式下的原始 FRPC 配置。由 Config 持有。
+    frpc_config_content: []const u8 = "",
+    /// 外置 FRP 文件的可信根目录。null 使用 DEFAULT_FRP_CONFIG_ROOT。
+    frp_config_root: ?[]const u8 = null,
     projects: []Project,
     /// FRPC 节点配置（key 为节点名称）
     frpc_nodes: std.StringHashMap(FrpcNode),
@@ -693,6 +705,9 @@ pub const Config = struct {
         if (self.frps_config_content.len != 0) allocator.free(self.frps_config_content);
 
         for (self.projects) |*p| p.deinit(allocator);
+        if (self.frpc_config_path.len != 0) allocator.free(self.frpc_config_path);
+        if (self.frpc_config_content.len != 0) allocator.free(self.frpc_config_content);
+        if (self.frp_config_root) |root| allocator.free(root);
         allocator.free(self.projects);
 
         var it = self.frpc_nodes.iterator();
@@ -732,10 +747,20 @@ pub const Config = struct {
         return true;
     }
 
+    fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.mem.eql(u8, a.?, b.?);
+    }
+
     pub fn eql(a: @This(), b: @This()) bool {
         return a.app_forward_loop_mode == b.app_forward_loop_mode and
             a.use_nftables == b.use_nftables and
             a.watch == b.watch and
+            a.frpc_config_mode == b.frpc_config_mode and
+            a.frpc_config_format == b.frpc_config_format and
+            std.mem.eql(u8, a.frpc_config_path, b.frpc_config_path) and
+            std.mem.eql(u8, a.frpc_config_content, b.frpc_config_content) and
+            eqlOptionalString(a.frp_config_root, b.frp_config_root) and
             a.frps_config_mode == b.frps_config_mode and
             a.frps_config_format == b.frps_config_format and
             std.mem.eql(u8, a.frps_config_path, b.frps_config_path) and
@@ -744,6 +769,10 @@ pub const Config = struct {
             PortMapping.eqlSlice(Project, a.projects, b.projects) and
             eqlNodeHashMap(FrpcNode, a.frpc_nodes, b.frpc_nodes) and
             eqlNodeHashMap(FrpsNode, a.frps_nodes, b.frps_nodes) and
+    pub fn frpConfigRoot(self: *const Config) []const u8 {
+        return self.frp_config_root orelse DEFAULT_FRP_CONFIG_ROOT;
+    }
+
             eqlNodeHashMap(WolTarget, a.wol_targets, b.wol_targets) and
             PortMapping.eqlSlice(DdnsConfig, a.ddns_configs, b.ddns_configs);
     }
@@ -874,17 +903,17 @@ test "config: parse enums" {
     try std.testing.expectEqual(Protocol.tcp, try parseProtocol("tcp"));
 }
 
-test "config: parse FRPS external configuration source and format" {
-    try std.testing.expectEqual(FrpsConfigMode.builtin, try FrpsConfigMode.fromString("builtin"));
-    try std.testing.expectEqual(FrpsConfigMode.external_file, try FrpsConfigMode.fromString("external_file"));
-    try std.testing.expectEqual(FrpsConfigMode.external_uci, try FrpsConfigMode.fromString("external_uci"));
-    try std.testing.expectError(ConfigError.InvalidValue, FrpsConfigMode.fromString("invalid"));
+test "config: parse FRP external configuration source and format" {
+    try std.testing.expectEqual(FrpConfigMode.builtin, try FrpConfigMode.fromString("builtin"));
+    try std.testing.expectEqual(FrpConfigMode.external_file, try FrpConfigMode.fromString("external_file"));
+    try std.testing.expectEqual(FrpConfigMode.external_uci, try FrpConfigMode.fromString("external_uci"));
+    try std.testing.expectError(ConfigError.InvalidValue, FrpConfigMode.fromString("invalid"));
 
-    try std.testing.expectEqual(FrpsConfigFormat.toml, try FrpsConfigFormat.fromString("toml"));
-    try std.testing.expectEqual(FrpsConfigFormat.yaml, try FrpsConfigFormat.fromString("yml"));
-    try std.testing.expectEqual(FrpsConfigFormat.json, try FrpsConfigFormat.fromString("json"));
-    try std.testing.expectEqualStrings("yaml", FrpsConfigFormat.yaml.toString());
-    try std.testing.expectError(ConfigError.InvalidValue, FrpsConfigFormat.fromString("ini"));
+    try std.testing.expectEqual(FrpConfigFormat.toml, try FrpConfigFormat.fromString("toml"));
+    try std.testing.expectEqual(FrpConfigFormat.yaml, try FrpConfigFormat.fromString("yml"));
+    try std.testing.expectEqual(FrpConfigFormat.json, try FrpConfigFormat.fromString("json"));
+    try std.testing.expectEqualStrings("yaml", FrpConfigFormat.yaml.toString());
+    try std.testing.expectError(ConfigError.InvalidValue, FrpConfigFormat.fromString("ini"));
 }
 
 test "config: parse app forward loop mode" {

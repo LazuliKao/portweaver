@@ -10,6 +10,11 @@ const project_status = @import("../impl/project_status.zig");
 const frp_status = if (build_options.frpc_mode or build_options.frps_mode) @import("../impl/frp_status.zig") else struct {};
 const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.zig") else struct {};
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
+const frp_config_file = @import("../impl/frp_config_file.zig");
+const rathole_enabled = build_options.rathole_client_mode or build_options.rathole_server_mode;
+const rathole_forward = if (rathole_enabled) @import("../impl/rathole_forward.zig") else struct {};
+const libfrpc = if (build_options.frpc_mode) @import("../impl/frpc/libfrpc.zig") else struct {};
+const libfrps = if (build_options.frps_mode) @import("../impl/frps/libfrps.zig") else struct {};
 const ddns_manager = if (build_options.ddns_mode) @import("../impl/ddns_manager.zig") else struct {};
 const nftables = if (build_options.nftables_mode) @import("../nftables/mod.zig") else struct {};
 const wol = if (build_options.wol_mode) @import("../impl/wol.zig") else struct {
@@ -231,11 +236,33 @@ const restart_project_policy = [_]c.blobmsg_policy{
     .{ .name = "id", .type = c.BLOBMSG_TYPE_INT32 },
 };
 
+const read_frp_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "kind", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "path", .type = c.BLOBMSG_TYPE_STRING },
+};
+
+const validate_frp_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "kind", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "format", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "content", .type = c.BLOBMSG_TYPE_STRING },
+};
+
+const write_frp_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "kind", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "format", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "path", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "content", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "reload", .type = c.BLOBMSG_TYPE_BOOL },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
     pub const set_enabled: [:0]const u8 = "set_enabled";
     pub const get_frp_status: [:0]const u8 = "get_frp_status";
+    pub const read_frp_config: [:0]const u8 = "read_frp_config";
+    pub const validate_frp_config: [:0]const u8 = "validate_frp_config";
+    pub const write_frp_config: [:0]const u8 = "write_frp_config";
     pub const get_frpc_info: [:0]const u8 = "get_frpc_info";
     pub const get_frpc_proxy_stats: [:0]const u8 = "get_frpc_proxy_stats";
     pub const clear_frpc_logs: [:0]const u8 = "clear_frpc_logs";
@@ -472,6 +499,30 @@ fn ubusThread(state: *RuntimeState) void {
             .policy = null,
             .n_policy = 0,
         },
+        .{
+            .name = method_names.read_frp_config,
+            .handler = wrapHandler(readFrpConfig, ReadFrpConfigArgs, &read_frp_config_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &read_frp_config_policy,
+            .n_policy = @intCast(read_frp_config_policy.len),
+        },
+        .{
+            .name = method_names.validate_frp_config,
+            .handler = wrapHandler(validateFrpConfig, ValidateFrpConfigArgs, &validate_frp_config_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &validate_frp_config_policy,
+            .n_policy = @intCast(validate_frp_config_policy.len),
+        },
+        .{
+            .name = method_names.write_frp_config,
+            .handler = wrapHandler(writeFrpConfig, WriteFrpConfigArgs, &write_frp_config_policy),
+            .mask = 0,
+            .tags = 0,
+            .policy = &write_frp_config_policy,
+            .n_policy = @intCast(write_frp_config_policy.len),
+        },
     } else [_]c.ubus_method{};
     const frpcMethods = if (build_options.frpc_mode) [_]c.ubus_method{
         .{
@@ -577,7 +628,16 @@ fn ubusThread(state: *RuntimeState) void {
             .n_policy = @intCast(wol_project_policy.len),
         },
     } else [_]c.ubus_method{};
-    const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods ++ wolMethods;
+    const rathole_policy = [_]c.blobmsg_policy{
+        .{ .name = "mode", .type = c.BLOBMSG_TYPE_STRING },
+        .{ .name = "name", .type = c.BLOBMSG_TYPE_STRING },
+    };
+    const ratholeMethods = if (rathole_enabled) [_]c.ubus_method{
+        .{ .name = "get_rathole_status", .handler = wrapHandler(getRatholeStatus, void, null), .mask = 0, .tags = 0, .policy = null, .n_policy = 0 },
+        .{ .name = "get_rathole_info", .handler = wrapHandler(getRatholeInfo, RatholeArgs, &rathole_policy), .mask = 0, .tags = 0, .policy = &rathole_policy, .n_policy = rathole_policy.len },
+        .{ .name = "clear_rathole_logs", .handler = wrapHandler(clearRatholeLogs, RatholeArgs, &rathole_policy), .mask = 0, .tags = 0, .policy = &rathole_policy, .n_policy = rathole_policy.len },
+    } else [_]c.ubus_method{};
+    const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods ++ wolMethods ++ ratholeMethods;
     var obj_type = c.ubus_object_type{
         .name = method_names.object_name,
         .id = 0,
@@ -710,6 +770,31 @@ const GetFrpcProxyStatsArgs = struct {
     id: []const u8,
 };
 
+const ReadFrpConfigArgs = struct {
+    kind: []const u8,
+    path: []const u8,
+};
+
+const ValidateFrpConfigArgs = struct {
+    kind: []const u8,
+    format: []const u8,
+    content: []const u8,
+};
+
+const WriteFrpConfigArgs = struct {
+    kind: []const u8,
+    format: []const u8,
+    path: []const u8,
+    content: []const u8,
+    reload: ?bool = null,
+};
+
+const FrpConfigResponse = struct {
+    success: bool,
+    content: []const u8 = "",
+    @"error": []const u8 = "",
+};
+
 const EventInfo = struct {
     timestamp: i64,
     type: []const u8,
@@ -787,9 +872,41 @@ const FullStatusResponse = struct {
     total_bytes_out: u64,
     projects: []const ProjectStatusInfo,
     frp: FrpStatusSection,
+    rathole: RatholeStatusSection,
     ddns: DdnsStatusSection,
     events: []const EventInfo,
 };
+
+const RatholeArgs = struct { mode: []const u8, name: []const u8 };
+const RatholeInstanceStatus = struct { id: i32, name: []const u8, mode: []const u8, state: []const u8, last_error: []const u8 };
+const RatholeStatusSection = struct {
+    enabled: bool = rathole_enabled,
+    instances: []const RatholeInstanceStatus = &.{},
+};
+
+fn getRatholeStatus(allocator: std.mem.Allocator, state: *RuntimeState) !RatholeStatusSection {
+    _ = state;
+    if (!rathole_enabled) return .{};
+    const json = try rathole_forward.get_status(allocator);
+    defer allocator.free(json);
+    // wrapHandler owns a request arena, including parsed strings and slices.
+    return .{ .instances = try std.json.parseFromSliceLeaky([]RatholeInstanceStatus, allocator, json, .{ .allocate = .alloc_always }) };
+}
+
+fn getRatholeInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !GetFrpInfoResponse {
+    _ = state;
+    const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
+    const info = try rathole_forward.get_info(allocator, mode, args.name);
+    return .{ .status = info.status, .last_error = info.last_error, .logs = info.logs };
+}
+
+fn clearRatholeLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !struct { success: bool } {
+    _ = allocator;
+    _ = state;
+    const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
+    try rathole_forward.clear_logs(mode, args.name);
+    return .{ .success = true };
+}
 
 const WolProjectArgs = struct {
     project: ?[]const u8 = null,
@@ -985,6 +1102,66 @@ fn getFrpsInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpc
     };
 }
 
+fn readFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ReadFrpConfigArgs) !FrpConfigResponse {
+    _ = state;
+    _ = frp_config_file.Kind.fromString(args.kind) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
+    const content = frp_config_file.read(allocator, cfg.frpConfigRoot(), args.path) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    return .{ .success = true, .content = content };
+}
+
+fn validateFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ValidateFrpConfigArgs) !FrpConfigResponse {
+    _ = state;
+    const kind = frp_config_file.Kind.fromString(args.kind) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    const parser_error = validateFrpConfigText(allocator, kind, args.format, args.content) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    if (parser_error.len != 0) return .{ .success = false, .@"error" = parser_error };
+    return .{ .success = true };
+}
+
+fn writeFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: WriteFrpConfigArgs) !FrpConfigResponse {
+    _ = state;
+    const kind = frp_config_file.Kind.fromString(args.kind) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    const parser_error = validateFrpConfigText(allocator, kind, args.format, args.content) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    if (parser_error.len != 0) return .{ .success = false, .@"error" = parser_error };
+
+    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
+    frp_config_file.write(cfg.frpConfigRoot(), args.path, args.content) catch |err| {
+        return failedFrpConfigResponse(allocator, err);
+    };
+    if (args.reload orelse false) process_lock.requestReload();
+    return .{ .success = true };
+}
+
+fn validateFrpConfigText(allocator: std.mem.Allocator, kind: frp_config_file.Kind, format: []const u8, content: []const u8) ![]const u8 {
+    try frp_config_file.validateContent(content);
+    return switch (kind) {
+        .frpc => if (comptime build_options.frpc_mode)
+            libfrpc.validateConfig(allocator, content, format)
+        else
+            allocator.dupe(u8, "FRPC support is not compiled"),
+        .frps => if (comptime build_options.frps_mode)
+            libfrps.validateConfig(allocator, content, format)
+        else
+            allocator.dupe(u8, "FRPS support is not compiled"),
+    };
+}
+
+fn failedFrpConfigResponse(allocator: std.mem.Allocator, err: anyerror) !FrpConfigResponse {
+    return .{ .success = false, .@"error" = try std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}) };
+}
+
 fn getFrpProxyStats(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcProxyStatsArgs) !RawJson {
     _ = state;
     const result = try frpc_forward.getProxyStats(allocator, args.id);
@@ -1125,7 +1302,7 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
     }
 
     var clients_list: std.ArrayList(ClientSummaryInfo) = .empty;
-    if (build_options.frpc_mode) {
+    if (build_options.frpc_mode and (reload.getConfig() orelse return error.InvalidValue).frpc_config_mode == .builtin) {
         if (frpc_forward.getAllClientSummaries(allocator) catch null) |items| {
             defer frpc_forward.freeClientSummaries(allocator, items);
             for (items) |item| {
@@ -1200,6 +1377,7 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
         .total_bytes_in = snapshot.total_bytes_in,
         .total_bytes_out = snapshot.total_bytes_out,
         .projects = projects_res.projects,
+        .rathole = try getRatholeStatus(allocator, state),
         .frp = .{
             .enabled = frp_enabled,
             .version = frp_version,

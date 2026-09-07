@@ -71,6 +71,7 @@ pub const FrpsServer = struct {
     extern fn FrpsCreateServer(config: *const CFrpsConfig) c_int;
     extern fn FrpsCreateServerFromFile(path: [*:0]const u8, format: [*:0]const u8, server_name: [*:0]const u8) c_int;
     extern fn FrpsCreateServerFromContent(content: [*:0]const u8, format: [*:0]const u8, server_name: [*:0]const u8) c_int;
+    extern fn FrpsValidateConfig(content: [*:0]const u8, format: [*:0]const u8) [*:0]u8;
 
     pub fn init(allocator: std.mem.Allocator, config: Config, server_name: []const u8) !FrpsServer {
         try ensureFrpsInit();
@@ -250,6 +251,18 @@ pub const FrpsServer = struct {
         c.FrpsClearLogs(self.id);
     }
 };
+
+/// Returns an allocated parser error, or an empty slice when configuration is valid.
+pub fn validateConfig(allocator: std.mem.Allocator, content: []const u8, format: []const u8) ![]const u8 {
+    const c_content = try allocator.dupeZ(u8, content);
+    defer allocator.free(c_content);
+    const c_format = try allocator.dupeZ(u8, format);
+    defer allocator.free(c_format);
+
+    const c_error = FrpsServer.FrpsValidateConfig(c_content.ptr, c_format.ptr);
+    defer c.FrpsFreeString(c_error);
+    return allocator.dupe(u8, std.mem.span(c_error));
+}
 
 pub fn getVersion(allocator: std.mem.Allocator) ![]const u8 {
     const c_version = c.FrpsGetVersion();
