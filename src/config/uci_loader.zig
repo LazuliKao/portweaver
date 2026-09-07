@@ -501,12 +501,15 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         const sec_type = uci.cStr(sec.sectionType());
         if (!std.mem.eql(u8, sec_type, "project")) continue;
 
-        var project = try parseProjectFromSection(allocator, sec);
+        var project = parseProjectFromSection(allocator, sec) catch |err| {
+            std.log.err("Failed to parse project section '{s}': {any}. Skipping this project.", .{ uci.cStr(sec.name()), err });
+            continue;
+        };
 
         // 验证配置有效性
         if (!project.isValid()) {
-            project.deinit(allocator);
-            return types.ConfigError.InvalidValue;
+            std.log.err("Project '{s}' ({s}) is invalid (must configure either single port or port mappings). Disabling this project.", .{ project.remark, uci.cStr(sec.name()) });
+            project.enabled = false;
         }
 
         try list.append(project);
@@ -1058,8 +1061,22 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     };
     errdefer cfg.deinit(allocator);
 
-    try helper.validateConfig(&cfg);
-    try helper.validateFeatureAvailability(&cfg, build_options.wol_mode);
+    helper.validateGlobalConfig(&cfg) catch |err| {
+        std.log.err("Global configuration validation error: {any}", .{err});
+        return err;
+    };
+
+    for (cfg.projects, 0..) |*project, idx| {
+        helper.validateProject(project, &cfg) catch |err| {
+            std.log.err("Project {d} ('{s}') configuration error: {any}. Disabling this project so remaining projects and services can continue.", .{ idx + 1, project.remark, err });
+            project.enabled = false;
+        };
+    }
+
+    helper.validateFeatureAvailability(&cfg, build_options.wol_mode) catch |err| {
+        std.log.err("Feature availability validation error: {any}", .{err});
+        return err;
+    };
     cfg.resolveWolTargets();
     return cfg;
 }

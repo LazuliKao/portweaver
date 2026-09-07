@@ -221,97 +221,212 @@ fn isValidSniPattern(pattern: []const u8) bool {
     return hostname.len - label_start <= 63 and hostname[label_start] != '-' and hostname[hostname.len - 1] != '-';
 }
 
-/// Validate all WoL targets and project feature invariants after parsing.
-pub fn validateConfig(config: *types.Config) !void {
+/// Validate global features (rathole nodes/services and WoL targets).
+pub fn validateGlobalConfig(config: *types.Config) !void {
     var rathole_client_nodes = config.rathole_client_nodes.iterator();
     while (rathole_client_nodes.next()) |entry| {
         const node = entry.value_ptr.*;
-        if (entry.key_ptr.*.len == 0 or node.remote_addr.len == 0) return types.ConfigError.InvalidValue;
-        if (node.transport == .noise and node.noise_remote_public_key.len == 0) return types.ConfigError.InvalidValue;
+        if (entry.key_ptr.*.len == 0 or node.remote_addr.len == 0) {
+            std.log.err("Config validation failed: rathole_client_node '{s}' missing remote_addr", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
+        if (node.transport == .noise and node.noise_remote_public_key.len == 0) {
+            std.log.err("Config validation failed: rathole_client_node '{s}' missing noise_remote_public_key", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
     }
     for (config.rathole_client_services, 0..) |service, index| {
-        if (service.node_name.len == 0 or service.service_name.len == 0 or service.local_address.len == 0 or service.local_port == 0) return types.ConfigError.InvalidValue;
-        const node = config.rathole_client_nodes.get(service.node_name) orelse return types.ConfigError.InvalidValue;
-        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) return types.ConfigError.InvalidValue;
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.local_address.len == 0 or service.local_port == 0) {
+            std.log.err("Config validation failed: rathole_client_service '{s}' missing required fields", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
+        const node = config.rathole_client_nodes.get(service.node_name) orelse {
+            std.log.err("Config validation failed: rathole_client_service '{s}' references unknown node '{s}'", .{ service.service_name, service.node_name });
+            return types.ConfigError.InvalidValue;
+        };
+        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) {
+            std.log.err("Config validation failed: rathole_client_service '{s}' enabled without token", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
         for (config.rathole_client_services[index + 1 ..]) |other| {
-            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) return types.ConfigError.InvalidValue;
+            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) {
+                std.log.err("Config validation failed: duplicate rathole_client_service '{s}' for node '{s}'", .{ service.service_name, service.node_name });
+                return types.ConfigError.InvalidValue;
+            }
         }
     }
 
     var rathole_server_nodes = config.rathole_server_nodes.iterator();
     while (rathole_server_nodes.next()) |entry| {
         const node = entry.value_ptr.*;
-        if (entry.key_ptr.*.len == 0 or node.bind_addr.len == 0) return types.ConfigError.InvalidValue;
-        if (node.transport == .noise and node.noise_local_private_key.len == 0) return types.ConfigError.InvalidValue;
+        if (entry.key_ptr.*.len == 0 or node.bind_addr.len == 0) {
+            std.log.err("Config validation failed: rathole_server_node '{s}' missing bind_addr", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
+        if (node.transport == .noise and node.noise_local_private_key.len == 0) {
+            std.log.err("Config validation failed: rathole_server_node '{s}' missing noise_local_private_key", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
     }
     for (config.rathole_server_services, 0..) |service, index| {
-        if (service.node_name.len == 0 or service.service_name.len == 0 or service.bind_address.len == 0 or service.bind_port == 0) return types.ConfigError.InvalidValue;
-        const node = config.rathole_server_nodes.get(service.node_name) orelse return types.ConfigError.InvalidValue;
-        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) return types.ConfigError.InvalidValue;
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.bind_address.len == 0 or service.bind_port == 0) {
+            std.log.err("Config validation failed: rathole_server_service '{s}' missing required fields", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
+        const node = config.rathole_server_nodes.get(service.node_name) orelse {
+            std.log.err("Config validation failed: rathole_server_service '{s}' references unknown node '{s}'", .{ service.service_name, service.node_name });
+            return types.ConfigError.InvalidValue;
+        };
+        if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) {
+            std.log.err("Config validation failed: rathole_server_service '{s}' enabled without token", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
         for (config.rathole_server_services[index + 1 ..]) |other| {
-            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) return types.ConfigError.InvalidValue;
+            if (std.mem.eql(u8, service.node_name, other.node_name) and std.mem.eql(u8, service.service_name, other.service_name)) {
+                std.log.err("Config validation failed: duplicate rathole_server_service '{s}' for node '{s}'", .{ service.service_name, service.node_name });
+                return types.ConfigError.InvalidValue;
+            }
         }
     }
 
     var target_it = config.wol_targets.iterator();
     while (target_it.next()) |entry| {
         const target = entry.value_ptr;
-        if (entry.key_ptr.*.len == 0 or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
-        if (target.cooldown_ms < WOL_COOLDOWN_MIN_MS or target.cooldown_ms > WOL_COOLDOWN_MAX_MS) return types.ConfigError.InvalidValue;
+        if (entry.key_ptr.*.len == 0 or target.mac_addresses.len == 0) {
+            std.log.err("Config validation: wol_target '{s}' has no MAC addresses", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
+        if (target.cooldown_ms < WOL_COOLDOWN_MIN_MS or target.cooldown_ms > WOL_COOLDOWN_MAX_MS) {
+            std.log.err("Config validation: wol_target '{s}' cooldown_ms ({d}) out of bounds [{d}, {d}]", .{ entry.key_ptr.*, target.cooldown_ms, WOL_COOLDOWN_MIN_MS, WOL_COOLDOWN_MAX_MS });
+            return types.ConfigError.InvalidValue;
+        }
         if (target.wake_delay_ms > WOL_WAKE_DELAY_MAX_MS or
             target.retry_interval_ms < WOL_RETRY_INTERVAL_MIN_MS or
             target.retry_window_ms == 0 or
             target.retry_window_ms > WOL_RETRY_WINDOW_MAX_MS or
             target.wake_delay_ms > target.retry_window_ms or
-            target.retry_interval_ms > target.retry_window_ms) return types.ConfigError.InvalidValue;
-        if (hasDuplicateStrings(target.mac_addresses)) return types.ConfigError.InvalidValue;
+            target.retry_interval_ms > target.retry_window_ms)
+        {
+            std.log.err("Config validation: wol_target '{s}' has invalid retry/delay timing parameters", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
+        if (hasDuplicateStrings(target.mac_addresses)) {
+            std.log.err("Config validation: wol_target '{s}' has duplicate MAC addresses", .{entry.key_ptr.*});
+            return types.ConfigError.InvalidValue;
+        }
         for (target.mac_addresses) |mac| {
-            if (wol.parseMac(mac) == null) return types.ConfigError.InvalidValue;
+            if (wol.parseMac(mac) == null) {
+                std.log.err("Config validation: wol_target '{s}' has invalid MAC address '{s}'", .{ entry.key_ptr.*, mac });
+                return types.ConfigError.InvalidValue;
+            }
+        }
+    }
+}
+
+/// Validate an individual project's configuration against global config targets.
+pub fn validateProject(project: *types.Project, config: *const types.Config) !void {
+    const p_name = if (project.remark.len > 0) project.remark else if (project.section_name.len > 0) project.section_name else "unnamed";
+
+    if (hasDuplicateStrings(project.detect_protocols) or
+        hasDuplicateStrings(project.allowed_protocols) or
+        hasDuplicateStrings(project.tls_allowed_snis))
+    {
+        std.log.warn("Project '{s}': duplicate protocol or SNI entries found", .{p_name});
+        return types.ConfigError.InvalidValue;
+    }
+
+    for (project.detect_protocols) |protocol| {
+        if (protocol_detector.protocolFromString(protocol) == null) {
+            std.log.warn("Project '{s}': unknown detect_protocol '{s}'", .{ p_name, protocol });
+            return types.ConfigError.InvalidValue;
+        }
+    }
+    for (project.allowed_protocols) |protocol| {
+        if (protocol_detector.protocolFromString(protocol) == null) {
+            std.log.warn("Project '{s}': unknown allowed_protocol '{s}'", .{ p_name, protocol });
+            return types.ConfigError.InvalidValue;
+        }
+    }
+    for (project.tls_allowed_snis) |pattern| {
+        if (!isValidSniPattern(pattern)) {
+            std.log.warn("Project '{s}': invalid TLS SNI pattern '{s}'", .{ p_name, pattern });
+            return types.ConfigError.InvalidValue;
         }
     }
 
-    for (config.projects) |*project| {
-        if (hasDuplicateStrings(project.detect_protocols) or
-            hasDuplicateStrings(project.allowed_protocols) or
-            hasDuplicateStrings(project.tls_allowed_snis)) return types.ConfigError.InvalidValue;
+    if (project.enable_wol or project.enable_protocol_filter) {
+        if (!project.enable_app_forward or !hasTcpMapping(project)) {
+            std.log.warn("Project '{s}': WoL and protocol filter require enable_app_forward=true and TCP mapping", .{p_name});
+            return types.ConfigError.InvalidValue;
+        }
+    }
 
-        for (project.detect_protocols) |protocol| {
-            if (protocol_detector.protocolFromString(protocol) == null) return types.ConfigError.InvalidValue;
-        }
-        for (project.allowed_protocols) |protocol| {
-            if (protocol_detector.protocolFromString(protocol) == null) return types.ConfigError.InvalidValue;
-        }
-        for (project.tls_allowed_snis) |pattern| {
-            if (!isValidSniPattern(pattern)) return types.ConfigError.InvalidValue;
-        }
-
-        if (project.enable_wol or project.enable_protocol_filter) {
-            if (!project.enable_app_forward or !hasTcpMapping(project)) return types.ConfigError.InvalidValue;
-        }
-
-        if (project.enable_wol) {
-            if (project.wol_target.len == 0) return types.ConfigError.InvalidValue;
-            const target = config.wol_targets.get(project.wol_target) orelse return types.ConfigError.InvalidValue;
-            if (!target.enabled or target.mac_addresses.len == 0) return types.ConfigError.InvalidValue;
-            if (project.wol_trigger_mode == .on_protocol) {
-                if (project.detect_protocols.len == 0) return types.ConfigError.InvalidValue;
-                for (project.detect_protocols) |protocol| {
-                    if (!supportsProtocolWake(protocol)) return types.ConfigError.InvalidValue;
+    if (project.enable_wol) {
+        if (project.wol_target.len == 0) {
+            // Auto-fallback: if there is exactly one WoL target in the system, adopt it with a warning
+            if (config.wol_targets.count() == 1) {
+                var it = config.wol_targets.iterator();
+                if (it.next()) |only_target| {
+                    std.log.warn("Project '{s}': enable_wol is true but wol_target is not specified; defaulting to only configured target '{s}'", .{ p_name, only_target.key_ptr.* });
+                    project.wol_target = only_target.key_ptr.*;
                 }
+            } else {
+                std.log.warn("Project '{s}': enable_wol is true but wol_target is not specified ({d} targets available)", .{ p_name, config.wol_targets.count() });
+                return types.ConfigError.InvalidValue;
             }
         }
 
-        if (project.enable_protocol_filter and project.allowed_protocols.len == 0) return types.ConfigError.InvalidValue;
-        if (project.tls_allowed_snis.len > 0 and
-            (!project.enable_protocol_filter or !containsProtocol(project.allowed_protocols, "tls"))) return types.ConfigError.InvalidValue;
+        const target = config.wol_targets.get(project.wol_target) orelse {
+            std.log.warn("Project '{s}': references non-existent wol_target '{s}'", .{ p_name, project.wol_target });
+            return types.ConfigError.InvalidValue;
+        };
+        if (!target.enabled or target.mac_addresses.len == 0) {
+            std.log.warn("Project '{s}': references disabled or empty wol_target '{s}'", .{ p_name, project.wol_target });
+            return types.ConfigError.InvalidValue;
+        }
+
+        if (project.wol_trigger_mode == .on_protocol) {
+            if (project.detect_protocols.len == 0) {
+                std.log.warn("Project '{s}': on_protocol WoL requires detect_protocols", .{p_name});
+                return types.ConfigError.InvalidValue;
+            }
+            for (project.detect_protocols) |protocol| {
+                if (!supportsProtocolWake(protocol)) {
+                    std.log.warn("Project '{s}': detect_protocol '{s}' does not support WoL wake", .{ p_name, protocol });
+                    return types.ConfigError.InvalidValue;
+                }
+            }
+        }
+    }
+
+    if (project.enable_protocol_filter and project.allowed_protocols.len == 0) {
+        std.log.warn("Project '{s}': enable_protocol_filter is true but allowed_protocols is empty", .{p_name});
+        return types.ConfigError.InvalidValue;
+    }
+    if (project.tls_allowed_snis.len > 0 and
+        (!project.enable_protocol_filter or !containsProtocol(project.allowed_protocols, "tls")))
+    {
+        std.log.warn("Project '{s}': tls_allowed_snis requires enable_protocol_filter and 'tls' in allowed_protocols", .{p_name});
+        return types.ConfigError.InvalidValue;
+    }
+}
+
+/// Validate all WoL targets and project feature invariants after parsing.
+pub fn validateConfig(config: *types.Config) !void {
+    try validateGlobalConfig(config);
+    for (config.projects) |*project| {
+        try validateProject(project, config);
     }
 }
 
 /// Reject runtime configuration that requests features omitted from this build.
 pub fn validateFeatureAvailability(config: *types.Config, wol_available: bool) !void {
     if (wol_available) return;
-    for (config.projects) |project| {
-        if (project.enable_wol) return types.ConfigError.UnsupportedFeature;
+    for (config.projects) |*project| {
+        if (project.enable_wol) {
+            std.log.warn("Project '{s}': WoL requested but not enabled in this build; disabling WoL for this project", .{project.remark});
+            project.enable_wol = false;
+        }
     }
 }
 

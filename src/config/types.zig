@@ -949,16 +949,22 @@ pub const Config = struct {
 
     pub fn resolveWolTargets(self: *Config) void {
         for (self.projects) |*p| {
-            if (p.enable_wol and p.wol_target.len > 0) {
-                if (self.wol_targets.get(p.wol_target)) |target| {
-                    p.resolved_wol_macs = target.mac_addresses;
-                    p.resolved_wol_cooldown_ms = target.cooldown_ms;
-                    p.resolved_wol_wake_delay_ms = target.wake_delay_ms;
-                    p.resolved_wol_retry_interval_ms = target.retry_interval_ms;
-                    p.resolved_wol_retry_window_ms = target.retry_window_ms;
-                    p.resolved_wol_log_enabled = target.log_enabled;
+            if (p.enable_wol) {
+                if (p.wol_target.len > 0) {
+                    if (self.wol_targets.get(p.wol_target)) |target| {
+                        p.resolved_wol_macs = target.mac_addresses;
+                        p.resolved_wol_cooldown_ms = target.cooldown_ms;
+                        p.resolved_wol_wake_delay_ms = target.wake_delay_ms;
+                        p.resolved_wol_retry_interval_ms = target.retry_interval_ms;
+                        p.resolved_wol_retry_window_ms = target.retry_window_ms;
+                        p.resolved_wol_log_enabled = target.log_enabled;
+                    } else {
+                        std.log.err("resolveWolTargets: wol_target '{s}' referenced by project '{s}' not found; disabling WoL for this project", .{ p.wol_target, p.remark });
+                        p.enable_wol = false;
+                    }
                 } else {
-                    std.log.err("resolveWolTargets: wol_target '{s}' referenced by project '{s}' not found", .{ p.wol_target, p.remark });
+                    std.log.err("resolveWolTargets: project '{s}' has enable_wol=true but no wol_target; disabling WoL for this project", .{p.remark});
+                    p.enable_wol = false;
                 }
             }
         }
