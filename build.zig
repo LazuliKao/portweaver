@@ -932,7 +932,15 @@ fn addRatholeLibrary(
     });
     if (optimize == .ReleaseSmall) cargo_cmd.addArgs(&.{ "--profile", "minimal" });
     cargo_cmd.addArg("--target-dir");
-    const cargo_target_dir = cargo_cmd.addOutputDirectoryArg("rathole-target");
+    // Cargo owns its target directory. Registering it as a Run output causes Zig
+    // 0.16 to emit a spurious "failed command" diagnostic after a successful build.
+    const cargo_target_dir_path = std.fs.path.resolve(b.allocator, &.{
+        b.build_root.path orelse ".",
+        b.cache_root.path orelse ".",
+        "rathole-target",
+    }) catch @panic("Failed to determine Rathole target directory");
+    const cargo_target_dir: std.Build.LazyPath = .{ .cwd_relative = cargo_target_dir_path };
+    cargo_cmd.addArg(cargo_target_dir_path);
     cargo_cmd.setCwd(rathole_dep.path(""));
     cargo_cmd.setEnvironmentVariable("CARGO_TERM_COLOR", "never");
 
@@ -950,11 +958,10 @@ fn addRatholeLibrary(
 fn linkRatholeLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    rathole: RatholeLibResult,
     module: *std.Build.Module,
     step: *std.Build.Step,
 ) void {
-    const rathole = addRatholeLibrary(b, target, optimize);
     if (target.result.os.tag == .windows) {
         module.linkSystemLibrary("bcrypt", .{});
     }
@@ -1238,6 +1245,10 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+    const rathole = if (rathole_client or rathole_server)
+        addRatholeLibrary(b, target, optimize)
+    else
+        null;
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -1350,8 +1361,8 @@ pub fn build(b: *std.Build) void {
         exe.step.dependOn(libgolibs_build_step.step);
     }
 
-    if (rathole_client or rathole_server) {
-        linkRatholeLibrary(b, target, optimize, exe.root_module, &exe.step);
+    if (rathole) |rathole_lib| {
+        linkRatholeLibrary(b, target, rathole_lib, exe.root_module, &exe.step);
     }
 
     // Add C/C++ forwarder implementation (selected via -Dforward_backend)
@@ -1473,8 +1484,8 @@ pub fn build(b: *std.Build) void {
         mod_tests.root_module.addObjectFile(libgolibs_path);
         mod_tests.step.dependOn(libgolibs_build_step.step);
     }
-    if (rathole_client or rathole_server) {
-        linkRatholeLibrary(b, target, optimize, mod_tests.root_module, &mod_tests.step);
+    if (rathole) |rathole_lib| {
+        linkRatholeLibrary(b, target, rathole_lib, mod_tests.root_module, &mod_tests.step);
     }
 
     addForwarderBackend(b, target, optimize, forward_backend, mod_tests.root_module);
@@ -1538,8 +1549,8 @@ pub fn build(b: *std.Build) void {
         exe_tests.root_module.addObjectFile(libgolibs_path);
         exe_tests.step.dependOn(libgolibs_build_step.step);
     }
-    if (rathole_client or rathole_server) {
-        linkRatholeLibrary(b, target, optimize, exe_tests.root_module, &exe_tests.step);
+    if (rathole) |rathole_lib| {
+        linkRatholeLibrary(b, target, rathole_lib, exe_tests.root_module, &exe_tests.step);
     }
     addForwarderBackend(b, target, optimize, forward_backend, exe_tests.root_module);
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));
