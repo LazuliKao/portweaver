@@ -18,8 +18,6 @@ var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Io.Mutex = .init;
 
-/// Reserved client name used by the mutually exclusive external FRPC source.
-pub const EXTERNAL_CLIENT_NAME = "__external_frpc__";
 pub fn flushAllClients() void {
     if (clients == null) return;
     clients_lock.lockUncancelable(compat.io());
@@ -74,13 +72,24 @@ fn getOrCreateClient(
     }
     clients_lock.unlock(compat.io());
 
-    const token_opt: ?[]const u8 = if (node.token.len == 0) null else node.token;
-    const log_level_opt: ?[]const u8 = if (node.log_level.len == 0) null else node.log_level;
     const holder = try allocator.create(ClientHolder);
     errdefer allocator.destroy(holder);
 
+    const client = switch (node.source.mode) {
+        .builtin => blk: {
+            const token_opt: ?[]const u8 = if (node.token.len == 0) null else node.token;
+            const log_level_opt: ?[]const u8 = if (node.log_level.len == 0) null else node.log_level;
+            break :blk try libfrp.FrpcClient.init(allocator, node.server, node.port, token_opt, log_level_opt, node_name, node.use_encryption, node.use_compression);
+        },
+        .external_file => try libfrp.FrpcClient.initFromFile(allocator, node.source.path, node.source.format.toString(), node_name, node.use_encryption, node.use_compression),
+        .external_uci => try libfrp.FrpcClient.initFromContent(allocator, node.source.content, node.source.format.toString(), node_name, node.use_encryption, node.use_compression),
+    };
+    errdefer {
+        var owned_client = client;
+        owned_client.deinit();
+    }
     holder.* = .{
-        .client = try libfrp.FrpcClient.init(allocator, node.server, node.port, token_opt, log_level_opt, node_name, node.use_encryption, node.use_compression),
+        .client = client,
         .started = false,
         .lock = .init,
     };
@@ -99,52 +108,15 @@ fn getOrCreateClient(
     return holder;
 }
 
-fn getOrCreateExternalClient(allocator: std.mem.Allocator, cfg: *const types.Config) !*ClientHolder {
-    clients_lock.lockUncancelable(compat.io());
-    var map = try getClientMap(allocator);
-    if (map.get(EXTERNAL_CLIENT_NAME)) |holder| {
-        clients_lock.unlock(compat.io());
-        return holder;
+pub fn startConfiguredClients(allocator: std.mem.Allocator, nodes: *const std.StringHashMap(types.FrpcNode)) !void {
+    var it = nodes.iterator();
+    while (it.next()) |entry| {
+        const node_name = entry.key_ptr.*;
+        const node = entry.value_ptr.*;
+        if (!node.enabled or node.source.mode == .builtin) continue;
+        _ = try getOrCreateClient(allocator, node_name, node);
     }
-    clients_lock.unlock(compat.io());
-
-    const holder = try allocator.create(ClientHolder);
-    errdefer allocator.destroy(holder);
-    const format = cfg.frpc_config_format.toString();
-    const client = switch (cfg.frpc_config_mode) {
-        .external_file => try libfrp.FrpcClient.initFromFile(allocator, cfg.frpc_config_path, format, EXTERNAL_CLIENT_NAME),
-        .external_uci => try libfrp.FrpcClient.initFromContent(allocator, cfg.frpc_config_content, format, EXTERNAL_CLIENT_NAME),
-        .builtin => return error.InvalidExternalConfigMode,
-    };
-    errdefer {
-        var owned_client = client;
-        owned_client.deinit();
-    }
-    holder.* = .{ .client = client, .started = false, .lock = .init };
-
-    clients_lock.lockUncancelable(compat.io());
-    defer clients_lock.unlock(compat.io());
-    map = try getClientMap(allocator);
-    if (map.get(EXTERNAL_CLIENT_NAME)) |existing| {
-        holder.client.deinit();
-        allocator.destroy(holder);
-        return existing;
-    }
-    const key = try allocator.dupe(u8, EXTERNAL_CLIENT_NAME);
-    try map.put(key, holder);
-    return holder;
-}
-
-pub fn startConfiguredClients(allocator: std.mem.Allocator, cfg: *const types.Config) !void {
-    switch (cfg.frpc_config_mode) {
-        .builtin => flushAllClients(),
-        .external_file, .external_uci => {
-            const holder = try getOrCreateExternalClient(allocator, cfg);
-            holder.lock.lockUncancelable(compat.io());
-            defer holder.lock.unlock(compat.io());
-            flushFrpcClient(holder, EXTERNAL_CLIENT_NAME);
-        },
-    }
+    flushAllClients();
 }
 
 fn addProxyForPorts(

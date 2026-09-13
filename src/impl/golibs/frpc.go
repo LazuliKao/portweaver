@@ -269,10 +269,17 @@ func FrpcAddTcpProxy(
 	if !ok {
 		return -2
 	}
+	name := C.GoString(proxyName)
+	for _, existing := range wrapper.proxies {
+		if existing.GetBaseConfig().Name == name {
+			fmt.Printf("FRPC proxy name %q already exists\n", name)
+			return -3
+		}
+	}
 
 	proxyConfig := v1.TCPProxyConfig{
 		ProxyBaseConfig: v1.ProxyBaseConfig{
-			Name: C.GoString(proxyName),
+			Name: name,
 			Type: "tcp",
 			Transport: v1.ProxyTransport{
 				UseEncryption:  wrapper.useEncryption,
@@ -311,10 +318,17 @@ func FrpcAddUdpProxy(
 	if !ok {
 		return -2
 	}
+	name := C.GoString(proxyName)
+	for _, existing := range wrapper.proxies {
+		if existing.GetBaseConfig().Name == name {
+			fmt.Printf("FRPC proxy name %q already exists\n", name)
+			return -3
+		}
+	}
 
 	proxyConfig := v1.UDPProxyConfig{
 		ProxyBaseConfig: v1.ProxyBaseConfig{
-			Name: C.GoString(proxyName),
+			Name: name,
 			Type: "udp",
 			Transport: v1.ProxyTransport{
 				UseEncryption:  wrapper.useEncryption,

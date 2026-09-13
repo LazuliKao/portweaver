@@ -389,18 +389,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     errdefer log_config.deinit(allocator);
     var app_forward_loop_mode: types.LoopMode = .per_project;
     var use_nftables: bool = false;
-    var frps_config_mode: types.FrpConfigMode = .builtin;
-    var frps_config_format: types.FrpConfigFormat = .toml;
-    var frps_config_path: []const u8 = "";
-    errdefer if (frps_config_path.len != 0) allocator.free(frps_config_path);
-    var frps_config_content: []const u8 = "";
-    errdefer if (frps_config_content.len != 0) allocator.free(frps_config_content);
-    var frpc_config_mode: types.FrpConfigMode = .builtin;
-    var frpc_config_format: types.FrpConfigFormat = .toml;
-    var frpc_config_path: []const u8 = "";
-    errdefer if (frpc_config_path.len != 0) allocator.free(frpc_config_path);
-    var frpc_config_content: []const u8 = "";
-    errdefer if (frpc_config_content.len != 0) allocator.free(frpc_config_content);
     var frp_config_root: ?[]const u8 = null;
     errdefer if (frp_config_root) |root| allocator.free(root);
 
@@ -435,30 +423,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 app_forward_loop_mode = try types.parseLoopMode(opt_val);
             } else if (std.mem.eql(u8, opt_name, "use_nftables")) {
                 use_nftables = try types.parseBool(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "frps_config_mode")) {
-                frps_config_mode = try types.FrpConfigMode.fromString(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "frps_config_format")) {
-                frps_config_format = try types.FrpConfigFormat.fromString(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "frps_config_path")) {
-                const path = try types.dupeIfNonEmpty(allocator, opt_val);
-                if (frps_config_path.len != 0) allocator.free(frps_config_path);
-                frps_config_path = path;
-            } else if (std.mem.eql(u8, opt_name, "frps_config_content")) {
-                const content = try types.dupeIfNonEmpty(allocator, opt_val);
-                if (frps_config_content.len != 0) allocator.free(frps_config_content);
-                frps_config_content = content;
-            } else if (std.mem.eql(u8, opt_name, "frpc_config_mode")) {
-                frpc_config_mode = try types.FrpConfigMode.fromString(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "frpc_config_format")) {
-                frpc_config_format = try types.FrpConfigFormat.fromString(opt_val);
-            } else if (std.mem.eql(u8, opt_name, "frpc_config_path")) {
-                const path = try types.dupeIfNonEmpty(allocator, opt_val);
-                if (frpc_config_path.len != 0) allocator.free(frpc_config_path);
-                frpc_config_path = path;
-            } else if (std.mem.eql(u8, opt_name, "frpc_config_content")) {
-                const content = try types.dupeIfNonEmpty(allocator, opt_val);
-                if (frpc_config_content.len != 0) allocator.free(frpc_config_content);
-                frpc_config_content = content;
             } else if (std.mem.eql(u8, opt_name, "frp_config_root")) {
                 const root = try types.dupeIfNonEmpty(allocator, opt_val);
                 if (frp_config_root) |old_root| allocator.free(old_root);
@@ -468,24 +432,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         break;
     }
 
-    switch (frps_config_mode) {
-        .builtin => {},
-        .external_file => {
-            if (std.mem.trim(u8, frps_config_path, " \t\r\n").len == 0) {
-                return types.ConfigError.MissingField;
-            }
-        },
-        .external_uci => {
-            if (std.mem.trim(u8, frps_config_content, " \t\r\n").len == 0) {
-                return types.ConfigError.MissingField;
-            }
-        },
-    }
-    switch (frpc_config_mode) {
-        .builtin => {},
-        .external_file => if (std.mem.trim(u8, frpc_config_path, " \t\r\n").len == 0) return types.ConfigError.MissingField,
-        .external_uci => if (std.mem.trim(u8, frpc_config_content, " \t\r\n").len == 0) return types.ConfigError.MissingField,
-    }
     if (frp_config_root) |root| {
         if (!std.fs.path.isAbsolute(root) or std.mem.eql(u8, root, "/")) return types.ConfigError.InvalidValue;
     }
@@ -684,13 +630,9 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         if (!std.mem.eql(u8, sec_type, "frpc_node")) continue;
 
         var frpc_node = types.FrpcNode{
-            .enabled = true,
-            .server = undefined,
-            .port = 0,
-            .token = &.{},
-            .log_level = &.{},
-            .use_encryption = true,
-            .use_compression = true,
+            .server = "",
+            .token = "",
+            .log_level = "",
         };
         var node_name: []const u8 = "";
         var have_server = false;
@@ -728,14 +670,28 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 frpc_node.use_compression = try types.parseBool(opt_val);
             } else if (std.mem.eql(u8, opt_name, "enabled")) {
                 frpc_node.enabled = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_mode")) {
+                frpc_node.source.mode = try types.FrpConfigMode.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_format")) {
+                frpc_node.source.format = try types.FrpConfigFormat.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_path")) {
+                const path = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frpc_node.source.path.len != 0) allocator.free(frpc_node.source.path);
+                frpc_node.source.path = path;
+            } else if (std.mem.eql(u8, opt_name, "config_content")) {
+                const content = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frpc_node.source.content.len != 0) allocator.free(frpc_node.source.content);
+                frpc_node.source.content = content;
             }
         }
 
-        // Validate FRPC node
-        if (node_name.len == 0 or !have_server or !have_port) {
-            if (have_server) allocator.free(frpc_node.server);
-            if (frpc_node.token.len != 0) allocator.free(frpc_node.token);
-            if (frpc_node.log_level.len != 0) allocator.free(frpc_node.log_level);
+        const valid_source = switch (frpc_node.source.mode) {
+            .builtin => have_server and have_port,
+            .external_file => std.mem.trim(u8, frpc_node.source.path, " \t\r\n").len != 0,
+            .external_uci => std.mem.trim(u8, frpc_node.source.content, " \t\r\n").len != 0,
+        };
+        if (node_name.len == 0 or !valid_source) {
+            frpc_node.deinit(allocator);
             continue;
         }
 
@@ -901,11 +857,27 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
                 if (trimmed.len > 0) frps_node.dashboard_pwd = try allocator.dupe(u8, trimmed);
             } else if (std.mem.eql(u8, opt_name, "enabled")) {
                 frps_node.enabled = try types.parseBool(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_mode")) {
+                frps_node.source.mode = try types.FrpConfigMode.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_format")) {
+                frps_node.source.format = try types.FrpConfigFormat.fromString(opt_val);
+            } else if (std.mem.eql(u8, opt_name, "config_path")) {
+                const path = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frps_node.source.path.len != 0) allocator.free(frps_node.source.path);
+                frps_node.source.path = path;
+            } else if (std.mem.eql(u8, opt_name, "config_content")) {
+                const content = try types.dupeIfNonEmpty(allocator, opt_val);
+                if (frps_node.source.content.len != 0) allocator.free(frps_node.source.content);
+                frps_node.source.content = content;
             }
         }
 
-        // Validate FRPS node - only node_name is required
-        if (node_name.len == 0) {
+        const valid_source = switch (frps_node.source.mode) {
+            .builtin => true,
+            .external_file => std.mem.trim(u8, frps_node.source.path, " \t\r\n").len != 0,
+            .external_uci => std.mem.trim(u8, frps_node.source.content, " \t\r\n").len != 0,
+        };
+        if (node_name.len == 0 or !valid_source) {
             frps_node.deinit(allocator);
             continue;
         }
@@ -1040,14 +1012,6 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
         .log_config = log_config,
         .app_forward_loop_mode = app_forward_loop_mode,
         .use_nftables = use_nftables,
-        .frps_config_mode = frps_config_mode,
-        .frps_config_format = frps_config_format,
-        .frps_config_path = frps_config_path,
-        .frps_config_content = frps_config_content,
-        .frpc_config_mode = frpc_config_mode,
-        .frpc_config_format = frpc_config_format,
-        .frpc_config_path = frpc_config_path,
-        .frpc_config_content = frpc_config_content,
         .frp_config_root = frp_config_root,
         .projects = projects,
         .frpc_nodes = frpc_nodes,

@@ -749,12 +749,38 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
 
                     var frpc_node = types.FrpcNode{
                         .enabled = true,
-                        .server = undefined,
+                        .server = "",
                         .port = 0,
+                        .token = "",
                         .log_level = "",
                     };
                     var have_server = false;
                     var have_port = false;
+
+                    if (node_obj.object.get("config_mode")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_mode", .{np}), ec)) |s| {
+                            frpc_node.source.mode = types.FrpConfigMode.fromString(s) catch blk: {
+                                ec.add(ec.fieldPath("{s}.config_mode", .{np}), .enum_value_invalid, "builtin, external_file, or external_uci", s, "unsupported configuration source");
+                                break :blk frpc_node.source.mode;
+                            };
+                        }
+                    }
+                    if (node_obj.object.get("config_format")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_format", .{np}), ec)) |s| {
+                            frpc_node.source.format = types.FrpConfigFormat.fromString(s) catch blk: {
+                                ec.add(ec.fieldPath("{s}.config_format", .{np}), .enum_value_invalid, "toml, yaml, or json", s, "unsupported configuration format");
+                                break :blk frpc_node.source.format;
+                            };
+                        }
+                    }
+                    if (node_obj.object.get("config_path")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_path", .{np}), ec)) |s|
+                            frpc_node.source.path = types.dupeIfNonEmpty(a, s) catch "";
+                    }
+                    if (node_obj.object.get("config_content")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_content", .{np}), ec)) |s|
+                            frpc_node.source.content = types.dupeIfNonEmpty(a, s) catch "";
+                    }
 
                     if (node_obj.object.get("server")) |v| {
                         if (parseJsonString(v, ec.fieldPath("{s}.server", .{np}), ec)) |s| {
@@ -793,13 +819,18 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                         if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| frpc_node.enabled = b;
                     }
 
-                    if (!have_server) ec.add(ec.fieldPath("{s}.server", .{np}), .missing_field, "", "", "required field missing");
-                    if (!have_port) ec.add(ec.fieldPath("{s}.port", .{np}), .missing_field, "", "", "required field missing");
-                    if (!have_server or !have_port) {
+                    const valid_source = switch (frpc_node.source.mode) {
+                        .builtin => have_server and have_port,
+                        .external_file => std.mem.trim(u8, frpc_node.source.path, " \t\r\n").len != 0,
+                        .external_uci => std.mem.trim(u8, frpc_node.source.content, " \t\r\n").len != 0,
+                    };
+                    if (frpc_node.source.mode == .builtin and !have_server) ec.add(ec.fieldPath("{s}.server", .{np}), .missing_field, "", "", "required field missing");
+                    if (frpc_node.source.mode == .builtin and !have_port) ec.add(ec.fieldPath("{s}.port", .{np}), .missing_field, "", "", "required field missing");
+                    if (frpc_node.source.mode == .external_file and !valid_source) ec.add(ec.fieldPath("{s}.config_path", .{np}), .missing_field, "", "", "required for external file source");
+                    if (frpc_node.source.mode == .external_uci and !valid_source) ec.add(ec.fieldPath("{s}.config_content", .{np}), .missing_field, "", "", "required for UCI text source");
+                    if (!valid_source) {
                         // Clean up partial node
-                        if (have_server) a.free(frpc_node.server);
-                        if (frpc_node.token.len != 0) a.free(frpc_node.token);
-                        if (frpc_node.log_level.len != 0) a.free(frpc_node.log_level);
+                        frpc_node.deinit(a);
                         continue;
                     }
 
@@ -835,6 +866,31 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                     var frps_node = types.FrpsNode{
                         .enabled = true,
                     };
+
+                    if (node_obj.object.get("config_mode")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_mode", .{np}), ec)) |s| {
+                            frps_node.source.mode = types.FrpConfigMode.fromString(s) catch blk: {
+                                ec.add(ec.fieldPath("{s}.config_mode", .{np}), .enum_value_invalid, "builtin, external_file, or external_uci", s, "unsupported configuration source");
+                                break :blk frps_node.source.mode;
+                            };
+                        }
+                    }
+                    if (node_obj.object.get("config_format")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_format", .{np}), ec)) |s| {
+                            frps_node.source.format = types.FrpConfigFormat.fromString(s) catch blk: {
+                                ec.add(ec.fieldPath("{s}.config_format", .{np}), .enum_value_invalid, "toml, yaml, or json", s, "unsupported configuration format");
+                                break :blk frps_node.source.format;
+                            };
+                        }
+                    }
+                    if (node_obj.object.get("config_path")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_path", .{np}), ec)) |s|
+                            frps_node.source.path = types.dupeIfNonEmpty(a, s) catch "";
+                    }
+                    if (node_obj.object.get("config_content")) |v| {
+                        if (parseJsonString(v, ec.fieldPath("{s}.config_content", .{np}), ec)) |s|
+                            frps_node.source.content = types.dupeIfNonEmpty(a, s) catch "";
+                    }
 
                     // Accept both "bind_port" and "port" (FRP v1 naming)
                     if (node_obj.object.get("bind_port")) |v| {
@@ -899,7 +955,17 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
                         if (parseJsonBool(v, ec.fieldPath("{s}.enabled", .{np}), ec)) |b| frps_node.enabled = b;
                     }
 
-                    // bind_port is optional - FRP v1 defaults to 7000 if not specified
+                    const valid_source = switch (frps_node.source.mode) {
+                        .builtin => true,
+                        .external_file => std.mem.trim(u8, frps_node.source.path, " \t\r\n").len != 0,
+                        .external_uci => std.mem.trim(u8, frps_node.source.content, " \t\r\n").len != 0,
+                    };
+                    if (frps_node.source.mode == .external_file and !valid_source) ec.add(ec.fieldPath("{s}.config_path", .{np}), .missing_field, "", "", "required for external file source");
+                    if (frps_node.source.mode == .external_uci and !valid_source) ec.add(ec.fieldPath("{s}.config_content", .{np}), .missing_field, "", "", "required for UCI text source");
+                    if (!valid_source) {
+                        frps_node.deinit(a);
+                        continue;
+                    }
 
                     const key = a.dupe(u8, node_name) catch continue;
                     frps_nodes.put(key, frps_node) catch {};

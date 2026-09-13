@@ -87,7 +87,7 @@ pub const FrpcClient = struct {
         };
     }
 
-    pub fn initFromFile(allocator: std.mem.Allocator, path: []const u8, format: []const u8, client_name: []const u8) !FrpcClient {
+    pub fn initFromFile(allocator: std.mem.Allocator, path: []const u8, format: []const u8, client_name: []const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
         const c_path = try allocator.dupeZ(u8, path);
         defer allocator.free(c_path);
@@ -98,10 +98,10 @@ pub const FrpcClient = struct {
 
         const client_id = FrpcCreateClientFromFile(c_path.ptr, c_format.ptr, c_name.ptr);
         if (client_id < 0) return FrpcError.CreateClientFailed;
-        return .{ .id = client_id, .allocator = allocator, .use_encryption = false, .use_compression = false };
+        return .{ .id = client_id, .allocator = allocator, .use_encryption = use_encryption, .use_compression = use_compression };
     }
 
-    pub fn initFromContent(allocator: std.mem.Allocator, content: []const u8, format: []const u8, client_name: []const u8) !FrpcClient {
+    pub fn initFromContent(allocator: std.mem.Allocator, content: []const u8, format: []const u8, client_name: []const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
         const c_content = try allocator.dupeZ(u8, content);
         defer allocator.free(c_content);
@@ -112,7 +112,7 @@ pub const FrpcClient = struct {
 
         const client_id = FrpcCreateClientFromContent(c_content.ptr, c_format.ptr, c_name.ptr);
         if (client_id < 0) return FrpcError.CreateClientFailed;
-        return .{ .id = client_id, .allocator = allocator, .use_encryption = false, .use_compression = false };
+        return .{ .id = client_id, .allocator = allocator, .use_encryption = use_encryption, .use_compression = use_compression };
     }
 
     pub fn addTcpProxy(self: *FrpcClient, proxy_name: []const u8, local_ip: []const u8, local_port: u16, remote_port: u16) !void {

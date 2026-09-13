@@ -254,25 +254,19 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         h.shrinkRetainingCapacity(new_projects.len);
     }
 
-    // 5) Apply FRPC configuration. Any transition involving an external
-    // source rebuilds all clients so an unchanged file path is reread.
+    // 5) Rebuild all FRPC clients so source-file changes, node source changes,
+    // and project-generated mappings are applied consistently.
     if (build_options.frpc_mode) {
-        if (old_cfg.frpc_config_mode == .builtin and new_cfg.frpc_config_mode == .builtin) {
-            frpc_forward.flushAllClients();
-        } else {
-            frpc_forward.stopAll();
-            if (new_cfg.frpc_config_mode == .builtin) {
-                for (h.items) |handle| {
-                    if (!handle.cfg.enabled) continue;
-                    frpc_forward.startForwarding(alloc, handle, &new_cfg.frpc_nodes) catch |err| {
-                        std.log.warn("Reload: failed to rebuild FRPC project {d}: {any}", .{ handle.id + 1, err });
-                    };
-                }
-            }
-            frpc_forward.startConfiguredClients(alloc, new_cfg) catch |err| {
-                std.log.warn("Reload: failed to start configured FRPC clients: {any}", .{err});
+        frpc_forward.stopAll();
+        for (h.items) |handle| {
+            if (!handle.cfg.enabled) continue;
+            frpc_forward.startForwarding(alloc, handle, &new_cfg.frpc_nodes) catch |err| {
+                std.log.warn("Reload: failed to rebuild FRPC project {d}: {any}", .{ handle.id + 1, err });
             };
         }
+        frpc_forward.startConfiguredClients(alloc, &new_cfg.frpc_nodes) catch |err| {
+            std.log.warn("Reload: failed to start configured FRPC clients: {any}", .{err});
+        };
     }
 
     // 6) Refresh firewall rules
@@ -285,17 +279,10 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         };
     }
 
-    // 8) Reload FRPS configuration. An external file is always rebuilt so
+    // 8) Reload FRPS configuration. External nodes are always recreated so
     // `service portweaver reload` applies file changes at an unchanged path.
     if (build_options.frps_mode) {
-        if (old_cfg.frps_config_mode == .builtin and new_cfg.frps_config_mode == .builtin) {
-            reloadFrpsNodes(alloc, old_cfg, new_cfg);
-        } else {
-            frps_forward.stopAll();
-            frps_forward.startConfiguredServers(alloc, new_cfg) catch |err| {
-                std.log.warn("Reload: failed to start configured FRPS servers: {any}", .{err});
-            };
-        }
+        reloadFrpsNodes(alloc, old_cfg, new_cfg);
     }
 
     if (rathole_enabled) {
@@ -324,7 +311,7 @@ fn startForwardingForHandle(
         };
     }
 
-    if (build_options.frpc_mode and cfg.frpc_config_mode == .builtin) {
+    if (build_options.frpc_mode) {
         frpc_forward.startForwarding(alloc, handle, &cfg.frpc_nodes) catch |err| {
             std.log.err("Reload: failed to start FRPC for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
         };
@@ -406,7 +393,8 @@ fn reloadFrpsNodes(
         if (!new_node.enabled) continue;
 
         if (old_cfg.frps_nodes.get(name)) |old_node| {
-            if (old_node.eql(new_node)) continue;
+            // Rebuild external nodes on every reload so an unchanged path is reread.
+            if (old_node.eql(new_node) and new_node.source.mode == .builtin) continue;
             std.log.info("Reload: FRPS node {s} config changed, restarting", .{name});
         } else {
             std.log.info("Reload: adding new FRPS node {s}", .{name});

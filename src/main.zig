@@ -353,7 +353,7 @@ fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHan
     // 启动 FRPS 服务（如果启用）
     if (build_options.frps_mode) {
         std.log.info("Starting FRPS servers...", .{});
-        frps_forward.startConfiguredServers(allocator, cfg) catch |err| {
+        frps_forward.startConfiguredServers(allocator, &cfg.frps_nodes) catch |err| {
             std.log.warn("Failed to start configured FRPS servers: {any}", .{err});
         };
     }
@@ -467,7 +467,7 @@ fn startForwardingThreads(
         startForwarding(allocator, handle, cfg);
     }
     if (build_options.frpc_mode) {
-        frpc_forward.startConfiguredClients(allocator, cfg) catch |err| {
+        frpc_forward.startConfiguredClients(allocator, &cfg.frpc_nodes) catch |err| {
             std.log.warn("Failed to start configured FRPC clients: {any}", .{err});
         };
     }
@@ -493,7 +493,7 @@ fn startForwarding(
         };
     }
     // 启动 FRPC 转发（如果启用）
-    if (build_options.frpc_mode and cfg.frpc_config_mode == .builtin) {
+    if (build_options.frpc_mode) {
         frpc_forward.startForwarding(allocator, handle, &cfg.frpc_nodes) catch |err| {
             std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
             if (compat.isDebugBuild()) {

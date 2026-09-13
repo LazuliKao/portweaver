@@ -179,17 +179,19 @@ pub const WolTarget = struct {
 pub const FrpcNode = struct {
     /// 是否启用此规则
     enabled: bool = true,
-    server: []const u8,
-    port: u16,
+    server: []const u8 = "",
+    port: u16 = 0,
     token: []const u8 = "",
-    log_level: []const u8 = "info",
+    log_level: []const u8 = "",
     use_encryption: bool = true,
     use_compression: bool = true,
+    source: FrpNodeConfigSource = .{},
 
     pub fn deinit(self: *FrpcNode, allocator: std.mem.Allocator) void {
-        allocator.free(self.server);
+        if (self.server.len != 0) allocator.free(self.server);
         if (self.token.len != 0) allocator.free(self.token);
         if (self.log_level.len != 0) allocator.free(self.log_level);
+        self.source.deinit(allocator);
         self.* = undefined;
     }
 
@@ -200,7 +202,8 @@ pub const FrpcNode = struct {
             std.mem.eql(u8, a.token, b.token) and
             std.mem.eql(u8, a.log_level, b.log_level) and
             a.use_encryption == b.use_encryption and
-            a.use_compression == b.use_compression;
+            a.use_compression == b.use_compression and
+            a.source.eql(b.source);
     }
 };
 
@@ -239,6 +242,7 @@ pub const FrpsNode = struct {
     dashboard_user: ?[]const u8 = null,
     /// Dashboard 密码 (FRP v1: WebServer.Password)
     dashboard_pwd: ?[]const u8 = null,
+    source: FrpNodeConfigSource = .{},
 
     pub fn deinit(self: *FrpsNode, allocator: std.mem.Allocator) void {
         if (self.auth_token) |s| allocator.free(s);
@@ -248,6 +252,7 @@ pub const FrpsNode = struct {
         if (self.dashboard_addr) |s| allocator.free(s);
         if (self.dashboard_user) |s| allocator.free(s);
         if (self.dashboard_pwd) |s| allocator.free(s);
+        self.source.deinit(allocator);
         self.* = undefined;
     }
 
@@ -270,7 +275,8 @@ pub const FrpsNode = struct {
             eqlOptionalSlices(a.dashboard_addr, b.dashboard_addr) and
             a.dashboard_port == b.dashboard_port and
             eqlOptionalSlices(a.dashboard_user, b.dashboard_user) and
-            eqlOptionalSlices(a.dashboard_pwd, b.dashboard_pwd);
+            eqlOptionalSlices(a.dashboard_pwd, b.dashboard_pwd) and
+            a.source.eql(b.source);
     }
 };
 
@@ -451,6 +457,27 @@ pub const FrpConfigFormat = enum {
             .yaml => "yaml",
             .json => "json",
         };
+    }
+};
+
+/// Per-node FRP configuration source. Paths and UCI text are owned by the node.
+pub const FrpNodeConfigSource = struct {
+    mode: FrpConfigMode = .builtin,
+    format: FrpConfigFormat = .toml,
+    path: []const u8 = "",
+    content: []const u8 = "",
+
+    pub fn deinit(self: *FrpNodeConfigSource, allocator: std.mem.Allocator) void {
+        if (self.path.len != 0) allocator.free(self.path);
+        if (self.content.len != 0) allocator.free(self.content);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.mode == b.mode and
+            a.format == b.format and
+            std.mem.eql(u8, a.path, b.path) and
+            std.mem.eql(u8, a.content, b.content);
     }
 };
 
@@ -812,22 +839,6 @@ pub const Config = struct {
     use_nftables: bool = false,
     /// JSON 模式下是否启用配置文件监听自动重载（默认关闭）
     watch: bool = false,
-    /// FRPS 使用内置节点、外置文件或 UCI 内嵌文本配置。
-    frps_config_mode: FrpConfigMode = .builtin,
-    /// 外置 FRPS 配置的格式。
-    frps_config_format: FrpConfigFormat = .toml,
-    /// external_file 模式下的配置路径。由 Config 持有。
-    frps_config_path: []const u8 = "",
-    /// external_uci 模式下的原始 FRPS 配置。由 Config 持有。
-    frps_config_content: []const u8 = "",
-    /// FRPC 使用内置节点、外置文件或 UCI 内嵌文本配置。
-    frpc_config_mode: FrpConfigMode = .builtin,
-    /// 外置 FRPC 配置的格式。
-    frpc_config_format: FrpConfigFormat = .toml,
-    /// external_file 模式下的配置路径。由 Config 持有。
-    frpc_config_path: []const u8 = "",
-    /// external_uci 模式下的原始 FRPC 配置。由 Config 持有。
-    frpc_config_content: []const u8 = "",
     /// 外置 FRP 文件的可信根目录。null 使用 DEFAULT_FRP_CONFIG_ROOT。
     frp_config_root: ?[]const u8 = null,
     log_config: file_log.LogConfig,
@@ -849,10 +860,6 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         self.log_config.deinit(allocator);
-        if (self.frps_config_path.len != 0) allocator.free(self.frps_config_path);
-        if (self.frps_config_content.len != 0) allocator.free(self.frps_config_content);
-        if (self.frpc_config_path.len != 0) allocator.free(self.frpc_config_path);
-        if (self.frpc_config_content.len != 0) allocator.free(self.frpc_config_content);
         if (self.frp_config_root) |root| allocator.free(root);
 
         for (self.projects) |*p| p.deinit(allocator);
@@ -922,14 +929,6 @@ pub const Config = struct {
         return a.app_forward_loop_mode == b.app_forward_loop_mode and
             a.use_nftables == b.use_nftables and
             a.watch == b.watch and
-            a.frps_config_mode == b.frps_config_mode and
-            a.frps_config_format == b.frps_config_format and
-            std.mem.eql(u8, a.frps_config_path, b.frps_config_path) and
-            std.mem.eql(u8, a.frps_config_content, b.frps_config_content) and
-            a.frpc_config_mode == b.frpc_config_mode and
-            a.frpc_config_format == b.frpc_config_format and
-            std.mem.eql(u8, a.frpc_config_path, b.frpc_config_path) and
-            std.mem.eql(u8, a.frpc_config_content, b.frpc_config_content) and
             eqlOptionalString(a.frp_config_root, b.frp_config_root) and
             a.log_config.eql(b.log_config) and
             PortMapping.eqlSlice(Project, a.projects, b.projects) and

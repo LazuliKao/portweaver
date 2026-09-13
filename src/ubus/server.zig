@@ -1304,7 +1304,7 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
     }
 
     var clients_list: std.ArrayList(ClientSummaryInfo) = .empty;
-    if (build_options.frpc_mode and (reload.getConfig() orelse return error.InvalidValue).frpc_config_mode == .builtin) {
+    if (build_options.frpc_mode) {
         if (frpc_forward.getAllClientSummaries(allocator) catch null) |items| {
             defer frpc_forward.freeClientSummaries(allocator, items);
             for (items) |item| {
