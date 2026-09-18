@@ -663,7 +663,10 @@ fn ubusThread(state: *RuntimeState) void {
 
     std.log.info("ubus: server started successfully.", .{});
 
-    ubox.uloopRun(-1) catch {};
+    ubox.resetCancelled();
+    while (!ubox.isCancelled()) {
+        ubox.uloopRun(200) catch break;
+    }
 }
 
 // === RPC argument & response structures ===

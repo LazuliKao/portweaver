@@ -256,14 +256,9 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .reload => {
                     std.log.info("Configuration reload requested...", .{});
-                    if (build_options.ubus_mode) {
-                        ubus_server.stop();
-                    }
                     reload.apply();
                     if (build_options.ubus_mode) {
-                        ubus_server.start(allocator, &handles) catch |err| {
-                            std.log.warn("Failed to restart ubus server after reload: {any}", .{err});
-                        };
+                        ubus_server.notifyReload();
                     }
                 },
             }

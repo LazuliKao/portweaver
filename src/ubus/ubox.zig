@@ -177,3 +177,13 @@ pub fn uloopCancel() !void {
     const ptr = try loadFunction(uloop_cancelled_ptr, "uloop_cancelled", &ptr_uloop_cancelled);
     ptr.* = true;
 }
+
+pub fn isCancelled() bool {
+    const ptr = loadFunction(uloop_cancelled_ptr, "uloop_cancelled", &ptr_uloop_cancelled) catch return true;
+    return ptr.*;
+}
+
+pub fn resetCancelled() void {
+    const ptr = loadFunction(uloop_cancelled_ptr, "uloop_cancelled", &ptr_uloop_cancelled) catch return;
+    ptr.* = false;
+}
