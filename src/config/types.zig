@@ -796,6 +796,11 @@ pub const DdnsConfig = struct {
     /// Webhook 请求头
     webhook_headers: []const u8 = "",
 
+    /// Returns an independent snapshot. The caller owns it and must call deinit.
+    pub fn clone(self: DdnsConfig, allocator: std.mem.Allocator) !DdnsConfig {
+        return clone_ddns_fields(DdnsConfig, self, allocator);
+    }
+
     pub fn deinit(self: *DdnsConfig, allocator: std.mem.Allocator) void {
         if (self.name.len != 0) allocator.free(self.name);
         if (self.dns_provider.len != 0) allocator.free(self.dns_provider);
@@ -830,6 +835,51 @@ pub const DdnsConfig = struct {
             std.mem.eql(u8, a.webhook_headers, b.webhook_headers);
     }
 };
+
+// DDNS structs contain scalars, strings and nested DDNS structs only. Starting
+// from defaults makes partially cloned snapshots safe to destroy on OOM.
+fn clone_ddns_fields(comptime T: type, source: T, allocator: std.mem.Allocator) !T {
+    var result: T = .{};
+    errdefer result.deinit(allocator);
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        @field(result, field.name) = if (field.type == []const u8)
+            try allocator.dupe(u8, @field(source, field.name))
+        else if (@typeInfo(field.type) == .@"struct")
+            try clone_ddns_fields(field.type, @field(source, field.name), allocator)
+        else
+            @field(source, field.name);
+    }
+    return result;
+}
+
+fn test_ddns_snapshot(allocator: std.mem.Allocator) !void {
+    const source: DdnsConfig = .{
+        .name = "dghome",
+        .dns_provider = "alidns",
+        .dns_id = "id",
+        .dns_secret = "secret",
+        .dns_ext_param = "extra",
+        .ipv4 = .{ .url = "url4", .net_interface = "eth0", .cmd = "cmd4", .domains = "a.example" },
+        .ipv6 = .{ .enable = true, .url = "url6", .net_interface = "eth1", .cmd = "cmd6", .reg = "regex", .domains = "b.example" },
+        .username = "user",
+        .password = "password",
+        .webhook_url = "hook",
+        .webhook_body = "body",
+        .webhook_headers = "headers",
+    };
+    var first = try source.clone(allocator);
+    defer first.deinit(allocator);
+    var second = try first.clone(allocator);
+    defer second.deinit(allocator);
+    try std.testing.expect(source.eql(second));
+    try std.testing.expect(first.name.ptr != second.name.ptr);
+    try std.testing.expect(first.ipv4.domains.ptr != second.ipv4.domains.ptr);
+    try std.testing.expect(first.ipv6.reg.ptr != second.ipv6.reg.ptr);
+}
+
+test "DDNS snapshot: independent nested strings and allocation failure cleanup" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_ddns_snapshot, .{});
+}
 
 pub const Config = struct {
     pub const DEFAULT_FRP_CONFIG_ROOT = "/etc/portweaver";

@@ -39,6 +39,7 @@ pub const DdnsInfo = struct {
 
 const InstanceHolder = struct {
     instance: libddns.DdnsInstance,
+    // Immutable owned snapshot: workers never borrow the reload configuration.
     config: types.DdnsConfig,
     thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -59,8 +60,6 @@ const InstanceHolder = struct {
         }
         self.instance.deinit();
         self.config.deinit(allocator);
-        if (self.last_ip.len > 0) allocator.free(self.last_ip);
-        if (self.last_message.len > 0) allocator.free(self.last_message);
         self.* = undefined;
     }
 };
@@ -333,24 +332,20 @@ fn createInstance(
 
     holder.* = .{
         .instance = instance,
-        .config = config,
+        .config = try config.clone(allocator),
     };
 
     return holder;
 }
 
-pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !void {
+pub fn applyConfig(allocator: std.mem.Allocator, configs: []const types.DdnsConfig) !void {
     instances_lock.lockUncancelable(compat.io());
     defer instances_lock.unlock(compat.io());
 
     var map = try getInstanceMap(allocator);
 
-    // Build a set of ALL new config names (regardless of enabled status)
-    var new_names = std.StringHashMap(void).init(allocator);
-    defer new_names.deinit();
-    for (configs) |cfg| {
-        try new_names.put(cfg.name, {});
-    }
+    // Instance allocations must use the allocator that owns the map.
+    const owner = instances_allocator.?;
 
     // Remove instances not in new config or disabled in new config
     var to_remove = std.array_list.Managed([]const u8).init(allocator);
@@ -378,9 +373,9 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !v
     for (to_remove.items) |name| {
         if (map.fetchRemove(name)) |kv| {
             std.log.info("[DDNS] Removing instance: {s} (config disabled or removed)", .{name});
-            kv.value.deinit(allocator);
-            allocator.destroy(kv.value);
-            allocator.free(kv.key);
+            kv.value.deinit(owner);
+            owner.destroy(kv.value);
+            owner.free(kv.key);
         }
     }
 
@@ -394,25 +389,31 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []types.DdnsConfig) !v
         if (map.get(cfg.name)) |existing| {
             if (!existing.config.eql(cfg)) {
                 std.log.info("[DDNS] Config changed for {s}, restarting instance", .{cfg.name});
-                const kv = map.fetchRemove(cfg.name).?;
-                kv.value.deinit(allocator);
-                allocator.destroy(kv.value);
-                allocator.free(kv.key);
-                const holder = try createInstance(allocator, cfg);
-                const key = try allocator.dupe(u8, cfg.name);
-                try map.put(key, holder);
+                // Prepare the replacement before stopping the working instance.
+                const holder = try createInstance(owner, cfg);
+                errdefer {
+                    holder.deinit(owner);
+                    owner.destroy(holder);
+                }
                 holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
+                map.getPtr(cfg.name).?.* = holder;
+                existing.deinit(owner);
+                owner.destroy(existing);
             } else {
                 std.log.debug("[DDNS] Instance {s} already exists (unchanged)", .{cfg.name});
             }
         } else {
             std.log.info("[DDNS] Creating new instance: {s}", .{cfg.name});
-            const holder = try createInstance(allocator, cfg);
-            const key = try allocator.dupe(u8, cfg.name);
-            try map.put(key, holder);
-
-            // Start update thread
+            const holder = try createInstance(owner, cfg);
+            errdefer {
+                holder.deinit(owner);
+                owner.destroy(holder);
+            }
+            const key = try owner.dupe(u8, cfg.name);
+            errdefer owner.free(key);
+            try map.ensureUnusedCapacity(1);
             holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
+            map.putAssumeCapacity(key, holder);
         }
     }
 }
@@ -519,18 +520,70 @@ pub fn clearInstanceLogs(name: []const u8) !void {
     holder.instance.clearLogs();
 }
 
+test "DDNS reload: snapshots survive source destruction, replacement failure, disable and removal" {
+    const alloc = std.testing.allocator;
+    defer deinit(alloc);
+    // No domains or enabled address families: exercise the real library and
+    // worker lifecycle without contacting a DNS provider.
+    const source: types.DdnsConfig = .{
+        .name = "reload-test",
+        .dns_provider = "alidns",
+        .ipv4 = .{ .enable = false },
+        .ipv6 = .{ .enable = false },
+    };
+    {
+        var initial = try source.clone(alloc);
+        defer initial.deinit(alloc);
+        try applyConfig(alloc, &.{initial});
+    }
+    const original = instances.?.get(source.name).?;
+    for (0..8) |_| {
+        var next = try source.clone(alloc);
+        defer next.deinit(alloc);
+        try applyConfig(alloc, &.{next});
+        try std.testing.expect(instances.?.get(source.name).? == original);
+        try std.testing.expect(original.config.eql(source));
+    }
+
+    var invalid = source;
+    invalid.dns_provider = "invalid-provider";
+    try std.testing.expectError(error.UnsupportedProvider, applyConfig(alloc, &.{invalid}));
+    try std.testing.expect(instances.?.get(source.name).? == original);
+    try std.testing.expect(original.config.eql(source));
+
+    invalid.name = "broken-addition";
+    try std.testing.expectError(error.UnsupportedProvider, applyConfig(alloc, &.{ invalid, source }));
+    try std.testing.expect(instances.?.get(source.name).? == original);
+    try std.testing.expectEqual(@as(u32, 1), instances.?.count());
+
+    var changed = source;
+    changed.ttl += 1;
+    try applyConfig(alloc, &.{changed});
+    try std.testing.expect(instances.?.get(source.name).?.config.eql(changed));
+    changed.enabled = false;
+    try applyConfig(alloc, &.{changed});
+    try std.testing.expectEqual(@as(u32, 0), instances.?.count());
+    changed.enabled = true;
+    try applyConfig(alloc, &.{changed});
+    try applyConfig(alloc, &.{});
+    try std.testing.expectEqual(@as(u32, 0), instances.?.count());
+}
+
 pub fn deinit(allocator: std.mem.Allocator) void {
+    _ = allocator;
     instances_lock.lockUncancelable(compat.io());
     defer instances_lock.unlock(compat.io());
 
     if (instances) |*map| {
+        const owner = instances_allocator.?;
         var it = map.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.*.deinit(allocator);
-            allocator.destroy(entry.value_ptr.*);
-            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.deinit(owner);
+            owner.destroy(entry.value_ptr.*);
+            owner.free(entry.key_ptr.*);
         }
         map.deinit();
         instances = null;
+        instances_allocator = null;
     }
 }

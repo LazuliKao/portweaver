@@ -102,6 +102,9 @@ pub fn deinit() void {
         }
         current_cfg = null;
     }
+    handles = null;
+    allocator = null;
+    config_path = null;
 }
 
 /// Get the current configuration. Returns null if not initialized.
@@ -176,6 +179,15 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     const new_projects = new_cfg.projects;
     const common = @min(old_projects.len, new_projects.len);
 
+    // Allocate every additional handle before touching live state. Otherwise an
+    // OOM could commit a config with more projects than handles and crash the
+    // next reload. Prepared handles borrow new_cfg until it is adopted below.
+    prepare_added_handles(alloc, h, new_cfg) catch |err| {
+        std.log.warn("Reload: unable to prepare projects, keeping current config: {any}", .{err});
+        new_cfg.deinit(alloc);
+        return;
+    };
+
     // 1) Restart changed projects (index-aligned diff)
     for (0..common) |i| {
         const handle = h.items[i];
@@ -209,27 +221,11 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         }
     }
 
-    // 2) Update cfg pointers for unchanged projects beyond common range
-    for (0..common) |i| {
-        // Already handled above (either updated cfg or restarted)
-        _ = i;
-    }
-
     // 3) Add new projects
     for (common..new_projects.len) |i| {
         std.log.info("Reload: adding new project {d} ({s})", .{ i + 1, new_projects[i].remark });
-        const new_handle = alloc.create(project_status.ProjectHandle) catch |err| {
-            std.log.err("Reload: failed to allocate project {d}: {any}", .{ i + 1, err });
-            continue;
-        };
-        new_handle.* = project_status.ProjectHandle.init(alloc, i, new_projects[i], new_cfg.use_nftables);
-        h.append(new_handle) catch |err| {
-            std.log.err("Reload: failed to add project {d}: {any}", .{ i + 1, err });
-            new_handle.deinit();
-            alloc.destroy(new_handle);
-            continue;
-        };
-        const handle = new_handle;
+        const handle = h.items[i];
+        changed += 1;
 
         if (!new_projects[i].enabled) {
             handle.setDisabled();
@@ -238,7 +234,6 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         }
 
         startForwardingForHandle(alloc, handle, new_cfg);
-        changed += 1;
         event_log.logEventFmt(.project_started, @intCast(i), "Project {d} added and enabled", .{i + 1});
     }
 
@@ -249,6 +244,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
             std.log.info("Reload: removing project {d} ({s})", .{ i + 1, handle.cfg.remark });
             handle.deinit();
             alloc.destroy(handle);
+            changed += 1;
             event_log.logEventFmt(.project_stopped, @intCast(i), "Project {d} removed", .{i + 1});
         }
         h.shrinkRetainingCapacity(new_projects.len);
@@ -292,14 +288,36 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     }
 
     // 9) Swap configs: free old, adopt new
+    const watch_changed = old_cfg.watch != new_cfg.watch;
+    if (watch_changed) stopWatcher();
     old_cfg.deinit(alloc);
     current_cfg = new_cfg.*;
+    if (watch_changed) startWatcher();
 
     event_log.logEventFmt(.info, -1, "Config reloaded: {d} project(s) changed", .{changed});
     std.log.info("Reload complete: {d} project(s) changed", .{changed});
 }
 
-/// Start both application-layer and FRPC forwarding for a handle.
+/// Append additional handles atomically; on failure the original list is intact.
+fn prepare_added_handles(alloc: std.mem.Allocator, h: *project_status.ProjectHandleList, cfg: *const config.Config) !void {
+    const original_len = h.items.len;
+    if (cfg.projects.len <= original_len) return;
+    try h.ensureTotalCapacity(cfg.projects.len);
+    errdefer {
+        for (h.items[original_len..]) |handle| {
+            handle.deinit();
+            alloc.destroy(handle);
+        }
+        h.shrinkRetainingCapacity(original_len);
+    }
+    for (original_len..cfg.projects.len) |i| {
+        const handle = try alloc.create(project_status.ProjectHandle);
+        handle.* = project_status.ProjectHandle.init(alloc, i, cfg.projects[i], cfg.use_nftables);
+        h.appendAssumeCapacity(handle);
+    }
+}
+
+/// Start application forwarding; FRPC is rebuilt once after all project changes.
 fn startForwardingForHandle(
     alloc: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
@@ -311,11 +329,7 @@ fn startForwardingForHandle(
         };
     }
 
-    if (build_options.frpc_mode) {
-        frpc_forward.startForwarding(alloc, handle, &cfg.frpc_nodes) catch |err| {
-            std.log.err("Reload: failed to start FRPC for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-        };
-    }
+    _ = cfg;
 }
 
 /// Refresh firewall rules based on the new configuration.
@@ -444,6 +458,37 @@ fn makeTestConfig(alloc: std.mem.Allocator, projects: []const types.Project) !ty
         .log_config = .{ .enabled = false, .file_path = "", .max_size = 0, .max_files = 0 },
     };
 }
+
+fn makeTestDdns(alloc: std.mem.Allocator, name: []const u8, provider: []const u8) !types.DdnsConfig {
+    const cfg: types.DdnsConfig = .{
+        .enabled = true,
+        .name = name,
+        .dns_provider = provider,
+        .dns_id = "id123",
+        .dns_secret = "secret123",
+        .ttl = 300,
+        // Exercise real instance lifetimes without network-dependent DNS updates.
+        .ipv4 = .{ .enable = false },
+        .ipv6 = .{ .enable = false },
+    };
+    return cfg.clone(alloc);
+}
+
+fn makeTestConfigWithDdns(alloc: std.mem.Allocator, projects: []const types.Project, ddns: []const types.DdnsConfig) !types.Config {
+    return types.Config{
+        .projects = try alloc.dupe(types.Project, projects),
+        .frpc_nodes = std.StringHashMap(types.FrpcNode).init(alloc),
+        .frps_nodes = std.StringHashMap(types.FrpsNode).init(alloc),
+        .rathole_client_nodes = std.StringHashMap(types.RatholeClientNode).init(alloc),
+        .rathole_client_services = try alloc.alloc(types.RatholeClientService, 0),
+        .rathole_server_nodes = std.StringHashMap(types.RatholeServerNode).init(alloc),
+        .rathole_server_services = try alloc.alloc(types.RatholeServerService, 0),
+        .wol_targets = std.StringHashMap(types.WolTarget).init(alloc),
+        .ddns_configs = try alloc.dupe(types.DdnsConfig, ddns),
+        .log_config = .{ .enabled = false, .file_path = "", .max_size = 0, .max_files = 0 },
+    };
+}
+
 test "config eql: identical configs are equal" {
     const alloc = std.testing.allocator;
     const p1 = try makeTestProject(alloc, "test", 8080);
@@ -575,4 +620,239 @@ test "config eql: watch field change detected" {
 
     c2.watch = true;
     try std.testing.expect(!c1.eql(c2));
+}
+
+test "reload: simulate project toggle sequence (close -> open -> close) under multiple forwards" {
+    const alloc = std.testing.allocator;
+
+    const p1_init = try makeTestProject(alloc, "RDP", 3389);
+    const p2_init = try makeTestProject(alloc, "HTTPS", 443);
+
+    var ddns_slice: []types.DdnsConfig = try alloc.alloc(types.DdnsConfig, 0);
+    if (build_options.ddns_mode) {
+        alloc.free(ddns_slice);
+        const d = try makeTestDdns(alloc, "dghome", "alidns");
+        ddns_slice = try alloc.dupe(types.DdnsConfig, &.{d});
+    }
+
+    var h_list = project_status.ProjectHandleList.init(alloc);
+    defer {
+        for (h_list.items) |h| {
+            h.deinit();
+            alloc.destroy(h);
+        }
+        h_list.deinit();
+    }
+
+    const h1 = try alloc.create(project_status.ProjectHandle);
+    h1.* = project_status.ProjectHandle.init(alloc, 0, p1_init, false);
+    try h_list.append(h1);
+
+    const h2 = try alloc.create(project_status.ProjectHandle);
+    h2.* = project_status.ProjectHandle.init(alloc, 1, p2_init, false);
+    try h_list.append(h2);
+
+    const cfg0 = try makeTestConfigWithDdns(alloc, &.{ p1_init, p2_init }, ddns_slice);
+    alloc.free(ddns_slice);
+
+    if (build_options.ddns_mode) {
+        try ddns_manager.applyConfig(alloc, cfg0.ddns_configs);
+    }
+
+    init(alloc, &h_list, cfg0, .json, null);
+    defer {
+        if (build_options.ddns_mode) {
+            ddns_manager.deinit(alloc);
+        }
+        deinit();
+    }
+
+    // Reload 1: Disable Project 1 (close) and apply
+    {
+        var p1_step1 = try makeTestProject(alloc, "RDP", 3389);
+        p1_step1.enabled = false;
+        const p2_step1 = try makeTestProject(alloc, "HTTPS", 443);
+
+        var d_step1: []types.DdnsConfig = try alloc.alloc(types.DdnsConfig, 0);
+        if (build_options.ddns_mode) {
+            alloc.free(d_step1);
+            const d = try makeTestDdns(alloc, "dghome", "alidns");
+            d_step1 = try alloc.dupe(types.DdnsConfig, &.{d});
+        }
+        var cfg1 = try makeTestConfigWithDdns(alloc, &.{ p1_step1, p2_step1 }, d_step1);
+        alloc.free(d_step1);
+
+        applyConfigDiff(alloc, &cfg1);
+
+        try std.testing.expectEqual(false, h_list.items[0].cfg.enabled);
+        try std.testing.expectEqual(true, h_list.items[1].cfg.enabled);
+    }
+
+    // Reload 2: Enable Project 1 (open) and apply
+    {
+        var p1_step2 = try makeTestProject(alloc, "RDP", 3389);
+        p1_step2.enabled = true;
+        const p2_step2 = try makeTestProject(alloc, "HTTPS", 443);
+
+        var d_step2: []types.DdnsConfig = try alloc.alloc(types.DdnsConfig, 0);
+        if (build_options.ddns_mode) {
+            alloc.free(d_step2);
+            const d = try makeTestDdns(alloc, "dghome", "alidns");
+            d_step2 = try alloc.dupe(types.DdnsConfig, &.{d});
+        }
+        var cfg2 = try makeTestConfigWithDdns(alloc, &.{ p1_step2, p2_step2 }, d_step2);
+        alloc.free(d_step2);
+
+        applyConfigDiff(alloc, &cfg2);
+
+        try std.testing.expectEqual(true, h_list.items[0].cfg.enabled);
+        try std.testing.expectEqual(true, h_list.items[1].cfg.enabled);
+    }
+
+    // Reload 3: Disable Project 1 again (close) and apply
+    {
+        var p1_step3 = try makeTestProject(alloc, "RDP", 3389);
+        p1_step3.enabled = false;
+        const p2_step3 = try makeTestProject(alloc, "HTTPS", 443);
+
+        var d_step3: []types.DdnsConfig = try alloc.alloc(types.DdnsConfig, 0);
+        if (build_options.ddns_mode) {
+            alloc.free(d_step3);
+            const d = try makeTestDdns(alloc, "dghome", "alidns");
+            d_step3 = try alloc.dupe(types.DdnsConfig, &.{d});
+        }
+        var cfg3 = try makeTestConfigWithDdns(alloc, &.{ p1_step3, p2_step3 }, d_step3);
+        alloc.free(d_step3);
+
+        applyConfigDiff(alloc, &cfg3);
+
+        try std.testing.expectEqual(false, h_list.items[0].cfg.enabled);
+        try std.testing.expectEqual(true, h_list.items[1].cfg.enabled);
+    }
+}
+
+test "reload: add, reorder, remove, empty and re-add projects across independent snapshots" {
+    const alloc = std.testing.allocator;
+    var list = project_status.ProjectHandleList.init(alloc);
+    init(alloc, &list, try makeTestConfig(alloc, &.{}), .json, null);
+    defer {
+        for (list.items) |handle| {
+            handle.deinit();
+            alloc.destroy(handle);
+        }
+        list.deinit();
+        deinit();
+    }
+    const scenarios = [_][]const []const u8{
+        &.{ "RDP", "HTTPS" },
+        &.{ "RDP", "HTTPS" }, // equal data with new allocations
+        &.{ "HTTPS", "RDP", "extra" },
+        &.{"RDP"},
+        &.{},
+        &.{ "new", "HTTPS" },
+    };
+    for (scenarios) |names| {
+        var next = try makeTestConfig(alloc, &.{});
+        alloc.free(next.projects);
+        next.projects = try alloc.alloc(types.Project, names.len);
+        for (names, 0..) |name, i| {
+            next.projects[i] = try makeTestProject(alloc, name, @intCast(8000 + i));
+            next.projects[i].enabled = false;
+        }
+        applyConfigDiff(alloc, &next);
+        try std.testing.expectEqual(names.len, list.items.len);
+        try std.testing.expectEqual(names.len, getConfig().?.projects.len);
+        for (names, list.items, 0..) |name, handle, i| {
+            try std.testing.expectEqual(i, handle.id);
+            try std.testing.expectEqualStrings(name, handle.cfg.remark);
+            try std.testing.expectEqual(project_status.StartupStatus.disabled, handle.startup_status);
+        }
+    }
+}
+
+fn test_prepare_handles_failure(alloc: std.mem.Allocator) !void {
+    const config_alloc = std.testing.allocator;
+    const p = try makeTestProject(config_alloc, "existing", 8000);
+    const q = try makeTestProject(config_alloc, "added", 8001);
+    var cfg = try makeTestConfig(config_alloc, &.{ p, q });
+    defer cfg.deinit(config_alloc);
+    var list = project_status.ProjectHandleList.init(alloc);
+    defer {
+        for (list.items) |handle| {
+            handle.deinit();
+            alloc.destroy(handle);
+        }
+        list.deinit();
+    }
+    // A failure at either allocation must leave no partially appended handles.
+    prepare_added_handles(alloc, &list, &cfg) catch |err| {
+        std.log.debug("Expected handle preparation failure: {any}", .{err});
+        try std.testing.expectEqual(@as(usize, 0), list.items.len);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+}
+
+test "reload: handle preparation rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_prepare_handles_failure, .{});
+}
+
+test "reload: repeated TCP and UDP toggles preserve the other project's live listeners" {
+    const alloc = std.testing.allocator;
+    var list = project_status.ProjectHandleList.init(alloc);
+    init(alloc, &list, try makeTestConfig(alloc, &.{}), .json, null);
+    defer {
+        for (list.items) |handle| {
+            handle.deinit();
+            alloc.destroy(handle);
+        }
+        list.deinit();
+        deinit();
+    }
+    var stable_tcp: ?*app_forward.TcpForwarder = null;
+    var stable_udp: ?*app_forward.UdpForwarder = null;
+    for ([_]bool{ true, false, true, false, true, true, false }) |enabled| {
+        var first = try makeTestProject(alloc, "RDP", 48761);
+        first.enable_app_forward = true;
+        first.enabled = enabled;
+        var second = try makeTestProject(alloc, "HTTPS", 48762);
+        second.enable_app_forward = true;
+        var next = try makeTestConfig(alloc, &.{ first, second });
+        applyConfigDiff(alloc, &next);
+        const changing = list.items[0];
+        const stable = list.items[1];
+        try std.testing.expectEqual(@as(usize, if (enabled) 1 else 0), changing.tcp_forwarders.items.len);
+        try std.testing.expectEqual(@as(usize, if (enabled) 1 else 0), changing.udp_forwarders.items.len);
+        try std.testing.expectEqual(project_status.StartupStatus.success, stable.startup_status);
+        try std.testing.expectEqual(@as(usize, 1), stable.tcp_forwarders.items.len);
+        try std.testing.expectEqual(@as(usize, 1), stable.udp_forwarders.items.len);
+        if (stable_tcp) |tcp| try std.testing.expect(tcp == stable.tcp_forwarders.items[0]);
+        if (stable_udp) |udp| try std.testing.expect(udp == stable.udp_forwarders.items[0]);
+        stable_tcp = stable.tcp_forwarders.items[0];
+        stable_udp = stable.udp_forwarders.items[0];
+    }
+}
+
+test "reload: watch setting starts and stops the file watcher" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "reload.json", .{});
+    file.close(std.testing.io);
+    const path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/reload.json", .{tmp.sub_path});
+    defer alloc.free(path);
+    var list = project_status.ProjectHandleList.init(alloc);
+    defer list.deinit();
+    init(alloc, &list, try makeTestConfig(alloc, &.{}), .json, path);
+    defer deinit();
+    try std.testing.expect(watcher_handle == null);
+    for ([_]bool{ true, true, false, true, false }) |watch| {
+        var next = try makeTestConfig(alloc, &.{});
+        next.watch = watch;
+        const previous_watcher = watcher_handle;
+        const previous_watch = current_cfg.?.watch;
+        applyConfigDiff(alloc, &next);
+        try std.testing.expectEqual(watch, watcher_handle != null);
+        if (previous_watch == watch) try std.testing.expect(previous_watcher == watcher_handle);
+    }
 }
