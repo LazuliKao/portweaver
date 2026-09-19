@@ -271,9 +271,24 @@ fn parseRatholeClientNode(allocator: std.mem.Allocator, sec: uci.UciSection) !st
         } else if (std.mem.eql(u8, option_name, "noise_remote_public_key")) {
             if (node.noise_remote_public_key.len != 0) allocator.free(node.noise_remote_public_key);
             node.noise_remote_public_key = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "config_mode")) {
+            node.source.mode = try types.RatholeConfigMode.fromString(value);
+        } else if (std.mem.eql(u8, option_name, "config_path")) {
+            const path = try types.dupeIfNonEmpty(allocator, value);
+            if (node.source.path.len != 0) allocator.free(node.source.path);
+            node.source.path = path;
+        } else if (std.mem.eql(u8, option_name, "config_content")) {
+            const content = try types.dupeIfNonEmpty(allocator, value);
+            if (node.source.content.len != 0) allocator.free(node.source.content);
+            node.source.content = content;
         }
     }
-    if (name.len == 0 or node.remote_addr.len == 0) return types.ConfigError.MissingField;
+    const valid_source = switch (node.source.mode) {
+        .builtin => node.remote_addr.len != 0,
+        .external_file => std.mem.trim(u8, node.source.path, " \t\r\n").len != 0,
+        .external_uci => std.mem.trim(u8, node.source.content, " \t\r\n").len != 0,
+    };
+    if (name.len == 0 or !valid_source) return types.ConfigError.MissingField;
     return .{ .name = name, .node = node };
 }
 
@@ -305,9 +320,24 @@ fn parseRatholeServerNode(allocator: std.mem.Allocator, sec: uci.UciSection) !st
         } else if (std.mem.eql(u8, option_name, "noise_remote_public_key")) {
             if (node.noise_remote_public_key.len != 0) allocator.free(node.noise_remote_public_key);
             node.noise_remote_public_key = try types.dupeIfNonEmpty(allocator, value);
+        } else if (std.mem.eql(u8, option_name, "config_mode")) {
+            node.source.mode = try types.RatholeConfigMode.fromString(value);
+        } else if (std.mem.eql(u8, option_name, "config_path")) {
+            const path = try types.dupeIfNonEmpty(allocator, value);
+            if (node.source.path.len != 0) allocator.free(node.source.path);
+            node.source.path = path;
+        } else if (std.mem.eql(u8, option_name, "config_content")) {
+            const content = try types.dupeIfNonEmpty(allocator, value);
+            if (node.source.content.len != 0) allocator.free(node.source.content);
+            node.source.content = content;
         }
     }
-    if (name.len == 0 or node.bind_addr.len == 0) return types.ConfigError.MissingField;
+    const valid_source = switch (node.source.mode) {
+        .builtin => node.bind_addr.len != 0,
+        .external_file => std.mem.trim(u8, node.source.path, " \t\r\n").len != 0,
+        .external_uci => std.mem.trim(u8, node.source.content, " \t\r\n").len != 0,
+    };
+    if (name.len == 0 or !valid_source) return types.ConfigError.MissingField;
     return .{ .name = name, .node = node };
 }
 
@@ -367,6 +397,16 @@ fn parseRatholeServerService(allocator: std.mem.Allocator, sec: uci.UciSection) 
     service.bind_address = try allocator.dupe(u8, std.mem.trim(u8, bind_address, " \t\r\n"));
     service.bind_port = bind_port;
     return service;
+}
+
+fn ratholeServiceNode(sec: uci.UciSection) []const u8 {
+    var options = sec.options();
+    while (options.next()) |option| {
+        if (option.isString() and std.mem.eql(u8, uci.cStr(option.name()), "node")) {
+            return uci.cStr(option.getString());
+        }
+    }
+    return "";
 }
 
 /// Load projects from a UCI config package (e.g. `/etc/config/portweaver`).
@@ -505,6 +545,10 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     var rathole_client_service_sections = uci.sections(pkg);
     while (rathole_client_service_sections.next()) |sec| {
         if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_client_service")) continue;
+        if (rathole_client_nodes.get(ratholeServiceNode(sec))) |node| {
+            // External TOML owns services, including retained incomplete UCI rows.
+            if (node.source.mode != .builtin) continue;
+        }
         try rathole_client_services_list.append(try parseRatholeClientService(allocator, sec, list.items));
     }
 
@@ -514,6 +558,10 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     var rathole_server_service_sections = uci.sections(pkg);
     while (rathole_server_service_sections.next()) |sec| {
         if (!std.mem.eql(u8, uci.cStr(sec.sectionType()), "rathole_server_service")) continue;
+        if (rathole_server_nodes.get(ratholeServiceNode(sec))) |node| {
+            // External TOML owns services, including retained incomplete UCI rows.
+            if (node.source.mode != .builtin) continue;
+        }
         try rathole_server_services_list.append(try parseRatholeServerService(allocator, sec));
     }
 

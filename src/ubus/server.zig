@@ -255,6 +255,23 @@ const write_frp_config_policy = [_]c.blobmsg_policy{
     .{ .name = "reload", .type = c.BLOBMSG_TYPE_BOOL },
 };
 
+const read_rathole_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "mode", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "path", .type = c.BLOBMSG_TYPE_STRING },
+};
+
+const validate_rathole_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "mode", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "content", .type = c.BLOBMSG_TYPE_STRING },
+};
+
+const write_rathole_config_policy = [_]c.blobmsg_policy{
+    .{ .name = "mode", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "path", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "content", .type = c.BLOBMSG_TYPE_STRING },
+    .{ .name = "reload", .type = c.BLOBMSG_TYPE_BOOL },
+};
+
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
@@ -263,6 +280,9 @@ const method_names = struct {
     pub const read_frp_config: [:0]const u8 = "read_frp_config";
     pub const validate_frp_config: [:0]const u8 = "validate_frp_config";
     pub const write_frp_config: [:0]const u8 = "write_frp_config";
+    pub const read_rathole_config: [:0]const u8 = "read_rathole_config";
+    pub const validate_rathole_config: [:0]const u8 = "validate_rathole_config";
+    pub const write_rathole_config: [:0]const u8 = "write_rathole_config";
     pub const get_frpc_info: [:0]const u8 = "get_frpc_info";
     pub const get_frpc_proxy_stats: [:0]const u8 = "get_frpc_proxy_stats";
     pub const clear_frpc_logs: [:0]const u8 = "clear_frpc_logs";
@@ -636,6 +656,9 @@ fn ubusThread(state: *RuntimeState) void {
         .{ .name = "get_rathole_status", .handler = wrapHandler(getRatholeStatus, void, null), .mask = 0, .tags = 0, .policy = null, .n_policy = 0 },
         .{ .name = "get_rathole_info", .handler = wrapHandler(getRatholeInfo, RatholeArgs, &rathole_policy), .mask = 0, .tags = 0, .policy = &rathole_policy, .n_policy = rathole_policy.len },
         .{ .name = "clear_rathole_logs", .handler = wrapHandler(clearRatholeLogs, RatholeArgs, &rathole_policy), .mask = 0, .tags = 0, .policy = &rathole_policy, .n_policy = rathole_policy.len },
+        .{ .name = method_names.read_rathole_config, .handler = wrapHandler(readRatholeConfig, ReadRatholeConfigArgs, &read_rathole_config_policy), .mask = 0, .tags = 0, .policy = &read_rathole_config_policy, .n_policy = @intCast(read_rathole_config_policy.len) },
+        .{ .name = method_names.validate_rathole_config, .handler = wrapHandler(validateRatholeConfig, ValidateRatholeConfigArgs, &validate_rathole_config_policy), .mask = 0, .tags = 0, .policy = &validate_rathole_config_policy, .n_policy = @intCast(validate_rathole_config_policy.len) },
+        .{ .name = method_names.write_rathole_config, .handler = wrapHandler(writeRatholeConfig, WriteRatholeConfigArgs, &write_rathole_config_policy), .mask = 0, .tags = 0, .policy = &write_rathole_config_policy, .n_policy = @intCast(write_rathole_config_policy.len) },
     } else [_]c.ubus_method{};
     const methods = commonMethods ++ nftablesMethods ++ frpMethods ++ frpcMethods ++ frpsMethods ++ ddnsMethods ++ wolMethods ++ ratholeMethods;
     var obj_type = c.ubus_object_type{
@@ -805,6 +828,23 @@ const FrpConfigResponse = struct {
     @"error": []const u8 = "",
 };
 
+const ReadRatholeConfigArgs = struct {
+    mode: []const u8,
+    path: []const u8,
+};
+
+const ValidateRatholeConfigArgs = struct {
+    mode: []const u8,
+    content: []const u8,
+};
+
+const WriteRatholeConfigArgs = struct {
+    mode: []const u8,
+    path: []const u8,
+    content: []const u8,
+    reload: ?bool = null,
+};
+
 const EventInfo = struct {
     timestamp: i64,
     type: []const u8,
@@ -918,6 +958,54 @@ fn clearRatholeLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: Ra
     const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
     try rathole_forward.clear_logs(mode, args.name);
     return .{ .success = true };
+}
+
+fn ratholeMode(value: []const u8) !rathole_forward.Mode {
+    const mode = std.meta.stringToEnum(rathole_forward.Mode, value) orelse return error.InvalidArgument;
+    switch (mode) {
+        .client => if (!build_options.rathole_client_mode) return error.FeatureDisabled,
+        .server => if (!build_options.rathole_server_mode) return error.FeatureDisabled,
+    }
+    return mode;
+}
+
+fn readRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ReadRatholeConfigArgs) !FrpConfigResponse {
+    _ = state;
+    _ = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
+    rathole_forward.validate_toml_path(args.path) catch |err| return failedRatholeConfigResponse(allocator, err);
+    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
+    const content = frp_config_file.read(allocator, cfg.frpConfigRoot(), args.path) catch |err| {
+        return failedRatholeConfigResponse(allocator, err);
+    };
+    return .{ .success = true, .content = content };
+}
+
+fn validateRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ValidateRatholeConfigArgs) !FrpConfigResponse {
+    _ = state;
+    const mode = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
+    rathole_forward.validate_toml(allocator, mode, args.content) catch |err| {
+        return failedRatholeConfigResponse(allocator, err);
+    };
+    return .{ .success = true };
+}
+
+fn writeRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: WriteRatholeConfigArgs) !FrpConfigResponse {
+    _ = state;
+    const mode = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
+    rathole_forward.validate_toml_path(args.path) catch |err| return failedRatholeConfigResponse(allocator, err);
+    rathole_forward.validate_toml(allocator, mode, args.content) catch |err| {
+        return failedRatholeConfigResponse(allocator, err);
+    };
+    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
+    frp_config_file.write(cfg.frpConfigRoot(), args.path, args.content) catch |err| {
+        return failedRatholeConfigResponse(allocator, err);
+    };
+    if (args.reload orelse false) process_lock.requestReload();
+    return .{ .success = true };
+}
+
+fn failedRatholeConfigResponse(allocator: std.mem.Allocator, err: anyerror) !FrpConfigResponse {
+    return .{ .success = false, .@"error" = try std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}) };
 }
 
 const WolProjectArgs = struct {

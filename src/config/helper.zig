@@ -226,24 +226,31 @@ pub fn validateGlobalConfig(config: *types.Config) !void {
     var rathole_client_nodes = config.rathole_client_nodes.iterator();
     while (rathole_client_nodes.next()) |entry| {
         const node = entry.value_ptr.*;
-        if (entry.key_ptr.*.len == 0 or node.remote_addr.len == 0) {
+        const valid_source = switch (node.source.mode) {
+            .builtin => node.remote_addr.len != 0,
+            .external_file => node.source.path.len != 0,
+            .external_uci => node.source.content.len != 0,
+        };
+        if (entry.key_ptr.*.len == 0 or !valid_source) {
             std.log.err("Config validation failed: rathole_client_node '{s}' missing remote_addr", .{entry.key_ptr.*});
             return types.ConfigError.InvalidValue;
         }
-        if (node.transport == .noise and node.noise_remote_public_key.len == 0) {
+        if (node.source.mode == .builtin and node.transport == .noise and node.noise_remote_public_key.len == 0) {
             std.log.err("Config validation failed: rathole_client_node '{s}' missing noise_remote_public_key", .{entry.key_ptr.*});
             return types.ConfigError.InvalidValue;
         }
     }
     for (config.rathole_client_services, 0..) |service, index| {
-        if (service.node_name.len == 0 or service.service_name.len == 0 or service.local_address.len == 0 or service.local_port == 0) {
-            std.log.err("Config validation failed: rathole_client_service '{s}' missing required fields", .{service.service_name});
-            return types.ConfigError.InvalidValue;
-        }
         const node = config.rathole_client_nodes.get(service.node_name) orelse {
             std.log.err("Config validation failed: rathole_client_service '{s}' references unknown node '{s}'", .{ service.service_name, service.node_name });
             return types.ConfigError.InvalidValue;
         };
+        // External TOML owns the service list, so retained UCI services are inactive.
+        if (node.source.mode != .builtin) continue;
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.local_address.len == 0 or service.local_port == 0) {
+            std.log.err("Config validation failed: rathole_client_service '{s}' missing required fields", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
         if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) {
             std.log.err("Config validation failed: rathole_client_service '{s}' enabled without token", .{service.service_name});
             return types.ConfigError.InvalidValue;
@@ -259,24 +266,31 @@ pub fn validateGlobalConfig(config: *types.Config) !void {
     var rathole_server_nodes = config.rathole_server_nodes.iterator();
     while (rathole_server_nodes.next()) |entry| {
         const node = entry.value_ptr.*;
-        if (entry.key_ptr.*.len == 0 or node.bind_addr.len == 0) {
+        const valid_source = switch (node.source.mode) {
+            .builtin => node.bind_addr.len != 0,
+            .external_file => node.source.path.len != 0,
+            .external_uci => node.source.content.len != 0,
+        };
+        if (entry.key_ptr.*.len == 0 or !valid_source) {
             std.log.err("Config validation failed: rathole_server_node '{s}' missing bind_addr", .{entry.key_ptr.*});
             return types.ConfigError.InvalidValue;
         }
-        if (node.transport == .noise and node.noise_local_private_key.len == 0) {
+        if (node.source.mode == .builtin and node.transport == .noise and node.noise_local_private_key.len == 0) {
             std.log.err("Config validation failed: rathole_server_node '{s}' missing noise_local_private_key", .{entry.key_ptr.*});
             return types.ConfigError.InvalidValue;
         }
     }
     for (config.rathole_server_services, 0..) |service, index| {
-        if (service.node_name.len == 0 or service.service_name.len == 0 or service.bind_address.len == 0 or service.bind_port == 0) {
-            std.log.err("Config validation failed: rathole_server_service '{s}' missing required fields", .{service.service_name});
-            return types.ConfigError.InvalidValue;
-        }
         const node = config.rathole_server_nodes.get(service.node_name) orelse {
             std.log.err("Config validation failed: rathole_server_service '{s}' references unknown node '{s}'", .{ service.service_name, service.node_name });
             return types.ConfigError.InvalidValue;
         };
+        // External TOML owns the service list, so retained UCI services are inactive.
+        if (node.source.mode != .builtin) continue;
+        if (service.node_name.len == 0 or service.service_name.len == 0 or service.bind_address.len == 0 or service.bind_port == 0) {
+            std.log.err("Config validation failed: rathole_server_service '{s}' missing required fields", .{service.service_name});
+            return types.ConfigError.InvalidValue;
+        }
         if (service.enabled and node.enabled and service.token.len == 0 and node.default_token.len == 0) {
             std.log.err("Config validation failed: rathole_server_service '{s}' enabled without token", .{service.service_name});
             return types.ConfigError.InvalidValue;

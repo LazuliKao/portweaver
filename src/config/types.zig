@@ -310,6 +310,41 @@ pub const RatholeServiceProtocol = enum {
     }
 };
 
+/// Rathole configuration source. External TOML replaces built-in node settings
+/// and services for the selected node.
+pub const RatholeConfigMode = enum {
+    builtin,
+    external_file,
+    external_uci,
+
+    pub fn fromString(value: []const u8) !RatholeConfigMode {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (eqlIgnoreCase(trimmed, "builtin")) return .builtin;
+        if (eqlIgnoreCase(trimmed, "external_file")) return .external_file;
+        if (eqlIgnoreCase(trimmed, "external_uci")) return .external_uci;
+        return ConfigError.InvalidValue;
+    }
+};
+
+/// Per-node Rathole configuration source. Paths and UCI TOML are owned by the node.
+pub const RatholeNodeConfigSource = struct {
+    mode: RatholeConfigMode = .builtin,
+    path: []const u8 = "",
+    content: []const u8 = "",
+
+    pub fn deinit(self: *RatholeNodeConfigSource, allocator: std.mem.Allocator) void {
+        if (self.path.len != 0) allocator.free(self.path);
+        if (self.content.len != 0) allocator.free(self.content);
+        self.* = undefined;
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.mode == b.mode and
+            std.mem.eql(u8, a.path, b.path) and
+            std.mem.eql(u8, a.content, b.content);
+    }
+};
+
 pub const RatholeClientNode = struct {
     enabled: bool = true,
     remote_addr: []const u8,
@@ -317,12 +352,14 @@ pub const RatholeClientNode = struct {
     transport: RatholeTransport = .tcp,
     noise_local_private_key: []const u8 = "",
     noise_remote_public_key: []const u8 = "",
+    source: RatholeNodeConfigSource = .{},
 
     pub fn deinit(self: *RatholeClientNode, allocator: std.mem.Allocator) void {
         if (self.remote_addr.len != 0) allocator.free(self.remote_addr);
         if (self.default_token.len != 0) allocator.free(self.default_token);
         if (self.noise_local_private_key.len != 0) allocator.free(self.noise_local_private_key);
         if (self.noise_remote_public_key.len != 0) allocator.free(self.noise_remote_public_key);
+        self.source.deinit(allocator);
         self.* = undefined;
     }
 
@@ -332,7 +369,8 @@ pub const RatholeClientNode = struct {
             std.mem.eql(u8, a.default_token, b.default_token) and
             a.transport == b.transport and
             std.mem.eql(u8, a.noise_local_private_key, b.noise_local_private_key) and
-            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key);
+            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key) and
+            a.source.eql(b.source);
     }
 };
 
@@ -343,12 +381,14 @@ pub const RatholeServerNode = struct {
     transport: RatholeTransport = .tcp,
     noise_local_private_key: []const u8 = "",
     noise_remote_public_key: []const u8 = "",
+    source: RatholeNodeConfigSource = .{},
 
     pub fn deinit(self: *RatholeServerNode, allocator: std.mem.Allocator) void {
         if (self.bind_addr.len != 0) allocator.free(self.bind_addr);
         if (self.default_token.len != 0) allocator.free(self.default_token);
         if (self.noise_local_private_key.len != 0) allocator.free(self.noise_local_private_key);
         if (self.noise_remote_public_key.len != 0) allocator.free(self.noise_remote_public_key);
+        self.source.deinit(allocator);
         self.* = undefined;
     }
 
@@ -358,7 +398,8 @@ pub const RatholeServerNode = struct {
             std.mem.eql(u8, a.default_token, b.default_token) and
             a.transport == b.transport and
             std.mem.eql(u8, a.noise_local_private_key, b.noise_local_private_key) and
-            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key);
+            std.mem.eql(u8, a.noise_remote_public_key, b.noise_remote_public_key) and
+            a.source.eql(b.source);
     }
 };
 
@@ -1139,6 +1180,13 @@ test "config: parse FRP external configuration source and format" {
     try std.testing.expectEqual(FrpConfigFormat.json, try FrpConfigFormat.fromString("json"));
     try std.testing.expectEqualStrings("yaml", FrpConfigFormat.yaml.toString());
     try std.testing.expectError(ConfigError.InvalidValue, FrpConfigFormat.fromString("ini"));
+}
+
+test "config: parse Rathole external configuration source" {
+    try std.testing.expectEqual(RatholeConfigMode.builtin, try RatholeConfigMode.fromString("builtin"));
+    try std.testing.expectEqual(RatholeConfigMode.external_file, try RatholeConfigMode.fromString("external_file"));
+    try std.testing.expectEqual(RatholeConfigMode.external_uci, try RatholeConfigMode.fromString("external_uci"));
+    try std.testing.expectError(ConfigError.InvalidValue, RatholeConfigMode.fromString("invalid"));
 }
 
 test "config: parse app forward loop mode" {

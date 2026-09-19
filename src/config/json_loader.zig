@@ -14,9 +14,14 @@ fn parseRatholeRecord(comptime T: type, allocator: std.mem.Allocator, value: std
     inline for (std.meta.fields(T)) |field| {
         if (field.type == []const u8) @field(result, field.name) = "";
     }
+    if (comptime @hasField(T, "source")) @field(result, "source") = .{};
     errdefer result.deinit(allocator);
     inline for (std.meta.fields(T)) |field| {
         if (field.type == []const u8) @field(result, field.name) = try types.dupeIfNonEmpty(allocator, @field(parsed.value, field.name));
+    }
+    if (comptime @hasField(T, "source")) {
+        @field(result, "source").path = try types.dupeIfNonEmpty(allocator, @field(parsed.value, "source").path);
+        @field(result, "source").content = try types.dupeIfNonEmpty(allocator, @field(parsed.value, "source").content);
     }
     return result;
 }

@@ -3,6 +3,7 @@ const options = @import("build_options");
 const config = @import("../config/types.zig");
 const compat = @import("../compat.zig");
 const lib = @import("librathole.zig");
+const config_file = @import("frp_config_file.zig");
 
 pub const Mode = enum { client, server };
 pub const Status = struct {
@@ -73,8 +74,34 @@ pub fn render_config(allocator: std.mem.Allocator, comptime mode: Mode, name: []
     return allocator.dupe(u8, output.written());
 }
 
-fn start_node(allocator: std.mem.Allocator, comptime mode: Mode, name: []const u8, node: anytype, services: anytype) !void {
-    const toml = try render_config(allocator, mode, name, node, services);
+pub fn validate_toml_path(path: []const u8) !void {
+    if (!std.mem.endsWith(u8, path, ".toml")) return error.InvalidArgument;
+}
+
+fn node_toml(allocator: std.mem.Allocator, comptime mode: Mode, root: []const u8, name: []const u8, node: anytype, services: anytype) ![]u8 {
+    return switch (node.source.mode) {
+        .builtin => render_config(allocator, mode, name, node, services),
+        .external_file => blk: {
+            try validate_toml_path(node.source.path);
+            break :blk config_file.read(allocator, root, node.source.path);
+        },
+        .external_uci => allocator.dupe(u8, node.source.content),
+    };
+}
+
+/// Validates TOML using the embedded Rathole parser. Detailed parser errors
+/// require a future upstream FFI API.
+pub fn validate_toml(allocator: std.mem.Allocator, mode: Mode, content: []const u8) !void {
+    try config_file.validateContent(content);
+    var instance = if (mode == .client)
+        try lib.Instance.initClient(allocator, content, "validation")
+    else
+        try lib.Instance.initServer(allocator, content, "validation");
+    defer instance.deinit();
+}
+
+fn start_node(allocator: std.mem.Allocator, comptime mode: Mode, root: []const u8, name: []const u8, node: anytype, services: anytype) !void {
+    const toml = try node_toml(allocator, mode, root, name, node, services);
     defer allocator.free(toml);
     const owned_name = try allocator.dupe(u8, name);
     errdefer allocator.free(owned_name);
@@ -108,13 +135,13 @@ pub fn apply_config(allocator: std.mem.Allocator, cfg: *const config.Config) !vo
     if (options.rathole_server_mode) {
         var iterator = cfg.rathole_server_nodes.iterator();
         while (iterator.next()) |entry| {
-            if (entry.value_ptr.enabled) try start_node(allocator, .server, entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_server_services);
+            if (entry.value_ptr.enabled) try start_node(allocator, .server, cfg.frpConfigRoot(), entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_server_services);
         }
     }
     if (options.rathole_client_mode) {
         var iterator = cfg.rathole_client_nodes.iterator();
         while (iterator.next()) |entry| {
-            if (entry.value_ptr.enabled) try start_node(allocator, .client, entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_client_services);
+            if (entry.value_ptr.enabled) try start_node(allocator, .client, cfg.frpConfigRoot(), entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_client_services);
         }
     }
 }
