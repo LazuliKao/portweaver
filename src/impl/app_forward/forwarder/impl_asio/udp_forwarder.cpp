@@ -279,7 +279,7 @@ static void set_forwarder_error(int *out_error, int error_code)
     }
 }
 
-static int map_asio_error(const std::error_code &ec)
+static forwarder_error_t map_asio_error(const std::error_code &ec)
 {
     if (ec == asio::error::address_in_use)
     {
@@ -300,7 +300,7 @@ static int map_asio_error(const std::error_code &ec)
     return FORWARDER_ERROR_BIND;
 }
 
-static int map_open_error(const std::error_code &ec)
+static forwarder_error_t map_open_error(const std::error_code &ec)
 {
     if (ec == asio::error::no_memory)
     {
@@ -751,16 +751,16 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     return fwd;
 }
 
-int udp_forwarder_start(udp_forwarder_t *forwarder)
+forwarder_error_t udp_forwarder_start(udp_forwarder_t *forwarder)
 {
     if (forwarder == nullptr || forwarder->started)
     {
-        return -1;
+        return FORWARDER_ERROR_UNKNOWN;
     }
 
     forwarder->started = 1;
     forwarder->start_server_recv();
-    return 0;
+    return FORWARDER_OK;
 }
 
 void udp_forwarder_request_stop(udp_forwarder_t *forwarder)

@@ -71,24 +71,26 @@ const SharedUdpStartContext = struct {
 /// Creates a LoopManager on the project if one does not already exist,
 /// then delegates to the shared-loop code path.
 pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
-    errdefer projectHandle.setStartupFailed();
+    projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
     const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
 
     // Create LoopManager if not already present
     if (projectHandle.runtime_manager == null) {
-        projectHandle.runtime_manager = try loop_manager.LoopManager.init(allocator);
+        projectHandle.runtime_manager = loop_manager.LoopManager.init(allocator) catch |err| {
+            projectHandle.recordStartupFailure("unknown", 0, -99);
+            projectHandle.finishStartup();
+            return err;
+        };
     }
     const rm = &projectHandle.runtime_manager.?;
 
     if (projectHandle.cfg.port_mappings.len > 0) {
         for (projectHandle.cfg.port_mappings) |mapping| {
-            startForwardingForMappingWithLoopManager(allocator, projectHandle, mapping, rm, mode) catch |err| {
-                std.log.err("Failed to start forwarding: {}", .{err});
-            };
+            _ = startForwardingForMappingBestEffort(allocator, projectHandle, mapping, rm, mode);
         }
-        projectHandle.setStartupSuccess();
+        projectHandle.finishStartup();
         return;
     }
 
@@ -98,39 +100,37 @@ pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_sta
     var target_port_buf: [5]u8 = undefined;
     const target_port_str = common.portToString(projectHandle.cfg.target_port, &target_port_buf);
 
-    startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
+    _ = startForwardingForMappingBestEffort(allocator, projectHandle, .{
         .protocol = projectHandle.cfg.protocol,
         .listen_port = listen_port_str,
         .target_port = target_port_str,
-    }, rm, mode) catch |err| {
-        std.log.err("Failed to start forwarding: {}", .{err});
-    };
-    projectHandle.setStartupSuccess();
+    }, rm, mode);
+    projectHandle.finishStartup();
 }
 
 pub fn startForwardingWithLoopManager(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, runtime_manager: *loop_manager.LoopManager) !void {
-    errdefer projectHandle.setStartupFailed();
+    projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
     const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
+    var had_failure = false;
     if (projectHandle.cfg.port_mappings.len > 0) {
         for (projectHandle.cfg.port_mappings) |mapping| {
-            try startForwardingForMappingWithLoopManager(allocator, projectHandle, mapping, runtime_manager, mode);
+            had_failure = startForwardingForMappingBestEffort(allocator, projectHandle, mapping, runtime_manager, mode) or had_failure;
         }
-        projectHandle.setStartupSuccess();
-        return;
+    } else {
+        var listen_port_buf: [5]u8 = undefined;
+        const listen_port_str = common.portToString(projectHandle.cfg.listen_port, &listen_port_buf);
+        var target_port_buf: [5]u8 = undefined;
+        const target_port_str = common.portToString(projectHandle.cfg.target_port, &target_port_buf);
+        had_failure = startForwardingForMappingBestEffort(allocator, projectHandle, .{
+            .protocol = projectHandle.cfg.protocol,
+            .listen_port = listen_port_str,
+            .target_port = target_port_str,
+        }, runtime_manager, mode);
     }
-
-    var listen_port_buf: [5]u8 = undefined;
-    const listen_port_str = common.portToString(projectHandle.cfg.listen_port, &listen_port_buf);
-    var target_port_buf: [5]u8 = undefined;
-    const target_port_str = common.portToString(projectHandle.cfg.target_port, &target_port_buf);
-    try startForwardingForMappingWithLoopManager(allocator, projectHandle, .{
-        .protocol = projectHandle.cfg.protocol,
-        .listen_port = listen_port_str,
-        .target_port = target_port_str,
-    }, runtime_manager, mode);
-    projectHandle.setStartupSuccess();
+    projectHandle.finishStartup();
+    if (had_failure) return ForwardError.ListenFailed;
 }
 
 /// 解析端口范围字符串，返回起始和结束端口
@@ -139,46 +139,78 @@ fn parsePortRange(port_str: []const u8) !common.PortRange {
 }
 
 /// 为单个端口映射启动转发 (shared-loop path)
-fn startForwardingForMappingWithLoopManager(
+/// Attempts every listener in a mapping so a failed port does not suppress the
+/// remaining ports in a range. Returns whether at least one attempt failed.
+fn startForwardingForMappingBestEffort(
     allocator: std.mem.Allocator,
     projectHandle: *project_status.ProjectHandle,
     mapping: types.PortMapping,
     runtime_manager: *loop_manager.LoopManager,
     mode: types.LoopMode,
-) !void {
-    const listen_range = try parsePortRange(mapping.listen_port);
-    const target_range = try parsePortRange(mapping.target_port);
+) bool {
+    const listen_range = parsePortRange(mapping.listen_port) catch |err| {
+        std.log.err("Invalid listen port mapping {s}: {}", .{ mapping.listen_port, err });
+        projectHandle.recordStartupFailure("unknown", 0, -5);
+        return true;
+    };
+    const target_range = parsePortRange(mapping.target_port) catch |err| {
+        std.log.err("Invalid target port mapping {s}: {}", .{ mapping.target_port, err });
+        projectHandle.recordStartupFailure("unknown", 0, -5);
+        return true;
+    };
     const listen_count = listen_range.end - listen_range.start + 1;
     const target_count = target_range.end - target_range.start + 1;
-    if (listen_count != target_count) return ForwardError.InvalidAddress;
+    if (listen_count != target_count) {
+        projectHandle.recordStartupFailure("unknown", listen_range.start, -5);
+        return true;
+    }
 
     var shared_lease: ?loop_manager.RuntimeLease = null;
     if (mode != .per_listener) {
-        shared_lease = try runtime_manager.acquire(mode, projectHandle);
+        shared_lease = runtime_manager.acquire(mode, projectHandle) catch |err| {
+            std.log.err("Failed to acquire forwarding runtime: {}", .{err});
+            projectHandle.recordStartupFailure("unknown", listen_range.start, -99);
+            return true;
+        };
     }
-    errdefer if (shared_lease) |lease| {
-        if (projectHandle.getProjectRuntimeInfo().active_ports > 0) {
-            runtime_manager.releaseProjectRuntime(projectHandle) catch |err| {
-                std.log.err("Failed to roll back partially started shared runtime: {}", .{err});
-                runtime_manager.release(lease);
-            };
-        } else {
-            runtime_manager.release(lease);
-        }
-    };
+    const active_ports_before = projectHandle.getProjectRuntimeInfo().active_ports;
+    var had_failure = false;
 
     var i: u16 = 0;
     while (i < listen_count) : (i += 1) {
         const listen_port = listen_range.start + i;
         const target_port = target_range.start + i;
         switch (mapping.protocol) {
-            .tcp => try startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease),
-            .udp => try startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease),
+            .tcp => startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease) catch |err| {
+                logUnexpectedStartupFailure(projectHandle, "tcp", listen_port, err);
+                had_failure = true;
+            },
+            .udp => startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease) catch |err| {
+                logUnexpectedStartupFailure(projectHandle, "udp", listen_port, err);
+                had_failure = true;
+            },
             .both => {
-                try startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease);
-                try startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease);
+                startAndRegisterSharedTcp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease) catch |err| {
+                    logUnexpectedStartupFailure(projectHandle, "tcp", listen_port, err);
+                    had_failure = true;
+                };
+                startAndRegisterSharedUdp(projectHandle, allocator, listen_port, target_port, runtime_manager, mode, shared_lease) catch |err| {
+                    logUnexpectedStartupFailure(projectHandle, "udp", listen_port, err);
+                    had_failure = true;
+                };
             },
         }
+    }
+    if (had_failure and shared_lease != null and projectHandle.getProjectRuntimeInfo().active_ports == active_ports_before) {
+        runtime_manager.release(shared_lease.?);
+    }
+    return had_failure;
+}
+
+fn logUnexpectedStartupFailure(projectHandle: *project_status.ProjectHandle, protocol: []const u8, listen_port: u16, err: anyerror) void {
+    std.log.warn("Failed to start {s} forwarding on port {d}: {}", .{ protocol, listen_port, err });
+    if (err != ForwardError.ListenFailed) {
+        projectHandle.recordStartupFailure(protocol, listen_port, -99);
     }
 }
 

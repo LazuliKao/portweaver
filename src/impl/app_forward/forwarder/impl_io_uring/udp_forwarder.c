@@ -493,7 +493,7 @@ static int make_destination(struct sockaddr_storage *storage, socklen_t *length,
     return 0;
 }
 
-static int map_bind_error(int error_number)
+static forwarder_error_t map_bind_error(int error_number)
 {
     if (error_number == EADDRINUSE)
         return FORWARDER_ERROR_ADDRESS_IN_USE;
@@ -586,18 +586,31 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     return fwd;
 }
 
-int udp_forwarder_start(udp_forwarder_t *fwd)
+static forwarder_error_t map_start_error(int result)
+{
+    if (result == -ENOMEM)
+        return FORWARDER_ERROR_MALLOC;
+    if (result < 0)
+    {
+        int error_number = -result;
+        if (error_number == EADDRINUSE || error_number == EACCES)
+            return map_bind_error(error_number);
+    }
+    return FORWARDER_ERROR_UNKNOWN;
+}
+
+forwarder_error_t udp_forwarder_start(udp_forwarder_t *fwd)
 {
     if (fwd == NULL || fwd->started)
-        return -EINVAL;
+        return FORWARDER_ERROR_UNKNOWN;
     int rc = submit_server_receive(fwd);
     if (rc == 0) {
         fwd->started = 1;
         rc = io_uring_submit(forwarder_runtime_get_ring(fwd->runtime));
         if (rc >= 0)
-            rc = 0;
+            return FORWARDER_OK;
     }
-    return rc;
+    return map_start_error(rc);
 }
 
 void udp_forwarder_request_stop(udp_forwarder_t *fwd)

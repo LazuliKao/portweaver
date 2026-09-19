@@ -775,6 +775,13 @@ test "app forward: shared loop shutdown releases runtime and bind failure is iso
     defer cleanupProjectHandle(&conflict_handle);
     try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(alloc, &conflict_handle, &runtime_manager));
     try testing.expectEqual(project_status.StartupStatus.failed, conflict_handle.startup_status);
+    try testing.expectEqual(@as(i32, -3), conflict_handle.error_code);
+    const conflict_failures = try conflict_handle.getStartupFailures(alloc);
+    defer alloc.free(conflict_failures);
+    try testing.expectEqual(@as(usize, 1), conflict_failures.len);
+    try testing.expectEqualStrings("tcp", conflict_failures[0].protocol);
+    try testing.expectEqual(conflict_listen_port, conflict_failures[0].local_port);
+    try testing.expectEqual(@as(i32, -3), conflict_failures[0].error_code);
 
     try runtime_manager.releaseProjectRuntime(&occupied_handle);
     occupied_handle.deinit();
@@ -793,6 +800,45 @@ test "app forward: shared loop shutdown releases runtime and bind failure is iso
     healthy_handle.deinit();
     try testing.expectEqual(@as(usize, 0), runtime_manager.debugRuntimeCount(.global));
     healthy_handle.cfg.deinit(healthy_handle.allocator);
+}
+
+test "app forward: a range keeps healthy listeners after a bind failure" {
+    const alloc = testing.allocator;
+    const occupied_listen_port = testListenPort(46, 0);
+    const occupied_target_port = testTargetPort(46, 0);
+
+    var runtime_manager = try loop_manager.LoopManager.init(alloc);
+    defer runtime_manager.deinit();
+
+    var occupied_handle = try makeSinglePortHandle(alloc, 46, .tcp, occupied_listen_port, occupied_target_port);
+    occupied_handle.cfg.app_forward_loop_mode = .global;
+    defer cleanupProjectHandle(&occupied_handle);
+    defer runtime_manager.releaseProjectRuntime(&occupied_handle) catch |err| {
+        std.log.err("failed to release occupied shared loop runtime for project {d}: {}", .{ occupied_handle.id, err });
+    };
+    try app_forward.startForwardingWithLoopManager(alloc, &occupied_handle, &runtime_manager);
+
+    var listen_range_buf: [11]u8 = undefined;
+    const listen_range = try std.fmt.bufPrint(&listen_range_buf, "{d}-{d}", .{ occupied_listen_port, occupied_listen_port + 1 });
+    var target_range_buf: [11]u8 = undefined;
+    const target_range = try std.fmt.bufPrint(&target_range_buf, "{d}-{d}", .{ occupied_target_port + 1, occupied_target_port + 2 });
+    var range_handle = try makeRangeMappingHandle(alloc, 47, .tcp, listen_range, target_range);
+    range_handle.cfg.app_forward_loop_mode = .global;
+    defer cleanupProjectHandle(&range_handle);
+    defer runtime_manager.releaseProjectRuntime(&range_handle) catch |err| {
+        std.log.err("failed to release range shared loop runtime for project {d}: {}", .{ range_handle.id, err });
+    };
+
+    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(alloc, &range_handle, &runtime_manager));
+    try testing.expectEqual(project_status.StartupStatus.partial, range_handle.startup_status);
+    try testing.expectEqual(@as(u32, 1), range_handle.active_ports);
+
+    const failures = try range_handle.getStartupFailures(alloc);
+    defer alloc.free(failures);
+    try testing.expectEqual(@as(usize, 1), failures.len);
+    try testing.expectEqualStrings("tcp", failures[0].protocol);
+    try testing.expectEqual(occupied_listen_port, failures[0].local_port);
+    try testing.expectEqual(@as(i32, -3), failures[0].error_code);
 }
 
 test "app forward: architecture test with three concurrent loop modes" {

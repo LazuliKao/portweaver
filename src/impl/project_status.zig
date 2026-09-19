@@ -21,12 +21,15 @@ pub const StartupStatus = enum(u8) {
     success = 1,
     /// 启动失败，有错误信息
     failed = 2,
+    /// Some listeners started while others failed
+    partial = 3,
 
     pub fn toString(self: StartupStatus) [:0]const u8 {
         return switch (self) {
             .disabled => "disabled",
             .success => "success",
             .failed => "failed",
+            .partial => "partial",
         };
     }
 };
@@ -55,11 +58,19 @@ pub const ForwarderStats = struct {
     active_sessions: u32,
 };
 
+/// A canonical startup error for one requested listener.
+pub const ForwarderFailure = struct {
+    protocol: []const u8,
+    local_port: u16,
+    error_code: i32,
+};
+
 pub const ProjectHandle = struct {
     allocator: std.mem.Allocator,
     startup_status: StartupStatus = .disabled,
     tcp_forwarders: std.array_list.Managed(*TcpForwarder),
     udp_forwarders: std.array_list.Managed(*UdpForwarder),
+    startup_failures: std.array_list.Managed(ForwarderFailure),
     lock: std.Io.Mutex = .init,
     cfg: types.Project,
     use_nftables: bool,
@@ -75,6 +86,7 @@ pub const ProjectHandle = struct {
         return ProjectHandle{
             .tcp_forwarders = std.array_list.Managed(*TcpForwarder).init(allocator),
             .udp_forwarders = std.array_list.Managed(*UdpForwarder).init(allocator),
+            .startup_failures = std.array_list.Managed(ForwarderFailure).init(allocator),
             .allocator = allocator,
             .id = id,
             .startup_status = .disabled,
@@ -110,6 +122,7 @@ pub const ProjectHandle = struct {
         defer self.lock.unlock(compat.io());
         self.tcp_forwarders.deinit();
         self.udp_forwarders.deinit();
+        self.startup_failures.deinit();
     }
     /// Tears down runtime and forwarders without releasing cfg.
     /// After this call the handle is in a clean state suitable for
@@ -143,6 +156,7 @@ pub const ProjectHandle = struct {
             defer self.lock.unlock(compat.io());
             self.tcp_forwarders.clearRetainingCapacity();
             self.udp_forwarders.clearRetainingCapacity();
+            self.startup_failures.clearRetainingCapacity();
         }
 
         // Reset runtime state so caller can re-start forwarding.
@@ -154,7 +168,7 @@ pub const ProjectHandle = struct {
     }
     pub inline fn setStartupFailedCode(self: *ProjectHandle, err_code: i32) void {
         self.startup_status = .failed;
-        self.error_code = err_code;
+        self.error_code = normalizeForwarderErrorCode(err_code);
     }
     pub inline fn setDisabled(self: *ProjectHandle) void {
         self.startup_status = .disabled;
@@ -165,6 +179,48 @@ pub const ProjectHandle = struct {
     pub inline fn setStartupSuccess(self: *ProjectHandle) void {
         self.startup_status = .success;
         self.error_code = 0;
+    }
+    /// Clears transient startup state before a fresh forwarding attempt.
+    pub fn beginStartup(self: *ProjectHandle) void {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        self.startup_failures.clearRetainingCapacity();
+        self.startup_status = .disabled;
+        self.error_code = 0;
+    }
+    /// Records a canonical failure for a listener. Allocation failure is logged,
+    /// while the aggregate error remains available for the current attempt.
+    pub fn recordStartupFailure(self: *ProjectHandle, protocol: []const u8, local_port: u16, err_code: i32) void {
+        const error_code = normalizeForwarderErrorCode(err_code);
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        self.startup_failures.append(.{
+            .protocol = protocol,
+            .local_port = local_port,
+            .error_code = error_code,
+        }) catch |err| {
+            std.log.err("Failed to record {s} startup error on port {d}: {}", .{ protocol, local_port, err });
+        };
+        self.startup_status = .failed;
+        self.error_code = error_code;
+    }
+    /// Derives the aggregate state after all configured listeners were attempted.
+    pub fn finishStartup(self: *ProjectHandle) void {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        self.startup_status = if (self.active_ports > 0)
+            if (self.startup_failures.items.len > 0) .partial else .success
+        else if (self.startup_failures.items.len > 0)
+            .failed
+        else
+            .disabled;
+        if (self.startup_failures.items.len == 0) self.error_code = 0;
+    }
+    /// Returns an allocator-owned snapshot so UBUS can serialize failures safely.
+    pub fn getStartupFailures(self: *ProjectHandle, allocator: std.mem.Allocator) ![]ForwarderFailure {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        return allocator.dupe(ForwarderFailure, self.startup_failures.items);
     }
     inline fn updateRuntimeStatus(self: *ProjectHandle) void {
         if (self.active_ports > 0) {
@@ -536,6 +592,13 @@ pub const ProjectHandle = struct {
         return stats_list.toOwnedSlice(allocator);
     }
 };
+
+pub fn normalizeForwarderErrorCode(error_code: i32) i32 {
+    return switch (error_code) {
+        -1, -2, -3, -4, -5, -99 => error_code,
+        else => -99,
+    };
+}
 
 /// Owns heap-allocated project handles. The pointer values remain stable when
 /// the list grows, so active forwarders can safely retain their owner handle.

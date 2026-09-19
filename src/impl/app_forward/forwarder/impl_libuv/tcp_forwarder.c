@@ -873,14 +873,14 @@ static void set_forwarder_error(int *out_error, int error_code)
         *out_error = error_code;
 }
 
-static int map_libuv_init_error(int status)
+static forwarder_error_t map_libuv_init_error(int status)
 {
     if (status == UV_ENOMEM)
         return FORWARDER_ERROR_MALLOC;
     return FORWARDER_ERROR_UNKNOWN;
 }
 
-static int map_bind_error(int status)
+static forwarder_error_t map_bind_error(int status)
 {
     if (status == UV_EADDRINUSE)
         return FORWARDER_ERROR_ADDRESS_IN_USE;
@@ -1038,15 +1038,15 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     return fwd;
 }
 
-int tcp_forwarder_start(tcp_forwarder_t *forwarder)
+forwarder_error_t tcp_forwarder_start(tcp_forwarder_t *forwarder)
 {
     if (!forwarder)
-        return -1;
+        return FORWARDER_ERROR_UNKNOWN;
     int r = uv_listen((uv_stream_t *)&forwarder->server, 128, tcp_on_new_connection);
     if (r != 0)
-        return r;
+        return map_bind_error(r);
     forwarder->started = 1;
-    return 0;
+    return FORWARDER_OK;
 }
 
 void tcp_forwarder_request_stop(tcp_forwarder_t *forwarder)

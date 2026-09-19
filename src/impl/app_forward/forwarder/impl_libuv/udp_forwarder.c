@@ -562,14 +562,14 @@ static void set_forwarder_error(int *out_error, int error_code)
         *out_error = error_code;
 }
 
-static int map_libuv_init_error(int status)
+static forwarder_error_t map_libuv_init_error(int status)
 {
     if (status == UV_ENOMEM)
         return FORWARDER_ERROR_MALLOC;
     return FORWARDER_ERROR_UNKNOWN;
 }
 
-static int map_bind_error(int status)
+static forwarder_error_t map_bind_error(int status)
 {
     if (status == UV_EADDRINUSE)
         return FORWARDER_ERROR_ADDRESS_IN_USE;
@@ -718,15 +718,15 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     return fwd;
 }
 
-int udp_forwarder_start(udp_forwarder_t *forwarder)
+forwarder_error_t udp_forwarder_start(udp_forwarder_t *forwarder)
 {
     if (!forwarder)
-        return -1;
+        return FORWARDER_ERROR_UNKNOWN;
     int r = uv_udp_recv_start(&forwarder->server, udp_server_alloc_cb, udp_on_recv);
     if (r != 0)
-        return r;
+        return map_bind_error(r);
     forwarder->started = 1;
-    return 0;
+    return FORWARDER_OK;
 }
 
 void udp_forwarder_request_stop(udp_forwarder_t *forwarder)

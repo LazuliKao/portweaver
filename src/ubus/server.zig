@@ -688,6 +688,12 @@ const ForwarderStatsInfo = struct {
     active_sessions: u32,
 };
 
+const ForwarderFailureInfo = struct {
+    protocol: []const u8,
+    local_port: u32,
+    error_code: i32,
+};
+
 const ProjectStatusInfo = struct {
     id: u32,
     section_name: []const u8,
@@ -703,6 +709,7 @@ const ProjectStatusInfo = struct {
     enable_app_stats: bool,
     enable_firewall_stats: bool,
     forwarders: []const ForwarderStatsInfo,
+    failures: []const ForwarderFailureInfo,
 };
 
 const ListProjectsResponse = struct {
@@ -984,21 +991,36 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
             });
         }
 
+        var failures_list: std.ArrayList(ForwarderFailureInfo) = .empty;
+        errdefer failures_list.deinit(allocator);
+
+        const startup_failures = project.getStartupFailures(allocator) catch &[_]project_status.ForwarderFailure{};
+        defer if (startup_failures.len > 0) allocator.free(startup_failures);
+
+        for (startup_failures) |failure| {
+            try failures_list.append(allocator, .{
+                .protocol = failure.protocol,
+                .local_port = @intCast(failure.local_port),
+                .error_code = failure.error_code,
+            });
+        }
+
         try projects_list.append(allocator, .{
             .id = @intCast(i),
             .section_name = project.cfg.section_name,
             .enabled = state.enabled[i],
             .status = if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED,
-            .startup_status = project.startup_status.toString(),
-            .active_ports = project.active_ports,
+            .startup_status = info.startup_status.toString(),
+            .active_ports = info.active_ports,
             .bytes_in = info.bytes_in,
             .bytes_out = info.bytes_out,
             .active_sessions = info.active_sessions,
             .last_changed = state.last_changed[i],
-            .error_code = if (info.startup_status == .failed and info.error_code != 0) info.error_code else null,
+            .error_code = if ((info.startup_status == .failed or info.startup_status == .partial) and info.error_code != 0) info.error_code else null,
             .enable_app_stats = project.cfg.enable_app_stats,
             .enable_firewall_stats = project.cfg.enable_firewall_stats,
             .forwarders = try forwarders_list.toOwnedSlice(allocator),
+            .failures = try failures_list.toOwnedSlice(allocator),
         });
     }
 
@@ -1442,7 +1464,6 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
     // Re-start application layer forwarding
     app_forward.startForwarding(allocator, project) catch |err| {
         std.log.warn("ubus: failed to restart project {d}: {any}", .{ args.id, err });
-        project.setStartupFailedCode(-1);
     };
 
     // Re-start FRPC forwarding (if enabled)

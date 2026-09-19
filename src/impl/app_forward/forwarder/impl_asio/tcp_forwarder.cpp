@@ -53,14 +53,14 @@ void set_forwarder_error(int *out_error, int error_code)
         *out_error = error_code;
 }
 
-int map_asio_init_error(const asio::error_code &ec)
+forwarder_error_t map_asio_init_error(const asio::error_code &ec)
 {
     if (ec == asio::error::no_memory)
         return FORWARDER_ERROR_MALLOC;
     return FORWARDER_ERROR_UNKNOWN;
 }
 
-int map_bind_error(const asio::error_code &ec)
+forwarder_error_t map_bind_error(const asio::error_code &ec)
 {
     if (ec == asio::error::address_in_use)
         return FORWARDER_ERROR_ADDRESS_IN_USE;
@@ -919,15 +919,15 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     return forwarder;
 }
 
-extern "C" int tcp_forwarder_start(tcp_forwarder_t *forwarder)
+extern "C" forwarder_error_t tcp_forwarder_start(tcp_forwarder_t *forwarder)
 {
     if (!forwarder)
-        return -1;
+        return FORWARDER_ERROR_UNKNOWN;
 
     {
         std::lock_guard<std::mutex> lock(forwarder->sessions_mutex);
         if (forwarder->started || forwarder->stop_requested.load(std::memory_order_acquire))
-            return -1;
+            return FORWARDER_ERROR_UNKNOWN;
         forwarder->started = 1;
     }
 
@@ -937,11 +937,11 @@ extern "C" int tcp_forwarder_start(tcp_forwarder_t *forwarder)
     {
         std::lock_guard<std::mutex> lock(forwarder->sessions_mutex);
         forwarder->started = 0;
-        return ec.value() != 0 ? ec.value() : -1;
+        return map_bind_error(ec);
     }
 
     forwarder->start_accept_loop();
-    return 0;
+    return FORWARDER_OK;
 }
 
 extern "C" void tcp_forwarder_request_stop(tcp_forwarder_t *forwarder)

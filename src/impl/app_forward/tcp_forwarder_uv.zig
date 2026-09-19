@@ -12,20 +12,25 @@ pub const TcpForwarder = struct {
     allocator: std.mem.Allocator,
     forwarder: ?*c.tcp_forwarder_t,
     runtime: ?*c.forwarder_runtime_t = null,
+    listen_port: u16,
     lock: std.Io.Mutex = .init,
 
     pub fn createOnRuntimeThread(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, token: forwarder_runtime.RuntimeThreadToken, listen_port: u16, target_port: u16) !*TcpForwarder {
         var error_code: i32 = 0;
         const runtime_ctx = forwarder_runtime.runtimeFromToken(token);
-        const fwd = try allocator.create(TcpForwarder);
+        const fwd = allocator.create(TcpForwarder) catch |err| {
+            projectHandle.recordStartupFailure("tcp", listen_port, -1);
+            return err;
+        };
         fwd.* = .{
             .allocator = allocator,
             .forwarder = null,
+            .listen_port = listen_port,
         };
 
         fwd.setup(runtime_ctx, listen_port, projectHandle.cfg.target_address, target_port, projectHandle.cfg.family, projectHandle.cfg.enable_app_stats, projectHandle.cfg.connect_timeout_ms orelse 0, projectHandle.cfg.max_connections orelse 0, &error_code) catch |err| {
             allocator.destroy(fwd);
-            projectHandle.setStartupFailedCode(error_code);
+            projectHandle.recordStartupFailure("tcp", listen_port, if (error_code != 0) error_code else -1);
             return err;
         };
         return fwd;
@@ -76,11 +81,17 @@ pub const TcpForwarder = struct {
 
     pub fn startOnRuntimeThread(self: *TcpForwarder, token: forwarder_runtime.RuntimeThreadToken, projectHandle: *project_status.ProjectHandle) !void {
         const runtime_ctx = forwarder_runtime.runtimeFromToken(token);
-        if (!self.belongsToRuntime(runtime_ctx)) return ForwardError.ListenFailed;
-        if (self.forwarder == null) return ForwardError.ListenFailed;
+        if (!self.belongsToRuntime(runtime_ctx)) {
+            projectHandle.recordStartupFailure("tcp", self.listen_port, -99);
+            return ForwardError.ListenFailed;
+        }
+        if (self.forwarder == null) {
+            projectHandle.recordStartupFailure("tcp", self.listen_port, -99);
+            return ForwardError.ListenFailed;
+        }
         const r = c.tcp_forwarder_start(self.forwarder);
-        if (r != 0) {
-            projectHandle.setStartupFailedCode(r);
+        if (r != c.FORWARDER_OK) {
+            projectHandle.recordStartupFailure("tcp", self.listen_port, @intCast(r));
             return ForwardError.ListenFailed;
         }
     }

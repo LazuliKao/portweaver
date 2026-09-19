@@ -699,7 +699,7 @@ static int submit_accept(struct tcp_forwarder *fwd)
     return 0;
 }
 
-static int map_bind_error(int error_number)
+static forwarder_error_t map_bind_error(int error_number)
 {
     if (error_number == EADDRINUSE)
         return FORWARDER_ERROR_ADDRESS_IN_USE;
@@ -817,20 +817,35 @@ tcp_forwarder_t *tcp_forwarder_create_on_runtime(
     return fwd;
 }
 
-int tcp_forwarder_start(tcp_forwarder_t *fwd)
+static forwarder_error_t map_start_error(int result)
+{
+    if (result == -ENOMEM)
+        return FORWARDER_ERROR_MALLOC;
+    if (result < 0)
+    {
+        int error_number = -result;
+        if (error_number == EADDRINUSE || error_number == EACCES)
+            return map_bind_error(error_number);
+    }
+    return FORWARDER_ERROR_UNKNOWN;
+}
+
+forwarder_error_t tcp_forwarder_start(tcp_forwarder_t *fwd)
 {
     if (fwd == NULL || fwd->started)
-        return -EINVAL;
-    if (listen(fwd->listen_fd, 128) != 0)
-        return -errno;
+        return FORWARDER_ERROR_UNKNOWN;
+    if (listen(fwd->listen_fd, 128) != 0) {
+        int error_number = errno;
+        return map_bind_error(error_number);
+    }
     int rc = submit_accept(fwd);
     if (rc == 0) {
         fwd->started = 1;
         rc = io_uring_submit(forwarder_runtime_get_ring(fwd->runtime));
         if (rc >= 0)
-            rc = 0;
+            return FORWARDER_OK;
     }
-    return rc;
+    return map_start_error(rc);
 }
 
 void tcp_forwarder_request_stop(tcp_forwarder_t *fwd)

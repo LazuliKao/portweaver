@@ -118,8 +118,9 @@ extern "C"
 
     // Must be called on the owning runtime thread.
     // Starts accepting traffic for an already-created listener but does not run
-    // the enclosing runtime.
-    int tcp_forwarder_start(tcp_forwarder_t *forwarder);
+    // the enclosing runtime. Returns only forwarder_error_t values; native
+    // backend error codes must not cross this ABI boundary.
+    forwarder_error_t tcp_forwarder_start(tcp_forwarder_t *forwarder);
     // Cross-thread stop request entry point. Stop may be asynchronous: returning
     // from this function does not imply close callbacks have finished.
     void tcp_forwarder_request_stop(tcp_forwarder_t *forwarder);
@@ -186,8 +187,9 @@ extern "C"
 
     // Must be called on the owning runtime thread.
     // Starts accepting traffic for an already-created listener but does not run
-    // the enclosing runtime.
-    int udp_forwarder_start(udp_forwarder_t *forwarder);
+    // the enclosing runtime. Returns only forwarder_error_t values; native
+    // backend error codes must not cross this ABI boundary.
+    forwarder_error_t udp_forwarder_start(udp_forwarder_t *forwarder);
     // Cross-thread stop request entry point. Stop may be asynchronous: returning
     // from this function does not imply close callbacks have finished.
     void udp_forwarder_request_stop(udp_forwarder_t *forwarder);
