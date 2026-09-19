@@ -54,6 +54,7 @@ pub const DnsProvider = enum {
     trafficroute,
     dnspod,
     dnsla,
+    desec,
     cloudflare,
     huaweicloud,
     callback,
@@ -81,6 +82,7 @@ pub const DnsProvider = enum {
             .trafficroute => "trafficroute",
             .dnspod => "dnspod",
             .dnsla => "dnsla",
+            .desec => "desec",
             .cloudflare => "cloudflare",
             .huaweicloud => "huaweicloud",
             .callback => "callback",
@@ -109,6 +111,7 @@ pub const DnsProvider = enum {
         if (std.mem.eql(u8, str, "trafficroute")) return .trafficroute;
         if (std.mem.eql(u8, str, "dnspod")) return .dnspod;
         if (std.mem.eql(u8, str, "dnsla")) return .dnsla;
+        if (std.mem.eql(u8, str, "desec")) return .desec;
         if (std.mem.eql(u8, str, "cloudflare")) return .cloudflare;
         if (std.mem.eql(u8, str, "huaweicloud")) return .huaweicloud;
         if (std.mem.eql(u8, str, "callback")) return .callback;
@@ -384,7 +387,7 @@ pub fn cleanup() void {
 }
 
 test "ddns provider: known provider round-trips through strings" {
-    const cases = [_]DnsProvider{ .alidns, .cloudflare, .dynv6, .name_com };
+    const cases = [_]DnsProvider{ .alidns, .cloudflare, .desec, .dynv6, .name_com };
 
     for (cases) |provider| {
         const str = provider.toString();

@@ -11,7 +11,7 @@ High-performance port forwarding engine for OpenWrt, written in Zig. Combines ke
 - **Port Range Mapping** — Map port ranges (e.g. `8080-8090` to `9080-9090`) with automatic expansion
 - **FRP Client (frpc)** — Statically linked Go library, reverse proxy tunneling (`-Dfrpc=true`)
 - **FRP Server (frps)** — Statically linked Go library, act as an FRP server (`-Dfrps=true`)
-- **DDNS** — 24 DNS providers (`-Dddns=true`)
+- **DDNS** — 25 DNS providers (`-Dddns=true`)
 - **UCI Config** — Native OpenWrt UCI configuration from `/etc/config/portweaver` (`-Duci=true`)
 - **UCI Firewall** — Auto-manage ACCEPT and DNAT/redirect rules via UCI
 - **Traffic Statistics** — Per-project byte counters via `enable_app_stats` (app-layer) and `enable_firewall_stats` (nftables kernel counters)
@@ -91,7 +91,7 @@ zig build -Doptimize=ReleaseSmall     # Optimized for embedded (LTO, stripped)
 | `-Dubus=true` | Enable UBUS RPC server |
 | `-Dfrpc=true` | Enable FRP client (statically linked Go library) |
 | `-Dfrps=true` | Enable FRP server (statically linked Go library) |
-| `-Dddns=true` | Enable DDNS support (24 providers, statically linked Go library) |
+| `-Dddns=true` | Enable DDNS support (25 providers, statically linked Go library) |
 
 All Go-based features (FRPC, FRPS, DDNS) are compiled together into a single `libgolibs.a` and statically linked into the final binary.
 
@@ -154,7 +154,7 @@ graph TD
 
     subgraph GoServices["In-Process Go Services"]
         FRP["FRP Tunneling<br/>(FRPC Client / FRPS Server)"]
-        DDNS["Dynamic DNS Sync<br/>(24 DNS Providers)"]
+        DDNS["Dynamic DNS Sync<br/>(25 DNS Providers)"]
     end
 
     Engine --> Core
@@ -182,7 +182,7 @@ graph TD
   - **Userspace App-Layer Forwarding (`impl/app_forward/`)**: Asynchronous, multi-threaded forwarding powered by `libuv` event loops (`loop_manager.zig`). Supports TCP/UDP traffic, cross-family IPv4/IPv6 address translation, socket reuse (`SO_REUSEADDR`), and real-time app-layer byte statistics (`enable_app_stats`).
 - **Statically Linked Go Subsystems** (`src/impl/golibs/` -> `libgolibs.a`):
   - **FRP Reverse Proxying (`frpc_forward.zig`, `frps_forward.zig`)**: Statically linked FRP Client and Server modules. Managed entirely in-process via CGO bindings without external `frpc`/`frps` binaries.
-  - **Dynamic DNS Sync (`ddns_manager.zig`)**: In-process DDNS update engine supporting 24 DNS providers with configurable polling intervals.
+  - **Dynamic DNS Sync (`ddns_manager.zig`)**: In-process DDNS update engine supporting 25 DNS providers with configurable polling intervals.
 - **UBUS RPC & Diagnostics Subsystem** (`ubus/`, `event_log.zig`, `file_log.zig`):
   - **UBUS Server**: Exposes RPC methods under the `portweaver` namespace for runtime status inspection, per-project dynamic toggle (`set_enabled`), FRPC/FRPS stats, and DDNS logs.
   - **Diagnostics**: Includes a thread-safe circular event log ring buffer (20 entries) and a rotating file logger.
@@ -257,7 +257,9 @@ The JSON configuration schema is documented at [docs/portweaver-config.schema.js
 
 ### DDNS Providers
 
-24 DNS providers are supported: `alidns`, `aliesa`, `tencentcloud`, `trafficroute`, `dnspod`, `dnsla`, `cloudflare`, `huaweicloud`, `callback`, `baiducloud`, `porkbun`, `godaddy`, `namecheap`, `namesilo`, `vercel`, `dynadot`, `dynv6`, `spaceship`, `nowcn`, `eranet`, `gcore`, `edgeone`, `nsone`, `name_com`.
+25 DNS providers are supported: `alidns`, `aliesa`, `tencentcloud`, `trafficroute`, `dnspod`, `dnsla`, `desec`, `cloudflare`, `huaweicloud`, `callback`, `baiducloud`, `porkbun`, `godaddy`, `namecheap`, `namesilo`, `vercel`, `dynadot`, `dynv6`, `spaceship`, `nowcn`, `eranet`, `gcore`, `edgeone`, `nsone`, `name_com`.
+
+For deSEC, leave `dns_id` empty and put the API token in `dns_secret`. Supported TTL values range from 3600 to 86400 seconds.
 
 ## UBUS RPC API
 

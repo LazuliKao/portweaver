@@ -17,7 +17,7 @@ PortWeaver 是一个为 OpenWrt 设计的高性能端口转发统一管理引擎
 - **端口范围映射** — 例如 8080-8090 映射到 9080-9090，自动扩展
 - **FRP 客户端 (frpc)** — 可选，静态链接 Go 库，`-Dfrpc=true`
 - **FRP 服务端 (frps)** — 可选，静态链接 Go 库，`-Dfrps=true`
-- **DDNS** — 可选，支持 24 个 DNS 提供商，`-Dddns=true`
+- **DDNS** — 可选，支持 25 个 DNS 提供商，`-Dddns=true`
 - **UCI 配置** — 可选，`-Duci=true`，从 `/etc/config/portweaver` 读取
 - **UCI 防火墙** — 自动管理 ACCEPT + DNAT/重定向规则
 - **流量统计** — 每项目字节计数器，支持 `enable_app_stats`（应用层）和 `enable_firewall_stats`（nftables 内核计数器）
@@ -26,7 +26,7 @@ PortWeaver 是一个为 OpenWrt 设计的高性能端口转发统一管理引擎
 
 ### DDNS 支持的提供商
 
-alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, cloudflare, huaweicloud, callback, baiducloud, porkbun, godaddy, namecheap, namesilo, vercel, dynadot, dynv6, spaceship, nowcn, eranet, gcore, edgeone, nsone, name_com
+alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, desec, cloudflare, huaweicloud, callback, baiducloud, porkbun, godaddy, namecheap, namesilo, vercel, dynadot, dynv6, spaceship, nowcn, eranet, gcore, edgeone, nsone, name_com
 
 ## 快速开始
 
@@ -128,7 +128,7 @@ graph TD
 
     subgraph GoServices["进程内 Go 服务"]
         FRP["FRP 内网穿透<br/>(FRPC 客户端 / FRPS 服务端)"]
-        DDNS["动态 DNS 同步<br/>(24 个 DNS 服务商)"]
+        DDNS["动态 DNS 同步<br/>(25 个 DNS 服务商)"]
     end
 
     Engine --> Core
@@ -156,7 +156,7 @@ graph TD
   - **用户态应用层转发 (`impl/app_forward/`)**：基于 `libuv` 事件循环（`loop_manager.zig`）的多线程异步 I/O 引擎。支持 TCP/UDP 转发、IPv4/IPv6 跨协议栈转换、套接字复用（`SO_REUSEADDR`）及实时字节流量统计（`enable_app_stats`）。
 - **静态链接 Go 扩展库** (`src/impl/golibs/` -> `libgolibs.a`)：
   - **FRP 反向代理 (`frpc_forward.zig`, `frps_forward.zig`)**：静态链接的 FRP Client 和 Server 模块，全在进程内通过 CGO 绑定管理，无需依赖外部 `frpc`/`frps` 可执行文件。
-  - **动态 DNS 同步 (`ddns_manager.zig`)**：进程内 DDNS 更新引擎，支持 24 家 DNS 服务商及可配置的检查间隔。
+  - **动态 DNS 同步 (`ddns_manager.zig`)**：进程内 DDNS 更新引擎，支持 25 家 DNS 服务商及可配置的检查间隔。
 - **UBUS RPC 与诊断子系统** (`ubus/`, `event_log.zig`, `file_log.zig`)：
   - **UBUS RPC 服务**：在 `portweaver` 命名空间下暴露 RPC 方法，支持查询运行状态、按项目动态开关（`set_enabled`）、FRP 统计及 DDNS 日志。
   - **诊断日志**：内置线程安全环形事件日志缓冲区（容量 20）及滚动文件日志记录器。
@@ -325,6 +325,8 @@ config project 'rdp'
   ]
 }
 ```
+
+使用 deSEC 时，`dns_id` 保持为空，将 API 令牌填写到 `dns_secret`；TTL 支持 3600 至 86400 秒。
 
 ## 文档
 

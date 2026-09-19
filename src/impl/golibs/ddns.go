@@ -63,7 +63,7 @@ func (l *ddns_ringBufferLogger) Write(p []byte) (n int, err error) {
 
 //export DdnsGetVersion
 func DdnsGetVersion() *C.char {
-	return C.CString("v6.15.0")
+	return C.CString("v6.17.7")
 }
 
 //export DdnsInit
@@ -98,6 +98,8 @@ func DdnsCreateInstance(
 		dnsSelected = &dns.Dnspod{}
 	case "dnsla":
 		dnsSelected = &dns.Dnsla{}
+	case "desec":
+		dnsSelected = &dns.DeSEC{}
 	case "cloudflare":
 		dnsSelected = &dns.Cloudflare{}
 	case "huaweicloud":

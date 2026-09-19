@@ -223,6 +223,33 @@
       "webhook_url": "",
       "webhook_body": "",
       "webhook_headers": ""
+    },
+    {
+      "name": "desec-home",
+      "dns_provider": "desec",
+      "dns_id": "",
+      "dns_secret": "your_desec_api_token",
+      "dns_ext_param": "",
+      "ttl": 3600,
+      "ipv4_enable": true,
+      "ipv4_get_type": "url",
+      "ipv4_url": "https://api.ipify.org",
+      "ipv4_net_interface": "",
+      "ipv4_cmd": "",
+      "ipv4_domains": "home.example.com",
+      "ipv6_enable": false,
+      "ipv6_get_type": "url",
+      "ipv6_url": "",
+      "ipv6_net_interface": "",
+      "ipv6_cmd": "",
+      "ipv6_reg": "",
+      "ipv6_domains": "",
+      "not_allow_wan_access": true,
+      "username": "",
+      "password": "",
+      "webhook_url": "",
+      "webhook_body": "",
+      "webhook_headers": ""
     }
   ]
 }
