@@ -77,6 +77,8 @@ pub const ProjectHandle = struct {
     error_code: i32 = 0,
     active_ports: u32 = 0,
     id: usize,
+    /// Updated by RuntimeController for configuration and runtime transitions.
+    last_changed: u64 = 0,
     runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     runtime_enabled_lock: std.Io.Mutex = .init,

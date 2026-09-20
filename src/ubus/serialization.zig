@@ -196,6 +196,8 @@ pub fn wrapHandler(comptime func: anytype, comptime ArgsType: type, comptime pol
 
             const server = @import("server.zig");
             const state = server.g_state orelse return c.UBUS_STATUS_UNKNOWN_ERROR;
+            var request = server.RequestContext.init(state);
+            defer request.deinit();
 
             var arena = std.heap.ArenaAllocator.init(state.allocator);
             defer arena.deinit();
@@ -209,12 +211,12 @@ pub fn wrapHandler(comptime func: anytype, comptime ArgsType: type, comptime pol
 
             if (ArgsType == void) {
                 if (inner_return_type == void) {
-                    func(alloc, state) catch |err| {
+                    func(alloc, &request) catch |err| {
                         std.log.warn("ubus handler error: {any}", .{err});
                         return mapZigErrorToUbus(err);
                     };
                 } else {
-                    const res = func(alloc, state) catch |err| {
+                    const res = func(alloc, &request) catch |err| {
                         std.log.warn("ubus handler error: {any}", .{err});
                         return mapZigErrorToUbus(err);
                     };
@@ -230,12 +232,12 @@ pub fn wrapHandler(comptime func: anytype, comptime ArgsType: type, comptime pol
                     return c.UBUS_STATUS_INVALID_ARGUMENT;
                 };
                 if (inner_return_type == void) {
-                    func(alloc, state, args) catch |err| {
+                    func(alloc, &request, args) catch |err| {
                         std.log.warn("ubus handler error: {any}", .{err});
                         return mapZigErrorToUbus(err);
                     };
                 } else {
-                    const res = func(alloc, state, args) catch |err| {
+                    const res = func(alloc, &request, args) catch |err| {
                         std.log.warn("ubus handler error: {any}", .{err});
                         return mapZigErrorToUbus(err);
                     };

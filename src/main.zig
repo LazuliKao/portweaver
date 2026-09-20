@@ -1,26 +1,14 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const rathole_enabled = build_options.rathole_client_mode or build_options.rathole_server_mode;
-const rathole_forward = if (rathole_enabled) @import("impl/rathole_forward.zig") else struct {};
 const config = @import("config/mod.zig");
-const app_forward = @import("impl/app_forward.zig");
-const frpc_forward = if (build_options.frpc_mode) @import("impl/frpc_forward.zig") else struct {};
-const ddns_manager = if (build_options.ddns_mode) @import("impl/ddns_manager.zig") else struct {};
-const frps_forward = if (build_options.frps_mode) @import("impl/frps_forward.zig") else struct {};
-const libfrpc = if (build_options.frpc_mode) @import("impl/frpc/libfrpc.zig") else struct {};
-const libfrps = if (build_options.frps_mode) @import("impl/frps/libfrps.zig") else struct {};
-const project_status = @import("impl/project_status.zig");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
-// 仅在 UCI 模式下导入 UCI 相关模块
-const firewall = if (build_options.uci_mode) @import("impl/uci_firewall.zig") else void;
-const nft_firewall = if (build_options.nftables_mode) @import("impl/nft_firewall.zig") else void;
-const nftables = if (build_options.nftables_mode) @import("nftables/mod.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
 const event_log = @import("event_log.zig");
 const process_lock = @import("process_lock.zig");
 const file_log = @import("file_log.zig");
-const compat = @import("compat.zig");
 const reload = @import("reload.zig");
+const RuntimeController = @import("runtime_controller.zig").RuntimeController;
 const libddns = if (build_options.ddns_mode) @import("impl/ddns/libddns.zig") else struct {};
 const wol = if (build_options.wol_mode) @import("impl/wol.zig") else struct {};
 
@@ -186,39 +174,16 @@ pub fn main(init: std.process.Init) !void {
     }
     defer file_log.deinitGlobalFileLogger();
 
-    var handles = try project_status.ProjectHandleList.initCapacity(allocator, result.projects.len);
+    // RuntimeController takes ownership of the live config and every project
+    // handle. Reload and UBUS only receive its explicit APIs.
+    var runtime = try RuntimeController.init(allocator, result);
+    defer runtime.deinit();
 
-    // 初始化重载模块（接管 config 所有权，之后不要 deinit result）
-    reload.init(allocator, &handles, result, cfg_source, cfg_path);
+    reload.init(allocator, &runtime, cfg_source, cfg_path);
     defer reload.deinit();
-    // This defer is registered after reload.deinit so handles stop before their
-    // borrowed project configuration is released.
-    defer {
-        if (build_options.ubus_mode) {
-            ubus_server.stop();
-        }
-        project_status.stopAll(&handles);
-        if (rathole_enabled) {
-            rathole_forward.stop_all();
-            @import("impl/librathole.zig").cleanup();
-        }
-        handles.deinit();
-        if (build_options.frpc_mode) {
-            frpc_forward.stopAll();
-            libfrpc.cleanup();
-        }
-        if (build_options.ddns_mode) {
-            ddns_manager.deinit(allocator);
-        }
-        if (build_options.frps_mode) {
-            frps_forward.stopAll();
-            libfrps.cleanup();
-        }
-    }
-    const cfg = reload.getConfig().?;
 
     @import("impl/app_forward/forwarder_runtime.zig").logBackendVersion();
-    std.log.info("PortWeaver starting with {d} project(s)...", .{cfg.projects.len});
+    std.log.info("PortWeaver starting with {d} project(s)...", .{runtime.projectCount()});
     if (build_options.frpc_mode) {
         std.log.info("FRPC client mode enabled (build flag)", .{});
     }
@@ -230,12 +195,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 应用配置并启动服务
-    const has_app_forward = try applyConfig(allocator, &handles, cfg);
+    const has_app_forward = try runtime.start();
 
     if (build_options.ubus_mode) {
-        ubus_server.start(allocator, &handles) catch |err| {
+        ubus_server.start(allocator, &runtime) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
         };
+        defer ubus_server.stop();
     }
 
     std.log.info("PortWeaver started successfully.", .{});
@@ -257,9 +223,6 @@ pub fn main(init: std.process.Init) !void {
                 .reload => {
                     std.log.info("Configuration reload requested...", .{});
                     reload.apply();
-                    if (build_options.ubus_mode) {
-                        ubus_server.notifyReload();
-                    }
                 },
             }
         }
@@ -296,209 +259,4 @@ fn parseConfigFile(args: []const []const u8) ![]const u8 {
     // 如果没有指定配置文件，使用默认路径
     std.log.info("No config file specified, using default: config.json", .{});
     return "config.json";
-}
-fn setupProject(allocator: std.mem.Allocator, id: usize, handles: *project_status.ProjectHandleList, project: config.Project, use_nftables: bool) !void {
-    const handle = try allocator.create(project_status.ProjectHandle);
-    errdefer allocator.destroy(handle);
-    handle.* = .init(allocator, id, project, use_nftables);
-    errdefer handle.deinit();
-    try handles.append(handle);
-
-    if (!project.enabled) {
-        handle.setDisabled();
-        std.log.info("Project {d} ({s}) is disabled, skipping.", .{ id + 1, project.remark });
-        return;
-    }
-
-    // 应用层端口转发将在所有handle添加完成后统一启动
-    if (project.enable_app_forward) {
-        std.log.debug("  Will start application layer forwarding...", .{});
-    }
-}
-/// 应用配置：设置防火墙规则并启动应用层转发
-fn applyConfig(allocator: std.mem.Allocator, handles: *project_status.ProjectHandleList, cfg: *const config.Config) !bool {
-    if (rathole_enabled) try rathole_forward.apply_config(allocator, cfg);
-    // 设置所有项目
-    for (cfg.projects, 0..) |project, i| {
-        setupProject(allocator, i, handles, project, cfg.use_nftables) catch |err| {
-            std.log.err("Failed to setup project {d} ({s}): {any}", .{ i + 1, project.remark, err });
-            continue;
-        };
-    }
-
-    // 防火墙规则：根据配置选择后端
-    if (build_options.nftables_mode and cfg.use_nftables) {
-        // 使用 nftables 后端
-        applyNftablesRules(allocator, cfg.projects) catch |err| {
-            std.log.warn("Failed to apply nftables rules: {any}", .{err});
-        };
-    } else if (build_options.uci_mode) {
-        // 使用 OpenWrt fw4 后端（默认）
-        try applyFirewallRules(allocator, cfg.projects);
-    }
-
-    // 启动 DDNS 服务（如果启用）
-    if (build_options.ddns_mode) {
-        std.log.info("Applying DDNS configuration...", .{});
-        ddns_manager.applyConfig(allocator, cfg.ddns_configs) catch |err| {
-            std.log.warn("Failed to apply DDNS configuration: {any}", .{err});
-        };
-    }
-
-    // 启动 FRPS 服务（如果启用）
-    if (build_options.frps_mode) {
-        std.log.info("Starting FRPS servers...", .{});
-        frps_forward.startConfiguredServers(allocator, &cfg.frps_nodes) catch |err| {
-            std.log.warn("Failed to start configured FRPS servers: {any}", .{err});
-        };
-    }
-
-    // 所有handle添加完成后，启动线程
-    // 这样可以确保handles数组不会在线程运行时重新分配
-    return try startForwardingThreads(allocator, handles, cfg);
-}
-
-/// 配置防火墙规则（仅 UCI 模式）
-fn applyFirewallRules(allocator: std.mem.Allocator, projects: []const config.Project) !void {
-    var uci_ctx = try uci.UciContext.alloc();
-    defer uci_ctx.free();
-
-    // 删除旧的规则
-    std.log.info("Clearing old firewall rules...", .{});
-    firewall.clearFirewallRules(uci_ctx, allocator) catch |err| {
-        std.log.warn("Failed to clear old firewall rules: {any}", .{err});
-    };
-
-    // 应用新规则
-    for (projects, 0..) |project, i| {
-        if (!project.enabled) continue;
-
-        std.log.info("Applying project {d}: {s}", .{ i + 1, project.remark });
-        logProjectConfig(project);
-
-        // 应用防火墙规则
-        // 注意：即使启用统计模式，应用层转发仍需要 ACCEPT 规则来放通端口
-        // applyFirewallRulesForProject 会根据配置标志智能决定需要哪些规则
-        std.log.debug("  Applying firewall rules...", .{});
-        firewall.applyFirewallRulesForProject(uci_ctx, allocator, project) catch |err| {
-            std.log.warn("Failed to apply firewall rules for project {d}: {any}", .{ i + 1, err });
-        };
-    }
-
-    // 重新加载防火墙配置
-    std.log.info("Reloading firewall...", .{});
-    firewall.reloadFirewall(allocator) catch |err| {
-        std.log.warn("Failed to reload firewall: {any}", .{err});
-    };
-}
-
-/// 配置 nftables 规则（仅 nftables 模式）
-fn applyNftablesRules(allocator: std.mem.Allocator, projects: []const config.Project) !void {
-    if (!nftables.isLoaded()) {
-        std.log.warn("libnftables not available, skipping nftables rules", .{});
-        return;
-    }
-
-    var ctx = try nftables.NftablesContext.init(allocator);
-    defer ctx.deinit();
-
-    // Setup table and chains
-    std.log.info("Setting up nftables table...", .{});
-    nft_firewall.setupTable(&ctx, allocator) catch |err| {
-        std.log.warn("Failed to setup nftables table: {any}", .{err});
-        return;
-    };
-
-    // Clear old rules
-    std.log.info("Clearing old nftables rules...", .{});
-    nft_firewall.clearRules(&ctx) catch |err| {
-        std.log.warn("Failed to clear old nftables rules: {any}", .{err});
-    };
-
-    // Apply new rules
-    for (projects, 0..) |project, i| {
-        if (!project.enabled) continue;
-
-        std.log.info("Applying nftables rules for project {d}: {s}", .{ i + 1, project.remark });
-        nft_firewall.applyRulesForProject(&ctx, allocator, project) catch |err| {
-            std.log.warn("Failed to apply nftables rules for project {d}: {any}", .{ i + 1, err });
-        };
-    }
-
-    std.log.info("nftables rules applied successfully.", .{});
-}
-
-/// 记录项目配置信息
-fn logProjectConfig(project: config.Project) void {
-    if (project.port_mappings.len > 0) {
-        std.log.debug("  Mode: Port Mappings ({d} mapping(s))", .{project.port_mappings.len});
-        std.log.debug("  Target: {s}", .{project.target_address});
-    } else {
-        std.log.debug("  Mode: Single Port", .{});
-        std.log.debug("  Listen: :{d} -> Target: {s}:{d}", .{
-            project.listen_port,
-            project.target_address,
-            project.target_port,
-        });
-    }
-}
-
-/// 启动所有转发线程
-fn startForwardingThreads(
-    allocator: std.mem.Allocator,
-    handles: *project_status.ProjectHandleList,
-    cfg: *const config.Config,
-) !bool {
-    std.log.info("Starting forwarding threads...", .{});
-    var has_app_forward = false;
-
-    if (build_options.frpc_mode) {
-        frpc_forward.initialize(allocator);
-    }
-
-    for (handles.items) |handle| {
-        if (!handle.cfg.enabled) {
-            continue;
-        }
-        if (handle.cfg.enable_app_forward) {
-            has_app_forward = true;
-        }
-        startForwarding(handle, cfg);
-    }
-    if (build_options.frpc_mode) {
-        frpc_forward.startConfiguredClients(&cfg.frpc_nodes) catch |err| {
-            std.log.warn("Failed to start configured FRPC clients: {any}", .{err});
-        };
-    }
-    return has_app_forward;
-}
-
-/// 启动转发
-fn startForwarding(
-    handle: *project_status.ProjectHandle,
-    cfg: *const config.Config,
-) void {
-    std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, app_stats={}, firewall_stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_app_stats, handle.cfg.enable_firewall_stats });
-    // 启动应用层转发
-    if (handle.cfg.enable_app_forward) {
-        app_forward.startForwarding(handle) catch |err| {
-            std.log.err("Failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-            if (compat.isDebugBuild()) {
-                if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpErrorReturnTrace(trace);
-                }
-            }
-        };
-    }
-    // 启动 FRPC 转发（如果启用）
-    if (build_options.frpc_mode) {
-        frpc_forward.startForwarding(handle, &cfg.frpc_nodes) catch |err| {
-            std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
-            if (compat.isDebugBuild()) {
-                if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpErrorReturnTrace(trace);
-                }
-            }
-        };
-    }
 }

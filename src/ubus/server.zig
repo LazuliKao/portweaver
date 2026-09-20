@@ -1,12 +1,11 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const types = @import("../config/types.zig");
-const app_forward = @import("../impl/app_forward.zig");
+const runtime_controller = @import("../runtime_controller.zig");
+const RuntimeController = runtime_controller.RuntimeController;
 const ubus = @import("libubus.zig");
 const ubox = @import("ubox.zig");
 const libblobmsg_json = @import("libblobmsg_json.zig");
 const c = ubox.c;
-const project_status = @import("../impl/project_status.zig");
 const frp_status = if (build_options.frpc_mode or build_options.frps_mode) @import("../impl/frp_status.zig") else struct {};
 const frpc_forward = if (build_options.frpc_mode) @import("../impl/frpc_forward.zig") else struct {};
 const frps_forward = if (build_options.frps_mode) @import("../impl/frps_forward.zig") else struct {};
@@ -49,151 +48,42 @@ const event_log = @import("../event_log.zig");
 const serialization = @import("serialization.zig");
 const RawJson = serialization.RawJson;
 const wrapHandler = serialization.wrapHandler;
-const reload = @import("../reload.zig");
 const process_lock = @import("../process_lock.zig");
 
 const STATUS_RUNNING: [:0]const u8 = "running";
 const STATUS_STOPPED: [:0]const u8 = "stopped";
 const STATUS_DEGRADED: [:0]const u8 = "degraded";
 
-const GlobalSnapshot = struct {
-    status: [:0]const u8,
-    total_projects: u32,
-    active_ports: u32,
-    total_bytes_in: u64,
-    total_bytes_out: u64,
-    uptime: u64,
-};
-
 const RuntimeState = struct {
     allocator: std.mem.Allocator,
-    start_ts: u64,
-    projects: *project_status.ProjectHandleList,
-    enabled: []bool,
-    last_changed: []u64,
-    use_nftables: bool,
-    mutex: std.Io.Mutex = .init,
-    pub fn init(allocator: std.mem.Allocator, projects: *project_status.ProjectHandleList) !*RuntimeState {
+    controller: *RuntimeController,
+
+    pub fn init(allocator: std.mem.Allocator, controller: *RuntimeController) !*RuntimeState {
         const state = try allocator.create(RuntimeState);
         errdefer allocator.destroy(state);
-
-        const now = currentTs();
-        const enabled = try allocator.alloc(bool, projects.items.len);
-        errdefer allocator.free(enabled);
-
-        const last_changed = try allocator.alloc(u64, projects.items.len);
-        errdefer allocator.free(last_changed);
-
         state.* = .{
             .allocator = allocator,
-            .start_ts = now,
-            .projects = projects,
-            .enabled = enabled,
-            .last_changed = last_changed,
-            .use_nftables = if (projects.items.len > 0) projects.items[0].use_nftables else false,
+            .controller = controller,
         };
-
-        for (projects.items, 0..) |project, idx| {
-            state.enabled[idx] = project.cfg.enabled;
-            state.last_changed[idx] = now;
-        }
-
         return state;
     }
 
     pub fn deinit(self: *RuntimeState) void {
-        self.allocator.free(self.enabled);
-        self.allocator.free(self.last_changed);
         self.allocator.destroy(self);
     }
+};
 
-    fn syncFromProjectsLocked(self: *RuntimeState) !void {
-        const new_len = self.projects.items.len;
-        const new_enabled = try self.allocator.alloc(bool, new_len);
-        errdefer self.allocator.free(new_enabled);
-        const new_last_changed = try self.allocator.alloc(u64, new_len);
-        errdefer self.allocator.free(new_last_changed);
+/// A request-scoped capability. It retains the controller lock while a UBUS
+/// handler operates on runtime services, but exposes only controller commands.
+pub const RequestContext = struct {
+    guard: RuntimeController.Guard,
 
-        const now = currentTs();
-        for (0..new_len) |i| {
-            const project = self.projects.items[i];
-            const is_enabled = project.cfg.enabled;
-            new_enabled[i] = is_enabled;
-
-            if (i < self.enabled.len) {
-                if (self.enabled[i] != is_enabled) {
-                    new_last_changed[i] = now;
-                } else {
-                    new_last_changed[i] = self.last_changed[i];
-                }
-            } else {
-                new_last_changed[i] = now;
-            }
-        }
-
-        self.allocator.free(self.enabled);
-        self.allocator.free(self.last_changed);
-        self.enabled = new_enabled;
-        self.last_changed = new_last_changed;
-        self.use_nftables = if (new_len > 0) self.projects.items[0].use_nftables else false;
+    pub fn init(state: *RuntimeState) RequestContext {
+        return .{ .guard = state.controller.acquire() };
     }
 
-    pub fn syncFromProjects(self: *RuntimeState) !void {
-        self.mutex.lockUncancelable(compat.io());
-        defer self.mutex.unlock(compat.io());
-        try self.syncFromProjectsLocked();
-    }
-
-    fn globalSnapshot(self: *RuntimeState) GlobalSnapshot {
-        self.mutex.lockUncancelable(compat.io());
-        defer self.mutex.unlock(compat.io());
-
-        if (self.enabled.len != self.projects.items.len) {
-            self.syncFromProjectsLocked() catch |err| {
-                std.log.err("ubus: failed to sync state in snapshot: {any}", .{err});
-            };
-        }
-
-        var enabled_projects: u32 = 0;
-        var success_projects: u32 = 0;
-        var active_ports: u32 = 0;
-        var bytes_in: u64 = 0;
-        var bytes_out: u64 = 0;
-
-        var i: usize = 0;
-        while (i < self.projects.items.len) : (i += 1) {
-            const project = self.projects.items[i];
-            if (self.enabled[i]) {
-                enabled_projects += 1;
-                if (project.startup_status == .success) {
-                    success_projects += 1;
-                }
-            }
-            active_ports += project.active_ports;
-
-            // Collect traffic stats from the project
-            const info = project.getProjectRuntimeInfo();
-            bytes_in += info.bytes_in;
-            bytes_out += info.bytes_out;
-        }
-
-        // 判断整体状态：当启用的项目数为0时是STOPPED，当启用项目全部启动成功时是RUNNING，否则是DEGRADED
-        const status: [:0]const u8 = if (enabled_projects == 0)
-            STATUS_STOPPED
-        else if (success_projects == enabled_projects)
-            STATUS_RUNNING
-        else
-            STATUS_DEGRADED;
-
-        const now = currentTs();
-        return .{
-            .status = status,
-            .total_projects = @intCast(self.projects.items.len),
-            .active_ports = active_ports,
-            .total_bytes_in = bytes_in,
-            .total_bytes_out = bytes_out,
-            .uptime = now - self.start_ts,
-        };
+    pub fn deinit(self: *RequestContext) void {
+        self.guard.release();
     }
 };
 
@@ -358,12 +248,12 @@ const field_names = struct {
     pub const project: [:0]const u8 = "project";
 };
 
-pub fn start(allocator: std.mem.Allocator, projects: *project_status.ProjectHandleList) !void {
+pub fn start(allocator: std.mem.Allocator, controller: *RuntimeController) !void {
     g_lifecycle_mutex.lockUncancelable(compat.io());
     defer g_lifecycle_mutex.unlock(compat.io());
 
     if (g_state != null) return;
-    const state = try RuntimeState.init(allocator, projects);
+    const state = try RuntimeState.init(allocator, controller);
     g_state = state;
     errdefer {
         g_state = null;
@@ -934,8 +824,8 @@ const RatholeStatusSection = struct {
     instances: []const RatholeInstanceStatus = &.{},
 };
 
-fn getRatholeStatus(allocator: std.mem.Allocator, state: *RuntimeState) !RatholeStatusSection {
-    _ = state;
+fn getRatholeStatus(allocator: std.mem.Allocator, request: *RequestContext) !RatholeStatusSection {
+    _ = request;
     if (!rathole_enabled) return .{};
     const json = try rathole_forward.get_status(allocator);
     defer allocator.free(json);
@@ -945,16 +835,16 @@ fn getRatholeStatus(allocator: std.mem.Allocator, state: *RuntimeState) !Rathole
 
 const RatholeInfoResponse = struct { status: []const u8, last_error: []const u8, logs: []const []const u8 };
 
-fn getRatholeInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !RatholeInfoResponse {
-    _ = state;
+fn getRatholeInfo(allocator: std.mem.Allocator, request: *RequestContext, args: RatholeArgs) !RatholeInfoResponse {
+    _ = request;
     const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
     const info = try rathole_forward.get_info(allocator, mode, args.name);
     return .{ .status = info.status, .last_error = info.last_error, .logs = info.logs };
 }
 
-fn clearRatholeLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: RatholeArgs) !struct { success: bool } {
+fn clearRatholeLogs(allocator: std.mem.Allocator, request: *RequestContext, args: RatholeArgs) !struct { success: bool } {
     _ = allocator;
-    _ = state;
+    _ = request;
     const mode = std.meta.stringToEnum(rathole_forward.Mode, args.mode) orelse return error.InvalidArgument;
     try rathole_forward.clear_logs(mode, args.name);
     return .{ .success = true };
@@ -969,19 +859,18 @@ fn ratholeMode(value: []const u8) !rathole_forward.Mode {
     return mode;
 }
 
-fn readRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ReadRatholeConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn readRatholeConfig(allocator: std.mem.Allocator, request: *RequestContext, args: ReadRatholeConfigArgs) !FrpConfigResponse {
     _ = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
     rathole_forward.validate_toml_path(args.path) catch |err| return failedRatholeConfigResponse(allocator, err);
-    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
-    const content = frp_config_file.read(allocator, cfg.frpConfigRoot(), args.path) catch |err| {
+    const root = try request.guard.copyFrpConfigRoot(allocator);
+    const content = frp_config_file.read(allocator, root, args.path) catch |err| {
         return failedRatholeConfigResponse(allocator, err);
     };
     return .{ .success = true, .content = content };
 }
 
-fn validateRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ValidateRatholeConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn validateRatholeConfig(allocator: std.mem.Allocator, request: *RequestContext, args: ValidateRatholeConfigArgs) !FrpConfigResponse {
+    _ = request;
     const mode = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
     rathole_forward.validate_toml(allocator, mode, args.content) catch |err| {
         return failedRatholeConfigResponse(allocator, err);
@@ -989,15 +878,14 @@ fn validateRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, arg
     return .{ .success = true };
 }
 
-fn writeRatholeConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: WriteRatholeConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn writeRatholeConfig(allocator: std.mem.Allocator, request: *RequestContext, args: WriteRatholeConfigArgs) !FrpConfigResponse {
     const mode = ratholeMode(args.mode) catch |err| return failedRatholeConfigResponse(allocator, err);
     rathole_forward.validate_toml_path(args.path) catch |err| return failedRatholeConfigResponse(allocator, err);
     rathole_forward.validate_toml(allocator, mode, args.content) catch |err| {
         return failedRatholeConfigResponse(allocator, err);
     };
-    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
-    frp_config_file.write(cfg.frpConfigRoot(), args.path, args.content) catch |err| {
+    const root = try request.guard.copyFrpConfigRoot(allocator);
+    frp_config_file.write(root, args.path, args.content) catch |err| {
         return failedRatholeConfigResponse(allocator, err);
     };
     if (args.reload orelse false) process_lock.requestReload();
@@ -1036,9 +924,8 @@ const WolStatusResponse = struct {
     last_error: ?[]const u8,
 };
 
-fn getStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetStatusResponse {
-    _ = allocator;
-    const snapshot = state.globalSnapshot();
+fn getStatus(allocator: std.mem.Allocator, request: *RequestContext) !GetStatusResponse {
+    const snapshot = try request.guard.snapshot(allocator);
     return .{
         .status = snapshot.status,
         .total_projects = snapshot.total_projects,
@@ -1049,27 +936,13 @@ fn getStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetStatusRespo
     };
 }
 
-fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProjectsResponse {
-    state.mutex.lockUncancelable(compat.io());
-    defer state.mutex.unlock(compat.io());
-
-    if (state.enabled.len != state.projects.items.len) {
-        try state.syncFromProjectsLocked();
-    }
-
+fn projectsFromSnapshot(allocator: std.mem.Allocator, snapshot: runtime_controller.Snapshot) !ListProjectsResponse {
     var projects_list: std.ArrayList(ProjectStatusInfo) = .empty;
     errdefer projects_list.deinit(allocator);
-
-    for (state.projects.items, 0..) |project, i| {
-        const info = project.getProjectRuntimeInfo();
-
+    for (snapshot.projects) |project| {
         var forwarders_list: std.ArrayList(ForwarderStatsInfo) = .empty;
         errdefer forwarders_list.deinit(allocator);
-
-        const forwarder_stats = project.getForwarderStats(allocator) catch &[_]project_status.ForwarderStats{};
-        defer if (forwarder_stats.len > 0) allocator.free(forwarder_stats);
-
-        for (forwarder_stats) |fwd_stat| {
+        for (project.forwarders) |fwd_stat| {
             try forwarders_list.append(allocator, .{
                 .protocol = fwd_stat.protocol,
                 .local_port = @intCast(fwd_stat.local_port),
@@ -1081,11 +954,7 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
 
         var failures_list: std.ArrayList(ForwarderFailureInfo) = .empty;
         errdefer failures_list.deinit(allocator);
-
-        const startup_failures = project.getStartupFailures(allocator) catch &[_]project_status.ForwarderFailure{};
-        defer if (startup_failures.len > 0) allocator.free(startup_failures);
-
-        for (startup_failures) |failure| {
+        for (project.failures) |failure| {
             try failures_list.append(allocator, .{
                 .protocol = failure.protocol,
                 .local_port = @intCast(failure.local_port),
@@ -1094,19 +963,19 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
         }
 
         try projects_list.append(allocator, .{
-            .id = @intCast(i),
-            .section_name = project.cfg.section_name,
-            .enabled = state.enabled[i],
-            .status = if (state.enabled[i]) STATUS_RUNNING else STATUS_STOPPED,
-            .startup_status = info.startup_status.toString(),
-            .active_ports = info.active_ports,
-            .bytes_in = info.bytes_in,
-            .bytes_out = info.bytes_out,
-            .active_sessions = info.active_sessions,
-            .last_changed = state.last_changed[i],
-            .error_code = if ((info.startup_status == .failed or info.startup_status == .partial) and info.error_code != 0) info.error_code else null,
-            .enable_app_stats = project.cfg.enable_app_stats,
-            .enable_firewall_stats = project.cfg.enable_firewall_stats,
+            .id = project.id,
+            .section_name = project.section_name,
+            .enabled = project.enabled,
+            .status = project.status,
+            .startup_status = project.startup_status,
+            .active_ports = project.active_ports,
+            .bytes_in = project.bytes_in,
+            .bytes_out = project.bytes_out,
+            .active_sessions = project.active_sessions,
+            .last_changed = project.last_changed,
+            .error_code = project.error_code,
+            .enable_app_stats = project.enable_app_stats,
+            .enable_firewall_stats = project.enable_firewall_stats,
             .forwarders = try forwarders_list.toOwnedSlice(allocator),
             .failures = try failures_list.toOwnedSlice(allocator),
         });
@@ -1117,47 +986,23 @@ fn listProjects(allocator: std.mem.Allocator, state: *RuntimeState) !ListProject
     };
 }
 
-fn setEnabled(allocator: std.mem.Allocator, state: *RuntimeState, args: SetEnabledArgs) !SetEnabledResponse {
+fn listProjects(allocator: std.mem.Allocator, request: *RequestContext) !ListProjectsResponse {
+    return projectsFromSnapshot(allocator, try request.guard.snapshot(allocator));
+}
+
+fn setEnabled(allocator: std.mem.Allocator, request: *RequestContext, args: SetEnabledArgs) !SetEnabledResponse {
     _ = allocator;
-    const idx: usize = @intCast(args.id);
-
-    state.mutex.lockUncancelable(compat.io());
-    defer state.mutex.unlock(compat.io());
-
-    if (state.enabled.len != state.projects.items.len) {
-        try state.syncFromProjectsLocked();
-    }
-
-    if (idx >= state.projects.items.len) {
-        return error.InvalidArgument;
-    }
-
-    const old_enabled = state.enabled[idx];
-    state.enabled[idx] = args.enabled;
-    const now = currentTs();
-    state.last_changed[idx] = now;
-
-    const project = state.projects.items[idx];
-    project.setRuntimeEnabled(args.enabled);
-
-    if (old_enabled != args.enabled) {
-        if (args.enabled) {
-            event_log.logEventFmt(.project_started, @intCast(idx), "Project {d} enabled via UBUS", .{idx + 1});
-        } else {
-            event_log.logEventFmt(.project_stopped, @intCast(idx), "Project {d} disabled via UBUS", .{idx + 1});
-        }
-    }
-
+    const result = try request.guard.setProjectEnabled(args.id, args.enabled);
     return .{
-        .id = args.id,
-        .enabled = args.enabled,
-        .status = if (args.enabled) STATUS_RUNNING else STATUS_STOPPED,
-        .last_changed = now,
+        .id = result.id,
+        .enabled = result.enabled,
+        .status = result.status,
+        .last_changed = result.last_changed,
     };
 }
 
-fn getFrpStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetFrpStatusResponse {
-    _ = state;
+fn getFrpStatus(allocator: std.mem.Allocator, request: *RequestContext) !GetFrpStatusResponse {
+    _ = request;
     const status = try frp_status.getFrpStatus(allocator);
     return .{
         .frp_enabled = status.frp_enabled,
@@ -1179,8 +1024,8 @@ fn getFrpStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetFrpStatu
     };
 }
 
-fn getFrpcInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcInfoArgs) !GetFrpInfoResponse {
-    _ = state;
+fn getFrpcInfo(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcInfoArgs) !GetFrpInfoResponse {
+    _ = request;
     const result = try frpc_forward.getClientStatus(allocator, args.id);
 
     var logs_list: std.ArrayList([]const u8) = .empty;
@@ -1198,8 +1043,8 @@ fn getFrpcInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpc
     };
 }
 
-fn getFrpsInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcInfoArgs) !GetFrpInfoResponse {
-    _ = state;
+fn getFrpsInfo(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcInfoArgs) !GetFrpInfoResponse {
+    _ = request;
     const result = try frps_forward.getServerStatus(allocator, args.id);
 
     var logs_list: std.ArrayList([]const u8) = .empty;
@@ -1217,20 +1062,19 @@ fn getFrpsInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpc
     };
 }
 
-fn readFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ReadFrpConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn readFrpConfig(allocator: std.mem.Allocator, request: *RequestContext, args: ReadFrpConfigArgs) !FrpConfigResponse {
     _ = frp_config_file.Kind.fromString(args.kind) catch |err| {
         return failedFrpConfigResponse(allocator, err);
     };
-    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
-    const content = frp_config_file.read(allocator, cfg.frpConfigRoot(), args.path) catch |err| {
+    const root = try request.guard.copyFrpConfigRoot(allocator);
+    const content = frp_config_file.read(allocator, root, args.path) catch |err| {
         return failedFrpConfigResponse(allocator, err);
     };
     return .{ .success = true, .content = content };
 }
 
-fn validateFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: ValidateFrpConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn validateFrpConfig(allocator: std.mem.Allocator, request: *RequestContext, args: ValidateFrpConfigArgs) !FrpConfigResponse {
+    _ = request;
     const kind = frp_config_file.Kind.fromString(args.kind) catch |err| {
         return failedFrpConfigResponse(allocator, err);
     };
@@ -1241,8 +1085,7 @@ fn validateFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: V
     return .{ .success = true };
 }
 
-fn writeFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: WriteFrpConfigArgs) !FrpConfigResponse {
-    _ = state;
+fn writeFrpConfig(allocator: std.mem.Allocator, request: *RequestContext, args: WriteFrpConfigArgs) !FrpConfigResponse {
     const kind = frp_config_file.Kind.fromString(args.kind) catch |err| {
         return failedFrpConfigResponse(allocator, err);
     };
@@ -1251,8 +1094,8 @@ fn writeFrpConfig(allocator: std.mem.Allocator, state: *RuntimeState, args: Writ
     };
     if (parser_error.len != 0) return .{ .success = false, .@"error" = parser_error };
 
-    const cfg = reload.getConfig() orelse return .{ .success = false, .@"error" = "configuration is not initialized" };
-    frp_config_file.write(cfg.frpConfigRoot(), args.path, args.content) catch |err| {
+    const root = try request.guard.copyFrpConfigRoot(allocator);
+    frp_config_file.write(root, args.path, args.content) catch |err| {
         return failedFrpConfigResponse(allocator, err);
     };
     if (args.reload orelse false) process_lock.requestReload();
@@ -1277,32 +1120,32 @@ fn failedFrpConfigResponse(allocator: std.mem.Allocator, err: anyerror) !FrpConf
     return .{ .success = false, .@"error" = try std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}) };
 }
 
-fn getFrpProxyStats(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcProxyStatsArgs) !RawJson {
-    _ = state;
+fn getFrpProxyStats(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcProxyStatsArgs) !RawJson {
+    _ = request;
     const result = try frpc_forward.getProxyStats(allocator, args.id);
     return .{ .json = result };
 }
 
-fn getFrpsProxyStats(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcProxyStatsArgs) !RawJson {
-    _ = state;
+fn getFrpsProxyStats(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcProxyStatsArgs) !RawJson {
+    _ = request;
     const result = try frps_forward.getProxyStats(allocator, args.id);
     return .{ .json = result };
 }
 
-fn clearFrpLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcInfoArgs) !void {
+fn clearFrpLogs(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcInfoArgs) !void {
     _ = allocator;
-    _ = state;
+    _ = request;
     frpc_forward.clearClientLogs(args.id);
 }
 
-fn clearFrpsLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: GetFrpcInfoArgs) !void {
+fn clearFrpsLogs(allocator: std.mem.Allocator, request: *RequestContext, args: GetFrpcInfoArgs) !void {
     _ = allocator;
-    _ = state;
+    _ = request;
     frps_forward.clearServerLogs(args.id);
 }
 
-fn getEvents(allocator: std.mem.Allocator, state: *RuntimeState) !GetEventsResponse {
-    _ = state;
+fn getEvents(allocator: std.mem.Allocator, request: *RequestContext) !GetEventsResponse {
+    _ = request;
     var list: std.ArrayList(EventInfo) = .empty;
     errdefer list.deinit(allocator);
 
@@ -1325,8 +1168,8 @@ fn getEvents(allocator: std.mem.Allocator, state: *RuntimeState) !GetEventsRespo
     };
 }
 
-fn getDdnsGlobalStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetDdnsGlobalStatusResponse {
-    _ = state;
+fn getDdnsGlobalStatus(allocator: std.mem.Allocator, request: *RequestContext) !GetDdnsGlobalStatusResponse {
+    _ = request;
     const ddns_enabled = build_options.ddns_mode;
     var version: ?[]const u8 = null;
     if (ddns_enabled) {
@@ -1343,8 +1186,8 @@ fn getDdnsGlobalStatus(allocator: std.mem.Allocator, state: *RuntimeState) !GetD
     };
 }
 
-fn getDdnsStatuses(allocator: std.mem.Allocator, state: *RuntimeState) !GetDdnsStatusesResponse {
-    _ = state;
+fn getDdnsStatuses(allocator: std.mem.Allocator, request: *RequestContext) !GetDdnsStatusesResponse {
+    _ = request;
     const statuses = try ddns_manager.getStatus(allocator);
     defer {
         for (statuses) |*s| {
@@ -1373,8 +1216,8 @@ fn getDdnsStatuses(allocator: std.mem.Allocator, state: *RuntimeState) !GetDdnsS
     };
 }
 
-fn getDdnsInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetDdnsInfoArgs) !GetDdnsInfoResponse {
-    _ = state;
+fn getDdnsInfo(allocator: std.mem.Allocator, request: *RequestContext, args: GetDdnsInfoArgs) !GetDdnsInfoResponse {
+    _ = request;
     var info = try ddns_manager.getInstanceStatus(allocator, args.name);
     defer info.deinit(allocator);
 
@@ -1390,15 +1233,15 @@ fn getDdnsInfo(allocator: std.mem.Allocator, state: *RuntimeState, args: GetDdns
     };
 }
 
-fn clearDdnsLogs(allocator: std.mem.Allocator, state: *RuntimeState, args: GetDdnsInfoArgs) !void {
+fn clearDdnsLogs(allocator: std.mem.Allocator, request: *RequestContext, args: GetDdnsInfoArgs) !void {
     _ = allocator;
-    _ = state;
+    _ = request;
     try ddns_manager.clearInstanceLogs(args.name);
 }
 
-fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatusResponse {
-    const snapshot = state.globalSnapshot();
-    const projects_res = try listProjects(allocator, state);
+fn getFullStatus(allocator: std.mem.Allocator, request: *RequestContext) !FullStatusResponse {
+    const snapshot = try request.guard.snapshot(allocator);
+    const projects_res = try projectsFromSnapshot(allocator, snapshot);
 
     const frp_enabled = build_options.frpc_mode or build_options.frps_mode;
     var frp_version: ?[]const u8 = null;
@@ -1479,7 +1322,7 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
         }
     }
 
-    const events_res = getEvents(allocator, state) catch |err| blk: {
+    const events_res = getEvents(allocator, request) catch |err| blk: {
         std.log.warn("ubus: failed to get events: {any}", .{err});
         break :blk GetEventsResponse{ .events = &[_]EventInfo{} };
     };
@@ -1492,7 +1335,7 @@ fn getFullStatus(allocator: std.mem.Allocator, state: *RuntimeState) !FullStatus
         .total_bytes_in = snapshot.total_bytes_in,
         .total_bytes_out = snapshot.total_bytes_out,
         .projects = projects_res.projects,
-        .rathole = try getRatholeStatus(allocator, state),
+        .rathole = try getRatholeStatus(allocator, request),
         .frp = .{
             .enabled = frp_enabled,
             .version = frp_version,
@@ -1512,12 +1355,12 @@ const GetNftablesRulesResponse = struct {
     rules: []const u8,
 };
 
-fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNftablesRulesResponse {
+fn getNftablesRules(allocator: std.mem.Allocator, request: *RequestContext) !GetNftablesRulesResponse {
     if (!build_options.nftables_mode) {
         return .{ .rules = "nftables support not compiled" };
     }
 
-    if (!state.use_nftables) {
+    if (!request.guard.useNftables()) {
         return .{ .rules = "nftables backend is disabled" };
     }
 
@@ -1531,40 +1374,9 @@ fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNfta
     return .{ .rules = rules };
 }
 
-fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args: RestartProjectArgs) !RestartProjectResponse {
+fn handleRestartProject(allocator: std.mem.Allocator, request: *RequestContext, args: RestartProjectArgs) !RestartProjectResponse {
     _ = allocator;
-    const idx: usize = @intCast(args.id);
-
-    state.mutex.lockUncancelable(compat.io());
-    defer state.mutex.unlock(compat.io());
-
-    if (idx >= state.projects.items.len) {
-        return error.InvalidArgument;
-    }
-
-    const project = state.projects.items[idx];
-    if (!project.cfg.enabled) {
-        return error.InvalidArgument;
-    }
-
-    // Tear down forwarders only, keep config alive
-    project.teardownForwarders();
-
-    // Re-start application layer forwarding
-    app_forward.startForwarding(project) catch |err| {
-        std.log.warn("ubus: failed to restart project {d}: {any}", .{ args.id, err });
-    };
-
-    // Re-start FRPC forwarding (if enabled)
-    if (build_options.frpc_mode) {
-        const frpc_nodes = reload.getFrpcNodes() orelse return error.InvalidValue;
-        frpc_forward.startForwarding(project, frpc_nodes) catch |err| {
-            std.log.warn("ubus: failed to restart FRPC for project {d}: {any}", .{ args.id, err });
-        };
-    }
-
-    // Log the restart
-    event_log.logEventFmt(.project_started, @intCast(args.id), "Project {d} restarted via UBUS", .{args.id + 1});
+    try request.guard.restartProject(args.id);
 
     return .{
         .id = args.id,
@@ -1572,10 +1384,9 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
     };
 }
 
-fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !ReloadConfigResponse {
+fn handleReloadConfig(allocator: std.mem.Allocator, request: *RequestContext) !ReloadConfigResponse {
     _ = allocator;
-
-    _ = state;
+    _ = request;
     process_lock.requestReload();
 
     return .{
@@ -1583,19 +1394,6 @@ fn handleReloadConfig(allocator: std.mem.Allocator, state: *RuntimeState) !Reloa
         .changes = 0, // Individual counts are logged by reload.apply()
         .message = "Config reload scheduled",
     };
-}
-
-fn findProjectByNameOrIndex(state: *RuntimeState, name: []const u8) ?*project_status.ProjectHandle {
-    for (state.projects.items) |project| {
-        if (std.mem.eql(u8, project.cfg.section_name, name)) {
-            return project;
-        }
-    }
-    const idx = std.fmt.parseUnsigned(usize, name, 10) catch return null;
-    if (idx < state.projects.items.len) {
-        return state.projects.items[idx];
-    }
-    return null;
 }
 
 fn validateWolSelector(args: WolProjectArgs) !void {
@@ -1631,56 +1429,29 @@ fn statusResponse(enabled: bool, mac_list: []const []const u8, cooldown_ms: u64,
     };
 }
 
-fn wolWake(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolWakeResponse {
+fn wolWake(allocator: std.mem.Allocator, request: *RequestContext, args: WolProjectArgs) !WolWakeResponse {
     _ = allocator;
     try validateWolSelector(args);
 
-    if (args.target) |target_name| {
-        const cfg = reload.getConfig() orelse return error.InvalidValue;
-        const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
-        if (!target.enabled) return error.InvalidArgument;
-        const result = wol.enqueueGlobal(target.mac_addresses, target.cooldown_ms, target.log_enabled, -1);
-        return wakeResponse(result);
-    } else {
-        const project_name = args.project.?;
-        const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
-        const cfg = project.cfg;
-        if (!cfg.enable_wol) return error.InvalidArgument;
-        const result = wol.enqueueGlobal(cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.resolved_wol_log_enabled, @intCast(project.id));
-        return wakeResponse(result);
-    }
+    const target = if (args.target) |name|
+        try request.guard.wakeWolTarget(name)
+    else
+        try request.guard.wakeWolProject(args.project.?);
+    if (!target.enabled) return error.InvalidArgument;
+
+    const result = wol.enqueueGlobal(target.mac_addresses, target.cooldown_ms, target.log_enabled, target.project_id);
+    return wakeResponse(result);
 }
 
-fn wolStatus(allocator: std.mem.Allocator, state: *RuntimeState, args: WolProjectArgs) !WolStatusResponse {
+fn wolStatus(allocator: std.mem.Allocator, request: *RequestContext, args: WolProjectArgs) !WolStatusResponse {
     _ = allocator;
     try validateWolSelector(args);
 
-    if (args.target) |target_name| {
-        const cfg = reload.getConfig() orelse return error.InvalidValue;
-        const target = cfg.wol_targets.get(target_name) orelse return error.NotFound;
-        return statusResponse(target.enabled, target.mac_addresses, target.cooldown_ms, &[_][]const u8{});
-    } else {
-        const project_name = args.project.?;
-        const project = findProjectByNameOrIndex(state, project_name) orelse return error.NotFound;
-        const cfg = project.cfg;
-        return statusResponse(cfg.enable_wol, cfg.resolved_wol_macs, cfg.resolved_wol_cooldown_ms, cfg.detect_protocols);
-    }
-}
-
-fn currentTs() u64 {
-    const seconds = std.Io.Timestamp.now(compat.io(), .real).toSeconds();
-    if (seconds < 0) return 0;
-    return @intCast(seconds);
-}
-
-pub fn notifyReload() void {
-    g_lifecycle_mutex.lockUncancelable(compat.io());
-    defer g_lifecycle_mutex.unlock(compat.io());
-    if (g_state) |state| {
-        state.syncFromProjects() catch |err| {
-            std.log.err("ubus: failed to sync state after reload: {any}", .{err});
-        };
-    }
+    const target = if (args.target) |name|
+        try request.guard.wakeWolTarget(name)
+    else
+        try request.guard.wakeWolProject(args.project.?);
+    return statusResponse(target.enabled, target.mac_addresses, target.cooldown_ms, target.detect_protocols);
 }
 
 test "WoL requests require exactly one selector" {
