@@ -208,7 +208,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
         handle.use_nftables = new_cfg.use_nftables;
 
         if (new_projects[i].enabled) {
-            startForwardingForHandle(alloc, handle, new_cfg);
+            startForwardingForHandle(handle);
         }
         changed += 1;
 
@@ -233,7 +233,7 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
             continue;
         }
 
-        startForwardingForHandle(alloc, handle, new_cfg);
+        startForwardingForHandle(handle);
         event_log.logEventFmt(.project_started, @intCast(i), "Project {d} added and enabled", .{i + 1});
     }
 
@@ -254,13 +254,14 @@ fn applyConfigDiff(alloc: std.mem.Allocator, new_cfg: *config.Config) void {
     // and project-generated mappings are applied consistently.
     if (build_options.frpc_mode) {
         frpc_forward.stopAll();
+        frpc_forward.initialize(alloc);
         for (h.items) |handle| {
             if (!handle.cfg.enabled) continue;
-            frpc_forward.startForwarding(alloc, handle, &new_cfg.frpc_nodes) catch |err| {
+            frpc_forward.startForwarding(handle, &new_cfg.frpc_nodes) catch |err| {
                 std.log.warn("Reload: failed to rebuild FRPC project {d}: {any}", .{ handle.id + 1, err });
             };
         }
-        frpc_forward.startConfiguredClients(alloc, &new_cfg.frpc_nodes) catch |err| {
+        frpc_forward.startConfiguredClients(&new_cfg.frpc_nodes) catch |err| {
             std.log.warn("Reload: failed to start configured FRPC clients: {any}", .{err});
         };
     }
@@ -319,17 +320,13 @@ fn prepare_added_handles(alloc: std.mem.Allocator, h: *project_status.ProjectHan
 
 /// Start application forwarding; FRPC is rebuilt once after all project changes.
 fn startForwardingForHandle(
-    alloc: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
-    cfg: *const config.Config,
 ) void {
     if (handle.cfg.enable_app_forward) {
-        app_forward.startForwarding(alloc, handle) catch |err| {
+        app_forward.startForwarding(handle) catch |err| {
             std.log.err("Reload: failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
         };
     }
-
-    _ = cfg;
 }
 
 /// Refresh firewall rules based on the new configuration.

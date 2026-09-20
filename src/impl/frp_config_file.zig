@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const compat = @import("../compat.zig");
 
 pub const MAX_CONTENT_BYTES: usize = 1024 * 1024;
@@ -75,10 +76,15 @@ pub fn write(root: []const u8, path: []const u8, content: []const u8) !void {
         if ((try file.stat(compat.io())).kind != .file) return error.InvalidArgument;
     }
 
-    var atomic_file = try target.parent.createFileAtomic(compat.io(), target.basename, .{
-        .permissions = .fromMode(0o600),
-        .replace = true,
-    });
+    var atomic_file = if (builtin.os.tag == .windows)
+        try target.parent.createFileAtomic(compat.io(), target.basename, .{
+            .replace = true,
+        })
+    else
+        try target.parent.createFileAtomic(compat.io(), target.basename, .{
+            .permissions = .fromMode(0o600),
+            .replace = true,
+        });
     defer atomic_file.deinit(compat.io());
 
     try atomic_file.file.writeStreamingAll(compat.io(), content);

@@ -18,6 +18,18 @@ var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Io.Mutex = .init;
 
+/// Initialize the process-wide FRPC client registry.
+/// `allocator` owns every client, key, and registry allocation until `stopAll`.
+/// Call this during service startup, before adding project-generated proxies.
+pub fn initialize(allocator: std.mem.Allocator) void {
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
+
+    if (clients != null) return;
+    clients = std.StringHashMap(*ClientHolder).init(allocator);
+    clients_allocator = allocator;
+}
+
 pub fn flushAllClients() void {
     if (clients == null) return;
     clients_lock.lockUncancelable(compat.io());
@@ -51,26 +63,18 @@ fn flushFrpcClient(holder: *ClientHolder, node_name: []const u8) void {
     }
 }
 
-fn getClientMap(allocator: std.mem.Allocator) !*std.StringHashMap(*ClientHolder) {
-    if (clients == null) {
-        clients = std.StringHashMap(*ClientHolder).init(allocator);
-        clients_allocator = allocator;
-    }
-    return &clients.?;
-}
-
 fn getOrCreateClient(
-    allocator: std.mem.Allocator,
     node_name: []const u8,
     node: types.FrpcNode,
 ) !*ClientHolder {
     clients_lock.lockUncancelable(compat.io());
-    var map = try getClientMap(allocator);
+    defer clients_lock.unlock(compat.io());
+
+    var map = clients orelse return error.FrpcNotInitialized;
+    const allocator = clients_allocator orelse return error.FrpcNotInitialized;
     if (map.get(node_name)) |holder_ptr| {
-        clients_lock.unlock(compat.io());
         return holder_ptr;
     }
-    clients_lock.unlock(compat.io());
 
     const holder = try allocator.create(ClientHolder);
     errdefer allocator.destroy(holder);
@@ -94,33 +98,25 @@ fn getOrCreateClient(
         .lock = .init,
     };
 
-    clients_lock.lockUncancelable(compat.io());
-    defer clients_lock.unlock(compat.io());
-    map = try getClientMap(allocator);
-    if (map.get(node_name)) |existing| {
-        holder.client.deinit();
-        allocator.destroy(holder);
-        return existing;
-    }
-
     const key = try allocator.dupe(u8, node_name);
+    errdefer allocator.free(key);
     try map.put(key, holder);
     return holder;
 }
 
-pub fn startConfiguredClients(allocator: std.mem.Allocator, nodes: *const std.StringHashMap(types.FrpcNode)) !void {
+/// Create configured clients using the allocator established by `initialize`.
+pub fn startConfiguredClients(nodes: *const std.StringHashMap(types.FrpcNode)) !void {
     var it = nodes.iterator();
     while (it.next()) |entry| {
         const node_name = entry.key_ptr.*;
         const node = entry.value_ptr.*;
         if (!node.enabled or node.source.mode == .builtin) continue;
-        _ = try getOrCreateClient(allocator, node_name, node);
+        _ = try getOrCreateClient(node_name, node);
     }
     flushAllClients();
 }
 
 fn addProxyForPorts(
-    allocator: std.mem.Allocator,
     holder: *ClientHolder,
     mapping: types.PortMapping,
     local_ip: []const u8,
@@ -129,6 +125,7 @@ fn addProxyForPorts(
     project_id: usize,
     remark: []const u8,
 ) !void {
+    const allocator = holder.client.allocator;
     switch (mapping.protocol) {
         .tcp => {
             const proxy_name = try std.fmt.allocPrint(allocator, "proj{d}_{s}_{d}_{s}", .{ project_id + 1, remark, remote_port, @tagName(mapping.protocol) });
@@ -153,7 +150,6 @@ fn addProxyForPorts(
 }
 
 fn applyFrpcForMapping(
-    allocator: std.mem.Allocator,
     handle: *const project_status.ProjectHandle,
     frpc_nodes: *const std.StringHashMap(types.FrpcNode),
     mapping: types.PortMapping,
@@ -192,7 +188,7 @@ fn applyFrpcForMapping(
             continue;
         }
 
-        const holder = try getOrCreateClient(allocator, fwd.node_name, node);
+        const holder = try getOrCreateClient(fwd.node_name, node);
 
         holder.lock.lockUncancelable(compat.io());
         defer holder.lock.unlock(compat.io());
@@ -204,7 +200,7 @@ fn applyFrpcForMapping(
             const remote_port: u16 = remote_start + offset;
             std.log.debug("[FRPC] Adding proxy: local_port={d}, remote_port={d}, node={s}", .{ local_port, remote_port, fwd.node_name });
 
-            addProxyForPorts(allocator, holder, mapping, handle.cfg.target_address, local_port, remote_port, handle.id, handle.cfg.remark) catch |err| {
+            addProxyForPorts(holder, mapping, handle.cfg.target_address, local_port, remote_port, handle.id, handle.cfg.remark) catch |err| {
                 std.log.warn("[FRPC] Failed to add proxy for node {s} port {d}: {any}", .{ fwd.node_name, remote_port, err });
                 continue;
             };
@@ -216,12 +212,11 @@ fn applyFrpcForMapping(
 }
 
 pub fn startForwarding(
-    allocator: std.mem.Allocator,
     handle: *const project_status.ProjectHandle,
     frpc_nodes: *const std.StringHashMap(types.FrpcNode),
 ) !void {
     for (handle.cfg.port_mappings) |mapping| {
-        applyFrpcForMapping(allocator, handle, frpc_nodes, mapping) catch |err| {
+        applyFrpcForMapping(handle, frpc_nodes, mapping) catch |err| {
             std.log.warn("[FRPC] Failed to apply mapping: {any}", .{err});
         };
     }
@@ -233,7 +228,10 @@ pub fn stopAll() void {
     defer clients_lock.unlock(compat.io());
 
     var map = clients.?;
-    const allocator = clients_allocator orelse std.heap.c_allocator;
+    const allocator = clients_allocator orelse {
+        std.log.err("[FRPC] Client registry has no allocator", .{});
+        return;
+    };
 
     var it = map.iterator();
     while (it.next()) |entry| {
@@ -444,6 +442,18 @@ pub fn getProxyStats(allocator: std.mem.Allocator, node_name: []const u8) ![]con
 
     // Client is started - get all proxy stats
     return holder.client.getProxyTrafficStats(allocator);
+}
+
+test "frpc forward: registry retains its service allocator" {
+    const allocator = std.testing.allocator;
+
+    stopAll();
+    initialize(allocator);
+    defer stopAll();
+
+    const registry_allocator = clients_allocator orelse unreachable;
+    try std.testing.expectEqual(allocator.ptr, registry_allocator.ptr);
+    try std.testing.expect(allocator.vtable == registry_allocator.vtable);
 }
 
 test "frpc forward: aggregated status is stopped when no clients exist" {

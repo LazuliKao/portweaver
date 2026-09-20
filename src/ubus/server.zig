@@ -1532,6 +1532,7 @@ fn getNftablesRules(allocator: std.mem.Allocator, state: *RuntimeState) !GetNfta
 }
 
 fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args: RestartProjectArgs) !RestartProjectResponse {
+    _ = allocator;
     const idx: usize = @intCast(args.id);
 
     state.mutex.lockUncancelable(compat.io());
@@ -1550,14 +1551,14 @@ fn handleRestartProject(allocator: std.mem.Allocator, state: *RuntimeState, args
     project.teardownForwarders();
 
     // Re-start application layer forwarding
-    app_forward.startForwarding(allocator, project) catch |err| {
+    app_forward.startForwarding(project) catch |err| {
         std.log.warn("ubus: failed to restart project {d}: {any}", .{ args.id, err });
     };
 
     // Re-start FRPC forwarding (if enabled)
     if (build_options.frpc_mode) {
         const frpc_nodes = reload.getFrpcNodes() orelse return error.InvalidValue;
-        frpc_forward.startForwarding(allocator, project, frpc_nodes) catch |err| {
+        frpc_forward.startForwarding(project, frpc_nodes) catch |err| {
             std.log.warn("ubus: failed to restart FRPC for project {d}: {any}", .{ args.id, err });
         };
     }

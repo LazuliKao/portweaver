@@ -491,7 +491,7 @@ pub const ProjectHandle = struct {
             if (enabled) {
                 std.log.info("Project {d} ({s}) runtime enabled", .{ self.id, self.cfg.remark });
                 // Start all forwarders
-                app_forward.startForwarding(self.allocator, self) catch {
+                app_forward.startForwarding(self) catch {
                     std.log.err("Failed to start forwarding for project {d} ({s})", .{ self.id, self.cfg.remark });
                 };
             } else {

@@ -593,7 +593,7 @@ test "app forward: project single-port tcp runs for 3s then stops" {
     var handle = try makeSinglePortHandle(alloc, 5, .tcp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    try app_forward.startForwarding(alloc, &handle);
+    try app_forward.startForwarding(&handle);
     compat.sleepNanos(run_duration_ns);
 }
 
@@ -605,7 +605,7 @@ test "app forward: project single-port udp runs for 3s then stops" {
     var handle = try makeSinglePortHandle(alloc, 6, .udp, listen_port, target_port);
     defer cleanupProjectHandle(&handle);
 
-    try app_forward.startForwarding(alloc, &handle);
+    try app_forward.startForwarding(&handle);
     compat.sleepNanos(run_duration_ns);
 }
 
@@ -621,8 +621,26 @@ test "app forward: project range both runs for 3s then stops" {
     var handle = try makeRangeMappingHandle(alloc, 7, .both, listen_range, target_range);
     defer cleanupProjectHandle(&handle);
 
-    try app_forward.startForwarding(alloc, &handle);
+    try app_forward.startForwarding(&handle);
     compat.sleepNanos(run_duration_ns);
+}
+
+test "app forward: project startup uses the handle allocator for persistent state" {
+    const backing_allocator = testing.allocator;
+    const listen_port = testListenPort(39, 0);
+    const target_port = testTargetPort(39, 0);
+
+    var handle = try makeSinglePortHandle(backing_allocator, 39, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+
+    var owner_allocator = testing.FailingAllocator.init(backing_allocator, .{ .fail_index = std.math.maxInt(usize) });
+    handle.allocator = owner_allocator.allocator();
+
+    try app_forward.startForwarding(&handle);
+
+    try testing.expect(owner_allocator.allocations > 0);
+    try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
+    try testing.expect(handle.runtime_manager != null);
 }
 
 test "app forward: per_project shared loop hosts two tcp listeners" {
@@ -652,7 +670,7 @@ test "app forward: per_project shared loop hosts two tcp listeners" {
     const second_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&second_echo});
     defer second_echo_thread.join();
 
-    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle, &runtime_manager);
     compat.sleepNanos(forwarder_ready_ns);
 
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
@@ -693,7 +711,7 @@ test "app forward: per_project shared loop hosts mixed tcp and udp listeners" {
     const udp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&udp_echo});
     defer udp_echo_thread.join();
 
-    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle, &runtime_manager);
     compat.sleepNanos(forwarder_ready_ns);
 
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
@@ -734,7 +752,7 @@ test "app forward: per_listener compatibility keeps listeners isolated" {
     const udp_echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), udpEchoServerThread, .{&udp_echo});
     defer udp_echo_thread.join();
 
-    try app_forward.startForwardingWithLoopManager(alloc, &handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle, &runtime_manager);
     compat.sleepNanos(forwarder_ready_ns);
 
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
@@ -768,12 +786,12 @@ test "app forward: shared loop shutdown releases runtime and bind failure is iso
     defer if (!occupied_released) runtime_manager.releaseProjectRuntime(&occupied_handle) catch |err| {
         std.log.err("failed to release occupied shared loop runtime for project {d}: {}", .{ occupied_handle.id, err });
     };
-    try app_forward.startForwardingWithLoopManager(alloc, &occupied_handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&occupied_handle, &runtime_manager);
 
     var conflict_handle = try makeSinglePortHandle(alloc, 45, .tcp, conflict_listen_port, conflict_target_port);
     conflict_handle.cfg.app_forward_loop_mode = .global;
     defer cleanupProjectHandle(&conflict_handle);
-    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(alloc, &conflict_handle, &runtime_manager));
+    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(&conflict_handle, &runtime_manager));
     try testing.expectEqual(project_status.StartupStatus.failed, conflict_handle.startup_status);
     try testing.expectEqual(@as(i32, -3), conflict_handle.error_code);
     const conflict_failures = try conflict_handle.getStartupFailures(alloc);
@@ -791,7 +809,7 @@ test "app forward: shared loop shutdown releases runtime and bind failure is iso
     const healthy_target_port = testTargetPort(44, 0);
     var healthy_handle = try makeSinglePortHandle(alloc, 44, .tcp, healthy_listen_port, healthy_target_port);
     healthy_handle.cfg.app_forward_loop_mode = .global;
-    try app_forward.startForwardingWithLoopManager(alloc, &healthy_handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&healthy_handle, &runtime_manager);
     compat.sleepNanos(forwarder_ready_ns);
     try testing.expectEqual(project_status.StartupStatus.success, healthy_handle.startup_status);
     try testing.expectEqual(@as(usize, 1), runtime_manager.debugRuntimeCount(.global));
@@ -816,7 +834,7 @@ test "app forward: a range keeps healthy listeners after a bind failure" {
     defer runtime_manager.releaseProjectRuntime(&occupied_handle) catch |err| {
         std.log.err("failed to release occupied shared loop runtime for project {d}: {}", .{ occupied_handle.id, err });
     };
-    try app_forward.startForwardingWithLoopManager(alloc, &occupied_handle, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&occupied_handle, &runtime_manager);
 
     var listen_range_buf: [11]u8 = undefined;
     const listen_range = try std.fmt.bufPrint(&listen_range_buf, "{d}-{d}", .{ occupied_listen_port, occupied_listen_port + 1 });
@@ -829,7 +847,7 @@ test "app forward: a range keeps healthy listeners after a bind failure" {
         std.log.err("failed to release range shared loop runtime for project {d}: {}", .{ range_handle.id, err });
     };
 
-    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(alloc, &range_handle, &runtime_manager));
+    try testing.expectError(app_forward.ForwardError.ListenFailed, app_forward.startForwardingWithLoopManager(&range_handle, &runtime_manager));
     try testing.expectEqual(project_status.StartupStatus.partial, range_handle.startup_status);
     try testing.expectEqual(@as(u32, 1), range_handle.active_ports);
 
@@ -897,9 +915,9 @@ test "app forward: architecture test with three concurrent loop modes" {
     defer udp_thread_c.join();
 
     // Start forwarding for all three projects
-    try app_forward.startForwardingWithLoopManager(alloc, &handle_a, &runtime_manager);
-    try app_forward.startForwardingWithLoopManager(alloc, &handle_b, &runtime_manager);
-    try app_forward.startForwardingWithLoopManager(alloc, &handle_c, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle_a, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle_b, &runtime_manager);
+    try app_forward.startForwardingWithLoopManager(&handle_c, &runtime_manager);
 
     compat.sleepNanos(forwarder_ready_ns);
 
@@ -962,7 +980,7 @@ test "app forward: project teardown and restart sequence" {
     defer cleanupProjectHandle(&handle);
 
     // 1. Initial Start
-    try app_forward.startForwarding(alloc, &handle);
+    try app_forward.startForwarding(&handle);
     compat.sleepNanos(forwarder_ready_ns);
 
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
@@ -980,7 +998,7 @@ test "app forward: project teardown and restart sequence" {
     const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpSizedEchoServerThread, .{&echo_server});
     defer echo_thread.join();
 
-    try app_forward.startForwarding(alloc, &handle);
+    try app_forward.startForwarding(&handle);
     compat.sleepNanos(forwarder_ready_ns);
 
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);

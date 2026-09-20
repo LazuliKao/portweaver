@@ -452,6 +452,10 @@ fn startForwardingThreads(
     std.log.info("Starting forwarding threads...", .{});
     var has_app_forward = false;
 
+    if (build_options.frpc_mode) {
+        frpc_forward.initialize(allocator);
+    }
+
     for (handles.items) |handle| {
         if (!handle.cfg.enabled) {
             continue;
@@ -459,10 +463,10 @@ fn startForwardingThreads(
         if (handle.cfg.enable_app_forward) {
             has_app_forward = true;
         }
-        startForwarding(allocator, handle, cfg);
+        startForwarding(handle, cfg);
     }
     if (build_options.frpc_mode) {
-        frpc_forward.startConfiguredClients(allocator, &cfg.frpc_nodes) catch |err| {
+        frpc_forward.startConfiguredClients(&cfg.frpc_nodes) catch |err| {
             std.log.warn("Failed to start configured FRPC clients: {any}", .{err});
         };
     }
@@ -471,14 +475,13 @@ fn startForwardingThreads(
 
 /// 启动转发
 fn startForwarding(
-    allocator: std.mem.Allocator,
     handle: *project_status.ProjectHandle,
     cfg: *const config.Config,
 ) void {
     std.log.info("[Thread] Starting forwarding for project {d} ({s}), app_forward={}, app_stats={}, firewall_stats={}", .{ handle.id + 1, handle.cfg.remark, handle.cfg.enable_app_forward, handle.cfg.enable_app_stats, handle.cfg.enable_firewall_stats });
     // 启动应用层转发
     if (handle.cfg.enable_app_forward) {
-        app_forward.startForwarding(allocator, handle) catch |err| {
+        app_forward.startForwarding(handle) catch |err| {
             std.log.err("Failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
             if (compat.isDebugBuild()) {
                 if (@errorReturnTrace()) |trace| {
@@ -489,7 +492,7 @@ fn startForwarding(
     }
     // 启动 FRPC 转发（如果启用）
     if (build_options.frpc_mode) {
-        frpc_forward.startForwarding(allocator, handle, &cfg.frpc_nodes) catch |err| {
+        frpc_forward.startForwarding(handle, &cfg.frpc_nodes) catch |err| {
             std.log.err("Failed to start FRPC forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
             if (compat.isDebugBuild()) {
                 if (@errorReturnTrace()) |trace| {

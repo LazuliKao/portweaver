@@ -68,9 +68,10 @@ const SharedUdpStartContext = struct {
 };
 
 /// Start a port forwarding project.
-/// Creates a LoopManager on the project if one does not already exist,
-/// then delegates to the shared-loop code path.
-pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle) !void {
+/// All persistent listener and runtime allocations use `projectHandle.allocator`.
+/// The handle allocator must outlive `ProjectHandle.deinit` or `teardownForwarders`.
+pub fn startForwarding(projectHandle: *project_status.ProjectHandle) !void {
+    const allocator = projectHandle.allocator;
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
@@ -108,7 +109,10 @@ pub fn startForwarding(allocator: std.mem.Allocator, projectHandle: *project_sta
     projectHandle.finishStartup();
 }
 
-pub fn startForwardingWithLoopManager(allocator: std.mem.Allocator, projectHandle: *project_status.ProjectHandle, runtime_manager: *loop_manager.LoopManager) !void {
+/// Start a project using an externally owned loop manager.
+/// Listener and callback allocations still belong to `projectHandle.allocator`.
+pub fn startForwardingWithLoopManager(projectHandle: *project_status.ProjectHandle, runtime_manager: *loop_manager.LoopManager) !void {
+    const allocator = projectHandle.allocator;
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
