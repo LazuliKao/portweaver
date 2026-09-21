@@ -132,8 +132,10 @@ pub const FileLogger = struct {
                     const dir = self.file_path[0..path_len];
                     try std.Io.Dir.cwd().createDirPath(compat.io(), dir);
                 }
-                _ = try std.Io.Dir.cwd().createFile(compat.io(), self.file_path, .{});
-                break :blk try std.Io.Dir.cwd().openFile(compat.io(), self.file_path, .{ .mode = .write_only });
+                break :blk try std.Io.Dir.cwd().createFile(compat.io(), self.file_path, .{
+                    .truncate = false,
+                    .read = true,
+                });
             } else {
                 return err;
             }
@@ -150,7 +152,7 @@ pub const FileLogger = struct {
         try writer.seekTo(stat.size);
     }
 
-    fn rotate(self: *Self) void {
+    fn rotate(self: *Self) !void {
         if (self.file) |f| {
             f.close(compat.io());
             self.file = null;
@@ -158,27 +160,25 @@ pub const FileLogger = struct {
 
         var i: usize = self.config.max_files;
         while (i > 0) : (i -= 1) {
-            const old_path = std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, i }) catch continue;
+            const old_path = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, i });
             defer self.allocator.free(old_path);
 
-            const new_path = std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, i + 1 }) catch continue;
+            const new_path = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, i + 1 });
             defer self.allocator.free(new_path);
 
             std.Io.Dir.rename(std.Io.Dir.cwd(), old_path, std.Io.Dir.cwd(), new_path, compat.io()) catch {};
         }
 
-        const rotated_path = std.fmt.allocPrint(self.allocator, "{s}.1", .{self.file_path}) catch return;
+        const rotated_path = try std.fmt.allocPrint(self.allocator, "{s}.1", .{self.file_path});
         defer self.allocator.free(rotated_path);
 
         std.Io.Dir.rename(std.Io.Dir.cwd(), self.file_path, std.Io.Dir.cwd(), rotated_path, compat.io()) catch {};
 
-        const excess_path = std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, self.config.max_files + 1 }) catch return;
+        const excess_path = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ self.file_path, self.config.max_files + 1 });
         defer self.allocator.free(excess_path);
         std.Io.Dir.cwd().deleteFile(compat.io(), excess_path) catch {};
 
-        self.openFile() catch |err| {
-            std.log.warn("Failed to reopen log file after rotation: {any}", .{err});
-        };
+        try self.openFile();
         self.current_size = 0;
     }
 
@@ -289,11 +289,17 @@ pub const FileLogger = struct {
         };
 
         if (self.current_size + message.len > self.config.max_size) {
-            self.rotate();
+            self.rotate() catch |err| {
+                // This method holds self.lock. Do not call std.log here because
+                // the global log handler routes back into this FileLogger.
+                std.debug.print("[warn] Failed to rotate log file: {any}\n", .{err});
+                return;
+            };
         }
 
-        self.file.?.writeStreamingAll(compat.io(), message) catch {
-            self.file.?.close(compat.io());
+        const file = self.file orelse return;
+        file.writeStreamingAll(compat.io(), message) catch {
+            file.close(compat.io());
             self.file = null;
             return;
         };
@@ -426,6 +432,38 @@ test "FileLogger rotation" {
         else => return err,
     };
     try std.testing.expect(file1_exists);
+}
+
+test "FileLogger rotation failure leaves no null file dereference" {
+    const allocator = std.testing.allocator;
+    const test_path = "/tmp/test_portweaver_rotation_failure.log";
+    const blocker_path = "/tmp/test_portweaver_rotation_blocker";
+    std.Io.Dir.cwd().deleteFile(compat.io(), test_path) catch {};
+    std.Io.Dir.cwd().deleteFile(compat.io(), blocker_path) catch {};
+    std.Io.Dir.cwd().deleteFile(compat.io(), test_path ++ ".1") catch {};
+    defer std.Io.Dir.cwd().deleteFile(compat.io(), test_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(compat.io(), test_path ++ ".1") catch {};
+
+    const blocker = try std.Io.Dir.cwd().createFile(compat.io(), blocker_path, .{});
+    blocker.close(compat.io());
+    defer std.Io.Dir.cwd().deleteFile(compat.io(), blocker_path) catch {};
+
+    var logger = try FileLogger.init(allocator, .{
+        .enabled = true,
+        .file_path = test_path,
+        .max_size = 1,
+        .max_files = 1,
+    });
+    defer logger.deinit();
+
+    allocator.free(logger.file_path);
+    logger.file_path = try std.fmt.allocPrint(allocator, "{s}/log", .{blocker_path});
+
+    logger.log(.info, .default, "This rotation must fail without recursion", .{});
+    try std.testing.expect(logger.file == null);
+
+    // A second write must remain a harmless no-op after the failed reopen.
+    logger.log(.info, .default, "No null file dereference", .{});
 }
 
 test "FileLogger JSON format" {
