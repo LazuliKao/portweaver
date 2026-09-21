@@ -679,7 +679,7 @@ fn addGoLibrary(
         go_args.appendSlice(b.allocator, &.{
             "-trimpath",
             "-ldflags=-linkmode external -s -w -buildid= -extldflags=-static",
-            "-gcflags=all=-l -B -C",
+            "-gcflags=all=-l -C",
             "-o",
             output_path,
             ".",
