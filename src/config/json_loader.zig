@@ -1278,7 +1278,8 @@ pub fn loadFromJsonFileWithErrors(allocator: std.mem.Allocator, path: []const u8
         .wol_targets = wol_targets,
         .ddns_configs = ddns_list.items,
     };
-    helper.validateConfig(&validation_config) catch {
+    helper.validateConfig(a, &validation_config) catch |err| {
+        if (err == error.OutOfMemory) return err;
         ec.add("features", .conflict, "valid Rathole, WoL and protocol-filter configuration", "", "invalid feature configuration");
     };
     helper.validateFeatureAvailability(&validation_config, build_options.wol_mode) catch {
@@ -2563,6 +2564,37 @@ test "json: wol and protocol filter fields" {
     try testing.expectEqual(@as(usize, 2), p.allowed_protocols.len);
     try testing.expectEqualStrings("rdp", p.allowed_protocols[0]);
     try testing.expectEqualStrings("tls", p.allowed_protocols[1]);
+}
+
+test "json: WoL fallback owns the selected target name" {
+    if (!build_options.wol_mode) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const path = try writeTmpJson(alloc,
+        \\{
+        \\"wol_targets": {
+        \\  "my_pc": {"mac_addresses": ["AA:BB:CC:DD:EE:FF"]}
+        \\},
+        \\"projects": [
+        \\  {"target_address": "192.168.1.1", "listen_port": 80, "target_port": 80, "enable_app_forward": true, "enable_wol": true, "wol_trigger_mode": "on_connect"},
+        \\  {"target_address": "192.168.1.2", "listen_port": 81, "target_port": 81, "enable_app_forward": true, "enable_wol": true, "wol_trigger_mode": "on_connect"}
+        \\]
+        \\}
+    );
+    defer alloc.free(path);
+
+    var ec = types.ErrorCollector.init(alloc);
+    defer ec.deinit();
+    var cfg = try loadFromJsonFileWithErrors(alloc, path, &ec);
+    defer cfg.deinit(alloc);
+
+    var targets = cfg.wol_targets.iterator();
+    const target_name = targets.next().?.key_ptr.*;
+    try testing.expect(!ec.hasErrors());
+    try testing.expectEqual(@as(usize, 2), cfg.projects.len);
+    for (cfg.projects) |project| {
+        try testing.expectEqualStrings("my_pc", project.wol_target);
+        try testing.expect(project.wol_target.ptr != target_name.ptr);
+    }
 }
 
 test "json: invalid protocol filter configuration is rejected" {

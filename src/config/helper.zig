@@ -337,8 +337,8 @@ pub fn validateGlobalConfig(config: *types.Config) !void {
     }
 }
 
-/// Validate an individual project's configuration against global config targets.
-pub fn validateProject(project: *types.Project, config: *const types.Config) !void {
+/// Validates a project and allocates implicit owned fields against global targets.
+pub fn validateProject(allocator: std.mem.Allocator, project: *types.Project, config: *const types.Config) !void {
     const p_name = if (project.remark.len > 0) project.remark else if (project.section_name.len > 0) project.section_name else "unnamed";
 
     if (hasDuplicateStrings(project.detect_protocols) or
@@ -382,7 +382,7 @@ pub fn validateProject(project: *types.Project, config: *const types.Config) !vo
                 var it = config.wol_targets.iterator();
                 if (it.next()) |only_target| {
                     std.log.warn("Project '{s}': enable_wol is true but wol_target is not specified; defaulting to only configured target '{s}'", .{ p_name, only_target.key_ptr.* });
-                    project.wol_target = only_target.key_ptr.*;
+                    project.wol_target = try allocator.dupe(u8, only_target.key_ptr.*);
                 }
             } else {
                 std.log.warn("Project '{s}': enable_wol is true but wol_target is not specified ({d} targets available)", .{ p_name, config.wol_targets.count() });
@@ -426,10 +426,10 @@ pub fn validateProject(project: *types.Project, config: *const types.Config) !vo
 }
 
 /// Validate all WoL targets and project feature invariants after parsing.
-pub fn validateConfig(config: *types.Config) !void {
+pub fn validateConfig(allocator: std.mem.Allocator, config: *types.Config) !void {
     try validateGlobalConfig(config);
     for (config.projects) |*project| {
-        try validateProject(project, config);
+        try validateProject(allocator, project, config);
     }
 }
 

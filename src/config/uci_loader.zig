@@ -1079,7 +1079,8 @@ pub fn loadFromUci(allocator: std.mem.Allocator, ctx: uci.UciContext, package_na
     };
 
     for (cfg.projects, 0..) |*project, idx| {
-        helper.validateProject(project, &cfg) catch |err| {
+        helper.validateProject(allocator, project, &cfg) catch |err| {
+            if (err == error.OutOfMemory) return err;
             std.log.err("Project {d} ('{s}') configuration error: {any}. Disabling this project so remaining projects and services can continue.", .{ idx + 1, project.remark, err });
             project.enabled = false;
         };
