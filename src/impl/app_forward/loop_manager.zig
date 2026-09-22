@@ -650,3 +650,71 @@ test "loop manager reference accounting" {
     manager.release(second);
     try std.testing.expectEqual(@as(usize, 0), manager.debugRuntimeCount(.per_project));
 }
+
+test "global loop runtime is shared across projects" {
+    var manager = try LoopManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var first_project = project_status.ProjectHandle.init(std.testing.allocator, 1, .{
+        .enabled = true,
+        .family = .ipv4,
+        .protocol = .tcp,
+        .target_address = "127.0.0.1",
+        .target_port = 1,
+        .listen_port = 2,
+    }, false);
+    defer first_project.deinit();
+    var second_project = project_status.ProjectHandle.init(std.testing.allocator, 2, .{
+        .enabled = true,
+        .family = .ipv4,
+        .protocol = .tcp,
+        .target_address = "127.0.0.1",
+        .target_port = 3,
+        .listen_port = 4,
+    }, false);
+    defer second_project.deinit();
+
+    const first = try manager.acquire(.global, &first_project);
+    const second = try manager.acquire(.global, &second_project);
+    try std.testing.expectEqual(first.runtime, second.runtime);
+    try std.testing.expectEqual(@as(usize, 1), manager.debugRuntimeCount(.global));
+
+    manager.release(first);
+    try std.testing.expectEqual(@as(usize, 1), manager.debugRuntimeCount(.global));
+    manager.release(second);
+    try std.testing.expectEqual(@as(usize, 0), manager.debugRuntimeCount(.global));
+}
+
+test "project teardown releases only its shared global runtime references" {
+    var manager = try LoopManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var first_project = project_status.ProjectHandle.init(std.testing.allocator, 1, .{
+        .enabled = true,
+        .family = .ipv4,
+        .protocol = .tcp,
+        .target_address = "127.0.0.1",
+        .target_port = 1,
+        .listen_port = 2,
+    }, false);
+    defer first_project.deinit();
+    var second_project = project_status.ProjectHandle.init(std.testing.allocator, 2, .{
+        .enabled = true,
+        .family = .ipv4,
+        .protocol = .tcp,
+        .target_address = "127.0.0.1",
+        .target_port = 3,
+        .listen_port = 4,
+    }, false);
+    defer second_project.deinit();
+
+    first_project.shared_runtime_manager = &manager;
+    second_project.shared_runtime_manager = &manager;
+    _ = try manager.acquire(.global, &first_project);
+    _ = try manager.acquire(.global, &second_project);
+
+    first_project.teardownForwarders();
+    try std.testing.expectEqual(@as(usize, 1), manager.debugRuntimeCount(.global));
+    second_project.teardownForwarders();
+    try std.testing.expectEqual(@as(usize, 0), manager.debugRuntimeCount(.global));
+}

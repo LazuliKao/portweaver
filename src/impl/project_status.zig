@@ -83,6 +83,9 @@ pub const ProjectHandle = struct {
     runtime_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     runtime_enabled_lock: std.Io.Mutex = .init,
+    /// Non-owning controller-level manager used for cross-project loop sharing.
+    shared_runtime_manager: ?*loop_manager.LoopManager = null,
+    /// Fallback owner used by standalone forwarding callers and tests.
     runtime_manager: ?loop_manager.LoopManager = null,
 
     pub fn init(allocator: std.mem.Allocator, id: usize, cfg: types.Project, use_nftables: bool) ProjectHandle {
@@ -102,7 +105,15 @@ pub const ProjectHandle = struct {
     pub fn deinit(self: *ProjectHandle) void {
         self.shutting_down.store(true, .seq_cst);
 
-        if (self.runtime_manager) |*manager| {
+        if (self.shared_runtime_manager) |manager| {
+            manager.releaseProjectRuntime(self) catch |err| {
+                std.log.err("Failed to release shared runtimes for project {d}: {}", .{ self.id, err });
+                self.stopSharedForwarders() catch |stop_err| {
+                    std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, stop_err });
+                };
+            };
+            self.shared_runtime_manager = null;
+        } else if (self.runtime_manager) |*manager| {
             manager.releaseProjectRuntime(self) catch |err| {
                 std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
                 self.stopSharedForwarders() catch |stop_err| {
@@ -133,7 +144,15 @@ pub const ProjectHandle = struct {
     pub fn teardownForwarders(self: *ProjectHandle) void {
         self.shutting_down.store(true, .seq_cst);
 
-        if (self.runtime_manager) |*manager| {
+        if (self.shared_runtime_manager) |manager| {
+            manager.releaseProjectRuntime(self) catch |err| {
+                std.log.err("Failed to release shared runtimes for project {d}: {}", .{ self.id, err });
+                self.stopSharedForwarders() catch |stop_err| {
+                    std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, stop_err });
+                };
+            };
+            self.shared_runtime_manager = null;
+        } else if (self.runtime_manager) |*manager| {
             manager.releaseProjectRuntime(self) catch |err| {
                 std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
                 self.stopSharedForwarders() catch |stop_err| {
@@ -484,7 +503,7 @@ pub const ProjectHandle = struct {
     }
 
     /// Set runtime enabled state (controls forwarding without restarting threads)
-    pub fn setRuntimeEnabled(self: *ProjectHandle, enabled: bool) void {
+    pub fn setRuntimeEnabled(self: *ProjectHandle, enabled: bool, shared_manager: ?*loop_manager.LoopManager) void {
         self.runtime_enabled_lock.lockUncancelable(compat.io());
         defer self.runtime_enabled_lock.unlock(compat.io());
         const old = self.isRuntimeEnabled();
@@ -494,25 +513,16 @@ pub const ProjectHandle = struct {
             if (enabled) {
                 std.log.info("Project {d} ({s}) runtime enabled", .{ self.id, self.cfg.remark });
                 // Start all forwarders
-                app_forward.startForwarding(self) catch {
+                const result = if (shared_manager) |manager|
+                    app_forward.startForwardingWithLoopManager(self, manager)
+                else
+                    app_forward.startForwarding(self);
+                result catch {
                     std.log.err("Failed to start forwarding for project {d} ({s})", .{ self.id, self.cfg.remark });
                 };
             } else {
                 std.log.info("Project {d} ({s}) runtime disabled - stopping forwarders", .{ self.id, self.cfg.remark });
-                if (self.runtime_manager) |*manager| {
-                    manager.releaseProjectRuntime(self) catch |err| {
-                        std.log.err("Failed to release runtimes for project {d}: {}", .{ self.id, err });
-                    };
-                    manager.deinit();
-                    self.runtime_manager = null;
-                } else {
-                    self.stopSharedForwarders() catch |err| {
-                        std.log.err("Failed to stop forwarders for project {d}: {}", .{ self.id, err });
-                    };
-                    self.destroySharedForwardersAfterRuntimeStop() catch |err| {
-                        std.log.err("Failed to free forwarders for project {d}: {}", .{ self.id, err });
-                    };
-                }
+                self.teardownForwarders();
             }
         }
     }

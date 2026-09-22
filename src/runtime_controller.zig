@@ -4,6 +4,7 @@ const config = @import("config/mod.zig");
 const config_types = @import("config/types.zig");
 const project_status = @import("impl/project_status.zig");
 const app_forward = @import("impl/app_forward.zig");
+const loop_manager = @import("impl/app_forward/loop_manager.zig");
 const event_log = @import("event_log.zig");
 const file_log = @import("file_log.zig");
 const compat = @import("compat.zig");
@@ -125,6 +126,7 @@ pub const RuntimeController = struct {
     allocator: std.mem.Allocator,
     current_config: config.Config,
     handles: project_status.ProjectHandleList,
+    app_loop_manager: loop_manager.LoopManager,
     generation: u64 = 1,
     last_apply: ApplyReport = .{
         .generation = 1,
@@ -144,10 +146,14 @@ pub const RuntimeController = struct {
     pub fn init(allocator: std.mem.Allocator, cfg: config.Config) !RuntimeController {
         var owned_config = cfg;
         errdefer owned_config.deinit(allocator);
+        var app_loop_manager = try loop_manager.LoopManager.init(allocator);
+        errdefer app_loop_manager.deinit();
+        const handles = try project_status.ProjectHandleList.initCapacity(allocator, owned_config.projects.len);
         return .{
             .allocator = allocator,
             .current_config = owned_config,
-            .handles = try project_status.ProjectHandleList.initCapacity(allocator, owned_config.projects.len),
+            .handles = handles,
+            .app_loop_manager = app_loop_manager,
             .start_ts = currentTs(),
         };
     }
@@ -159,6 +165,7 @@ pub const RuntimeController = struct {
         defer self.mutex.unlock(compat.io());
 
         project_status.stopAll(&self.handles);
+        self.app_loop_manager.deinit();
         if (rathole_enabled) {
             rathole_forward.stop_all();
             @import("impl/librathole.zig").cleanup();
@@ -244,7 +251,7 @@ pub const RuntimeController = struct {
             const old_enabled = project.cfg.enabled;
             project.cfg.enabled = enabled;
             project.last_changed = currentTs();
-            project.setRuntimeEnabled(enabled);
+            project.setRuntimeEnabled(enabled, &self.controller.app_loop_manager);
 
             if (old_enabled != enabled) {
                 if (enabled) {
@@ -271,7 +278,7 @@ pub const RuntimeController = struct {
 
             project.teardownForwarders();
             if (project.cfg.enable_app_forward) {
-                app_forward.startForwarding(project) catch |err| {
+                app_forward.startForwardingWithLoopManager(project, &self.controller.app_loop_manager) catch |err| {
                     std.log.warn("ubus: failed to restart project {d}: {any}", .{ id, err });
                 };
             }
@@ -343,7 +350,7 @@ pub const RuntimeController = struct {
                 continue;
             }
             if (handle.cfg.enable_app_forward) has_app_forward = true;
-            startForwardingForHandle(handle);
+            startForwardingForHandle(handle, &self.app_loop_manager);
             if (build_options.frpc_mode) {
                 frpc_forward.startForwarding(handle, &self.current_config.frpc_nodes) catch |err| {
                     frpc_failed = true;
@@ -433,7 +440,7 @@ pub const RuntimeController = struct {
                 continue;
             }
             if (!plan.start_new[new_index]) continue;
-            startForwardingForHandle(handle);
+            startForwardingForHandle(handle, &self.app_loop_manager);
             if (handle.startup_status == .failed or handle.startup_status == .partial) failed_projects += 1;
         }
 
@@ -904,9 +911,9 @@ fn stringSlicesEql(a: []const []const u8, b: []const []const u8) bool {
     return true;
 }
 
-fn startForwardingForHandle(handle: *project_status.ProjectHandle) void {
+fn startForwardingForHandle(handle: *project_status.ProjectHandle, runtime_manager: *loop_manager.LoopManager) void {
     if (!handle.cfg.enable_app_forward) return;
-    app_forward.startForwarding(handle) catch |err| {
+    app_forward.startForwardingWithLoopManager(handle, runtime_manager) catch |err| {
         std.log.err("Reload: failed to start forwarding for project {d} ({s}): {any}", .{ handle.id + 1, handle.cfg.remark, err });
     };
 }

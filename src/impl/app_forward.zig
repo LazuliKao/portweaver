@@ -74,6 +74,7 @@ pub fn startForwarding(projectHandle: *project_status.ProjectHandle) !void {
     const allocator = projectHandle.allocator;
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
+    projectHandle.shared_runtime_manager = null;
 
     const mode = projectHandle.cfg.effectiveAppForwardLoopMode(projectHandle.app_forward_loop_mode);
 
@@ -115,6 +116,7 @@ pub fn startForwardingWithLoopManager(projectHandle: *project_status.ProjectHand
     const allocator = projectHandle.allocator;
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
+    projectHandle.shared_runtime_manager = runtime_manager;
 
     const mode = projectHandle.cfg.effectiveAppForwardLoopMode(projectHandle.app_forward_loop_mode);
     var had_failure = false;
