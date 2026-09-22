@@ -85,6 +85,59 @@ pub const Snapshot = struct {
     }
 };
 
+pub const LoopTopologyListener = project_status.RuntimeListener;
+
+pub const LoopTopologyProject = struct {
+    id: u32,
+    section_name: []const u8,
+    listeners: []const LoopTopologyListener,
+
+    fn deinit(self: *LoopTopologyProject, allocator: std.mem.Allocator) void {
+        allocator.free(self.section_name);
+        allocator.free(self.listeners);
+        self.* = undefined;
+    }
+};
+
+pub const LoopTopologyRuntime = struct {
+    runtime_id: u64,
+    mode: []const u8,
+    state: []const u8,
+    reference_count: u32,
+    listener_count: u32,
+    project_count: u32,
+    projects: []const LoopTopologyProject,
+
+    fn deinit(self: *LoopTopologyRuntime, allocator: std.mem.Allocator) void {
+        for (self.projects) |project_value| {
+            var project = project_value;
+            project.deinit(allocator);
+        }
+        allocator.free(self.projects);
+        self.* = undefined;
+    }
+};
+
+/// Allocator-owned topology of the actual runtime instances and listeners.
+/// Runtime IDs are process-local identities, not operating-system thread IDs.
+pub const LoopTopology = struct {
+    generation: u64,
+    backend: []const u8,
+    runtime_count: u32,
+    project_count: u32,
+    listener_count: u32,
+    runtimes: []const LoopTopologyRuntime,
+
+    pub fn deinit(self: *LoopTopology, allocator: std.mem.Allocator) void {
+        for (self.runtimes) |runtime_value| {
+            var runtime = runtime_value;
+            runtime.deinit(allocator);
+        }
+        allocator.free(self.runtimes);
+        self.* = undefined;
+    }
+};
+
 pub const ProjectEnabledResult = struct {
     id: u32,
     enabled: bool,
@@ -241,6 +294,10 @@ pub const RuntimeController = struct {
 
         pub fn snapshot(self: *Guard, allocator: std.mem.Allocator) !Snapshot {
             return self.controller.snapshotLocked(allocator);
+        }
+
+        pub fn loopTopology(self: *Guard, allocator: std.mem.Allocator) !LoopTopology {
+            return self.controller.loopTopologyLocked(allocator);
         }
 
         pub fn setProjectEnabled(self: *Guard, id: u32, enabled: bool) !ProjectEnabledResult {
@@ -600,6 +657,74 @@ pub const RuntimeController = struct {
             .total_bytes_out = bytes_out,
             .uptime = currentTs() - self.start_ts,
             .projects = try projects.toOwnedSlice(allocator),
+        };
+    }
+
+    fn loopTopologyLocked(self: *RuntimeController, allocator: std.mem.Allocator) !LoopTopology {
+        const descriptors = try self.app_loop_manager.snapshotRuntimes(allocator);
+        defer allocator.free(descriptors);
+
+        var runtimes = std.ArrayList(LoopTopologyRuntime).empty;
+        errdefer {
+            for (runtimes.items) |*runtime| runtime.deinit(allocator);
+            runtimes.deinit(allocator);
+        }
+        var total_projects: u32 = 0;
+        var total_listeners: u32 = 0;
+
+        for (descriptors) |descriptor| {
+            var projects = std.ArrayList(LoopTopologyProject).empty;
+            errdefer {
+                for (projects.items) |*project| project.deinit(allocator);
+                projects.deinit(allocator);
+            }
+            var runtime_listener_count: u32 = 0;
+
+            if (descriptor.runtime_context) |runtime_context| {
+                for (self.handles.items) |handle| {
+                    const listeners = try handle.getRuntimeListeners(allocator, runtime_context);
+                    if (listeners.len == 0) {
+                        allocator.free(listeners);
+                        continue;
+                    }
+                    errdefer allocator.free(listeners);
+                    const section_name = try allocator.dupe(u8, handle.cfg.section_name);
+                    errdefer allocator.free(section_name);
+                    try projects.append(allocator, .{
+                        .id = @intCast(handle.id),
+                        .section_name = section_name,
+                        .listeners = listeners,
+                    });
+                    runtime_listener_count += @intCast(listeners.len);
+                }
+            }
+
+            const project_count: u32 = @intCast(projects.items.len);
+            const project_slice = try projects.toOwnedSlice(allocator);
+            errdefer {
+                for (project_slice) |*project| project.deinit(allocator);
+                allocator.free(project_slice);
+            }
+            try runtimes.append(allocator, .{
+                .runtime_id = descriptor.runtime_id,
+                .mode = @tagName(descriptor.mode),
+                .state = @tagName(descriptor.state),
+                .reference_count = @intCast(descriptor.reference_count),
+                .listener_count = runtime_listener_count,
+                .project_count = project_count,
+                .projects = project_slice,
+            });
+            total_projects += project_count;
+            total_listeners += runtime_listener_count;
+        }
+
+        return .{
+            .generation = self.generation,
+            .backend = @tagName(build_options.forward_backend),
+            .runtime_count = @intCast(runtimes.items.len),
+            .project_count = total_projects,
+            .listener_count = total_listeners,
+            .runtimes = try runtimes.toOwnedSlice(allocator),
         };
     }
 
@@ -1248,6 +1373,50 @@ test "runtime controller keeps membership snapshots in one generation" {
     try std.testing.expectEqual(@as(u64, 3), snapshot.generation);
     try std.testing.expectEqual(@as(usize, 1), snapshot.projects.len);
     try std.testing.expectEqualStrings("final", snapshot.projects[0].section_name);
+}
+
+test "loop topology groups listeners by actual shared runtime" {
+    const allocator = std.testing.allocator;
+    var controller = try RuntimeController.init(allocator, try makeTestConfigForSections(allocator, &.{ "alpha", "beta" }, false));
+    defer controller.deinit();
+    try controller.createInitialHandlesLocked();
+
+    const alpha = controller.handles.items[0];
+    const beta = controller.handles.items[1];
+    alpha.shared_runtime_manager = &controller.app_loop_manager;
+    beta.shared_runtime_manager = &controller.app_loop_manager;
+    const alpha_lease = try controller.app_loop_manager.acquire(.global, alpha);
+    const beta_lease = try controller.app_loop_manager.acquire(.global, beta);
+    try std.testing.expectEqual(alpha_lease.runtime, beta_lease.runtime);
+    const runtime_context = alpha_lease.runtime.ctx.?;
+
+    const tcp = try allocator.create(project_status.TcpForwarder);
+    tcp.* = .{ .allocator = allocator, .forwarder = null, .runtime = runtime_context, .listen_port = 18080 };
+    try alpha.registerTcpHandle(tcp);
+    const udp = try allocator.create(project_status.UdpForwarder);
+    udp.* = .{ .allocator = allocator, .forwarder = null, .runtime = runtime_context, .listen_port = 18081 };
+    try beta.registerUdpHandle(udp);
+
+    var guard = controller.acquire();
+    defer guard.release();
+    var topology = try guard.loopTopology(allocator);
+    defer topology.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u64, 1), topology.generation);
+    try std.testing.expectEqualStrings(@tagName(build_options.forward_backend), topology.backend);
+    try std.testing.expectEqual(@as(u32, 1), topology.runtime_count);
+    try std.testing.expectEqual(@as(u32, 2), topology.project_count);
+    try std.testing.expectEqual(@as(u32, 2), topology.listener_count);
+    try std.testing.expectEqual(alpha_lease.runtime.runtime_id, topology.runtimes[0].runtime_id);
+    try std.testing.expectEqualStrings("global", topology.runtimes[0].mode);
+    try std.testing.expectEqualStrings("running", topology.runtimes[0].state);
+    try std.testing.expectEqual(@as(u32, 2), topology.runtimes[0].reference_count);
+    try std.testing.expectEqualStrings("alpha", topology.runtimes[0].projects[0].section_name);
+    try std.testing.expectEqualStrings("tcp", topology.runtimes[0].projects[0].listeners[0].protocol);
+    try std.testing.expectEqual(@as(u16, 18080), topology.runtimes[0].projects[0].listeners[0].local_port);
+    try std.testing.expectEqualStrings("beta", topology.runtimes[0].projects[1].section_name);
+    try std.testing.expectEqualStrings("udp", topology.runtimes[0].projects[1].listeners[0].protocol);
+    try std.testing.expectEqual(@as(u16, 18081), topology.runtimes[0].projects[1].listeners[0].local_port);
 }
 
 const ApplyConfigWorker = struct {

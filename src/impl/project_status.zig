@@ -65,6 +65,11 @@ pub const ForwarderFailure = struct {
     error_code: i32,
 };
 
+pub const RuntimeListener = struct {
+    protocol: []const u8,
+    local_port: u16,
+};
+
 pub const ProjectHandle = struct {
     allocator: std.mem.Allocator,
     startup_status: StartupStatus = .disabled,
@@ -302,6 +307,29 @@ pub const ProjectHandle = struct {
         defer self.updateRuntimeStatus();
         self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
+    }
+
+    /// Returns allocator-owned listener records attached to one runtime.
+    pub fn getRuntimeListeners(self: *ProjectHandle, allocator: std.mem.Allocator, runtime: *c.forwarder_runtime_t) ![]RuntimeListener {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+
+        var listeners = try std.ArrayList(RuntimeListener).initCapacity(
+            allocator,
+            self.tcp_forwarders.items.len + self.udp_forwarders.items.len,
+        );
+        errdefer listeners.deinit(allocator);
+        for (self.tcp_forwarders.items) |forwarder| {
+            if (forwarder.belongsToRuntime(runtime)) {
+                listeners.appendAssumeCapacity(.{ .protocol = "tcp", .local_port = forwarder.listen_port });
+            }
+        }
+        for (self.udp_forwarders.items) |forwarder| {
+            if (forwarder.belongsToRuntime(runtime)) {
+                listeners.appendAssumeCapacity(.{ .protocol = "udp", .local_port = forwarder.listen_port });
+            }
+        }
+        return listeners.toOwnedSlice(allocator);
     }
 
     /// Frees shared-loop forwarder wrappers after their owning loop runtime has

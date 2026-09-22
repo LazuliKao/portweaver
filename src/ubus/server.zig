@@ -165,6 +165,7 @@ const write_rathole_config_policy = [_]c.blobmsg_policy{
 const method_names = struct {
     pub const get_status: [:0]const u8 = "get_status";
     pub const list_projects: [:0]const u8 = "list_projects";
+    pub const get_loop_topology: [:0]const u8 = "get_loop_topology";
     pub const set_enabled: [:0]const u8 = "set_enabled";
     pub const get_frp_status: [:0]const u8 = "get_frp_status";
     pub const read_frp_config: [:0]const u8 = "read_frp_config";
@@ -344,6 +345,14 @@ fn ubusThread(state: *RuntimeState) void {
         .{
             .name = method_names.list_projects,
             .handler = wrapHandler(listProjects, void, null),
+            .mask = 0,
+            .tags = 0,
+            .policy = null,
+            .n_policy = 0,
+        },
+        .{
+            .name = method_names.get_loop_topology,
+            .handler = wrapHandler(getLoopTopology, void, null),
             .mask = 0,
             .tags = 0,
             .policy = null,
@@ -1003,6 +1012,10 @@ fn projectsFromSnapshot(allocator: std.mem.Allocator, snapshot: runtime_controll
 
 fn listProjects(allocator: std.mem.Allocator, request: *RequestContext) !ListProjectsResponse {
     return projectsFromSnapshot(allocator, try request.guard.snapshot(allocator));
+}
+
+fn getLoopTopology(allocator: std.mem.Allocator, request: *RequestContext) !runtime_controller.LoopTopology {
+    return request.guard.loopTopology(allocator);
 }
 
 fn setEnabled(allocator: std.mem.Allocator, request: *RequestContext, args: SetEnabledArgs) !SetEnabledResponse {

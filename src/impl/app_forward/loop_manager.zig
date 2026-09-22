@@ -6,6 +6,8 @@ const compat = @import("../../compat.zig");
 
 const c = forwarder_runtime.c;
 
+var next_runtime_id = std.atomic.Value(u64).init(1);
+
 pub const LoopError = error{
     RuntimeStopped,
     RuntimeStartFailed,
@@ -26,6 +28,7 @@ const QueuedJob = struct {
 /// Owns one forwarder runtime and the thread that runs it.
 /// Uses an opaque C runtime wrapper so Zig never includes backend headers directly.
 pub const LoopRuntime = struct {
+    runtime_id: u64,
     allocator: std.mem.Allocator,
     ctx: ?*c.forwarder_runtime_t = null,
     thread: ?std.Thread = null,
@@ -46,7 +49,29 @@ pub const LoopRuntime = struct {
 
     pub fn init(allocator: std.mem.Allocator) LoopRuntime {
         return .{
+            .runtime_id = next_runtime_id.fetchAdd(1, .monotonic),
             .allocator = allocator,
+        };
+    }
+
+    fn descriptor(self: *LoopRuntime, mode: types.LoopMode, reference_count: usize) RuntimeDescriptor {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+
+        const state: RuntimeState = if (self.stopping or self.stop_requested)
+            .stopping
+        else if (!self.started)
+            .stopped
+        else if (!self.init_done)
+            .starting
+        else
+            .running;
+        return .{
+            .runtime_id = self.runtime_id,
+            .mode = mode,
+            .state = state,
+            .reference_count = reference_count,
+            .runtime_context = self.ctx,
         };
     }
 
@@ -317,6 +342,23 @@ const RuntimeRef = struct {
     project: ?*project_status.ProjectHandle = null,
 };
 
+pub const RuntimeState = enum {
+    starting,
+    running,
+    stopping,
+    stopped,
+};
+
+/// Internal control-plane view of a runtime. `runtime_context` is only an
+/// identity token for correlating live forwarders and must never be exposed.
+pub const RuntimeDescriptor = struct {
+    runtime_id: u64,
+    mode: types.LoopMode,
+    state: RuntimeState,
+    reference_count: usize,
+    runtime_context: ?*c.forwarder_runtime_t,
+};
+
 const GlobalProjectRef = struct {
     project: *project_status.ProjectHandle,
     refs: usize,
@@ -500,6 +542,30 @@ pub const LoopManager = struct {
         };
     }
 
+    /// Returns an allocator-owned point-in-time view of every managed runtime.
+    /// The caller must free the returned slice.
+    pub fn snapshotRuntimes(self: *LoopManager, allocator: std.mem.Allocator) ![]RuntimeDescriptor {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+
+        var descriptors = try std.ArrayList(RuntimeDescriptor).initCapacity(
+            allocator,
+            @intFromBool(self.global != null) + self.project_runtimes.items.len + self.listener_runtimes.items.len,
+        );
+        errdefer descriptors.deinit(allocator);
+
+        if (self.global) |entry| {
+            descriptors.appendAssumeCapacity(entry.runtime.descriptor(entry.mode, entry.refs));
+        }
+        for (self.project_runtimes.items) |entry| {
+            descriptors.appendAssumeCapacity(entry.runtime.descriptor(entry.mode, entry.refs));
+        }
+        for (self.listener_runtimes.items) |entry| {
+            descriptors.appendAssumeCapacity(entry.runtime.descriptor(entry.mode, entry.refs));
+        }
+        return descriptors.toOwnedSlice(allocator);
+    }
+
     fn releaseFromList(self: *LoopManager, list: *std.array_list.Managed(RuntimeRef), runtime: *LoopRuntime) void {
         for (list.items, 0..) |*entry, index| {
             if (entry.runtime == runtime) {
@@ -677,7 +743,16 @@ test "global loop runtime is shared across projects" {
     const first = try manager.acquire(.global, &first_project);
     const second = try manager.acquire(.global, &second_project);
     try std.testing.expectEqual(first.runtime, second.runtime);
+    try std.testing.expect(first.runtime.runtime_id != 0);
     try std.testing.expectEqual(@as(usize, 1), manager.debugRuntimeCount(.global));
+
+    const descriptors = try manager.snapshotRuntimes(std.testing.allocator);
+    defer std.testing.allocator.free(descriptors);
+    try std.testing.expectEqual(@as(usize, 1), descriptors.len);
+    try std.testing.expectEqual(first.runtime.runtime_id, descriptors[0].runtime_id);
+    try std.testing.expectEqual(types.LoopMode.global, descriptors[0].mode);
+    try std.testing.expectEqual(RuntimeState.running, descriptors[0].state);
+    try std.testing.expectEqual(@as(usize, 2), descriptors[0].reference_count);
 
     manager.release(first);
     try std.testing.expectEqual(@as(usize, 1), manager.debugRuntimeCount(.global));
