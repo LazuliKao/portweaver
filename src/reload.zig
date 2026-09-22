@@ -95,7 +95,7 @@ pub fn apply() void {
     };
 
     const watched_before = runtime.watchEnabled();
-    runtime.applyConfig(&new_cfg);
+    _ = runtime.applyConfig(&new_cfg);
     const watched_after = runtime.watchEnabled();
     if (watched_before != watched_after) {
         stopWatcher();

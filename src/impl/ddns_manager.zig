@@ -347,7 +347,17 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []const types.DdnsConf
     // Instance allocations must use the allocator that owns the map.
     const owner = instances_allocator.?;
 
-    // Remove instances not in new config or disabled in new config
+    var config_names = std.StringHashMap(void).init(allocator);
+    defer config_names.deinit();
+    var additions: u32 = 0;
+    for (configs) |cfg| {
+        if (config_names.contains(cfg.name)) return error.DuplicateDdnsName;
+        try config_names.put(cfg.name, {});
+        if (cfg.enabled and !map.contains(cfg.name)) additions += 1;
+    }
+    try map.ensureUnusedCapacity(additions);
+
+    // Determine removals without mutating the live registry.
     var to_remove = std.array_list.Managed([]const u8).init(allocator);
     defer to_remove.deinit();
 
@@ -370,6 +380,61 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []const types.DdnsConf
         }
     }
 
+    const Prepared = struct {
+        name: []const u8,
+        holder: *InstanceHolder,
+        key: ?[]u8,
+        existing: ?*InstanceHolder,
+    };
+    var prepared = std.array_list.Managed(Prepared).init(allocator);
+    defer prepared.deinit();
+    var committed = false;
+    defer if (!committed) {
+        for (prepared.items) |item| {
+            item.holder.deinit(owner);
+            owner.destroy(item.holder);
+            if (item.key) |key| owner.free(key);
+        }
+    };
+
+    // Construct and start every replacement before switching any live entry.
+    for (configs) |cfg| {
+        if (!cfg.enabled) {
+            std.log.info("[DDNS] Skipping disabled config: {s}", .{cfg.name});
+            continue;
+        }
+
+        if (map.get(cfg.name)) |existing| {
+            if (existing.config.eql(cfg)) {
+                std.log.debug("[DDNS] Instance {s} already exists (unchanged)", .{cfg.name});
+                continue;
+            }
+        }
+
+        const holder = try createInstance(owner, cfg);
+        errdefer {
+            holder.deinit(owner);
+            owner.destroy(holder);
+        }
+        holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
+        const existing = map.get(cfg.name);
+        const key = if (existing == null) try owner.dupe(u8, cfg.name) else null;
+        errdefer if (key) |owned_key| owner.free(owned_key);
+        try prepared.append(.{ .name = cfg.name, .holder = holder, .key = key, .existing = existing });
+    }
+
+    for (prepared.items) |item| {
+        if (item.existing) |existing| {
+            std.log.info("[DDNS] Switching prepared replacement for {s}", .{item.name});
+            map.getPtr(item.name).?.* = item.holder;
+            existing.deinit(owner);
+            owner.destroy(existing);
+        } else {
+            std.log.info("[DDNS] Activating new instance: {s}", .{item.name});
+            map.putAssumeCapacity(item.key.?, item.holder);
+        }
+    }
+
     for (to_remove.items) |name| {
         if (map.fetchRemove(name)) |kv| {
             std.log.info("[DDNS] Removing instance: {s} (config disabled or removed)", .{name});
@@ -378,44 +443,7 @@ pub fn applyConfig(allocator: std.mem.Allocator, configs: []const types.DdnsConf
             owner.free(kv.key);
         }
     }
-
-    // Add or update instances (only for enabled configs)
-    for (configs) |cfg| {
-        if (!cfg.enabled) {
-            std.log.info("[DDNS] Skipping disabled config: {s}", .{cfg.name});
-            continue;
-        }
-
-        if (map.get(cfg.name)) |existing| {
-            if (!existing.config.eql(cfg)) {
-                std.log.info("[DDNS] Config changed for {s}, restarting instance", .{cfg.name});
-                // Prepare the replacement before stopping the working instance.
-                const holder = try createInstance(owner, cfg);
-                errdefer {
-                    holder.deinit(owner);
-                    owner.destroy(holder);
-                }
-                holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
-                map.getPtr(cfg.name).?.* = holder;
-                existing.deinit(owner);
-                owner.destroy(existing);
-            } else {
-                std.log.debug("[DDNS] Instance {s} already exists (unchanged)", .{cfg.name});
-            }
-        } else {
-            std.log.info("[DDNS] Creating new instance: {s}", .{cfg.name});
-            const holder = try createInstance(owner, cfg);
-            errdefer {
-                holder.deinit(owner);
-                owner.destroy(holder);
-            }
-            const key = try owner.dupe(u8, cfg.name);
-            errdefer owner.free(key);
-            try map.ensureUnusedCapacity(1);
-            holder.thread = try std.Thread.spawn(.{}, ddnsUpdateThread, .{holder});
-            map.putAssumeCapacity(key, holder);
-        }
-    }
+    committed = true;
 }
 
 pub fn getStatus(allocator: std.mem.Allocator) ![]DdnsStatus {
@@ -553,6 +581,11 @@ test "DDNS reload: snapshots survive source destruction, replacement failure, di
 
     invalid.name = "broken-addition";
     try std.testing.expectError(error.UnsupportedProvider, applyConfig(alloc, &.{ invalid, source }));
+    try std.testing.expect(instances.?.get(source.name).? == original);
+    try std.testing.expectEqual(@as(u32, 1), instances.?.count());
+
+    // A failed addition must not apply a removal that was only staged.
+    try std.testing.expectError(error.UnsupportedProvider, applyConfig(alloc, &.{invalid}));
     try std.testing.expect(instances.?.get(source.name).? == original);
     try std.testing.expectEqual(@as(u32, 1), instances.?.count());
 

@@ -125,6 +125,106 @@ fn stop_locked() void {
     }
 }
 
+fn has_instance(mode: Mode, name: []const u8) bool {
+    for (instances.items) |holder| {
+        if (holder.mode == mode and std.mem.eql(u8, holder.name, name)) return true;
+    }
+    return false;
+}
+
+fn services_eql_for_node(comptime T: type, old_services: []const T, new_services: []const T, node_name: []const u8) bool {
+    var old_count: usize = 0;
+    for (old_services) |old_service| {
+        if (!old_service.enabled or !std.mem.eql(u8, old_service.node_name, node_name)) continue;
+        old_count += 1;
+        var found = false;
+        for (new_services) |new_service| {
+            if (!new_service.enabled or !std.mem.eql(u8, new_service.node_name, node_name)) continue;
+            if (std.mem.eql(u8, old_service.service_name, new_service.service_name) and old_service.eql(new_service)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    var new_count: usize = 0;
+    for (new_services) |service| {
+        if (service.enabled and std.mem.eql(u8, service.node_name, node_name)) new_count += 1;
+    }
+    return old_count == new_count;
+}
+
+fn client_node_unchanged(name: []const u8, old_cfg: *const config.Config, new_cfg: *const config.Config) bool {
+    const old_node = old_cfg.rathole_client_nodes.get(name) orelse return false;
+    const new_node = new_cfg.rathole_client_nodes.get(name) orelse return false;
+    if (!old_node.enabled or !new_node.enabled or !old_node.eql(new_node)) return false;
+    if (new_node.source.mode == .external_file and !std.mem.eql(u8, old_cfg.frpConfigRoot(), new_cfg.frpConfigRoot())) return false;
+    if (new_node.source.mode != .builtin) return true;
+    return services_eql_for_node(config.RatholeClientService, old_cfg.rathole_client_services, new_cfg.rathole_client_services, name);
+}
+
+fn server_node_unchanged(name: []const u8, old_cfg: *const config.Config, new_cfg: *const config.Config) bool {
+    const old_node = old_cfg.rathole_server_nodes.get(name) orelse return false;
+    const new_node = new_cfg.rathole_server_nodes.get(name) orelse return false;
+    if (!old_node.enabled or !new_node.enabled or !old_node.eql(new_node)) return false;
+    if (new_node.source.mode == .external_file and !std.mem.eql(u8, old_cfg.frpConfigRoot(), new_cfg.frpConfigRoot())) return false;
+    if (new_node.source.mode != .builtin) return true;
+    return services_eql_for_node(config.RatholeServerService, old_cfg.rathole_server_services, new_cfg.rathole_server_services, name);
+}
+
+/// Stops only instances whose node or rendered service set changed. Callers
+/// invoke `start_changed` after all release-phase operations complete.
+pub fn stop_changed(old_cfg: *const config.Config, new_cfg: *const config.Config) void {
+    lock.lockUncancelable(compat.io());
+    defer lock.unlock(compat.io());
+    const allocator = owner orelse return;
+
+    var index = instances.items.len;
+    while (index > 0) {
+        index -= 1;
+        const holder = &instances.items[index];
+        const unchanged = switch (holder.mode) {
+            .client => client_node_unchanged(holder.name, old_cfg, new_cfg),
+            .server => server_node_unchanged(holder.name, old_cfg, new_cfg),
+        };
+        if (unchanged) continue;
+        holder.instance.deinit();
+        allocator.free(holder.name);
+        _ = instances.orderedRemove(index);
+    }
+}
+
+/// Starts enabled nodes not retained by `stop_changed`. Returns the number of
+/// nodes that failed to activate so reload can report degraded state.
+pub fn start_changed(allocator: std.mem.Allocator, cfg: *const config.Config) u32 {
+    lock.lockUncancelable(compat.io());
+    defer lock.unlock(compat.io());
+    if (owner == null) owner = allocator;
+    var failures: u32 = 0;
+
+    if (options.rathole_server_mode) {
+        var iterator = cfg.rathole_server_nodes.iterator();
+        while (iterator.next()) |entry| {
+            if (!entry.value_ptr.enabled or has_instance(.server, entry.key_ptr.*)) continue;
+            start_node(allocator, .server, cfg.frpConfigRoot(), entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_server_services) catch |err| {
+                failures += 1;
+                std.log.err("Reload: failed to start Rathole server {s}: {any}", .{ entry.key_ptr.*, err });
+            };
+        }
+    }
+    if (options.rathole_client_mode) {
+        var iterator = cfg.rathole_client_nodes.iterator();
+        while (iterator.next()) |entry| {
+            if (!entry.value_ptr.enabled or has_instance(.client, entry.key_ptr.*)) continue;
+            start_node(allocator, .client, cfg.frpConfigRoot(), entry.key_ptr.*, entry.value_ptr.*, cfg.rathole_client_services) catch |err| {
+                failures += 1;
+                std.log.err("Reload: failed to start Rathole client {s}: {any}", .{ entry.key_ptr.*, err });
+            };
+        }
+    }
+    return failures;
+}
+
 /// Rebuilds only Rathole instances; callers serialize this with config reload.
 pub fn apply_config(allocator: std.mem.Allocator, cfg: *const config.Config) !void {
     lock.lockUncancelable(compat.io());
@@ -212,6 +312,33 @@ test "TOML quoting prevents service names creating sections" {
     defer output.deinit();
     try quoted(&output.writer, "a\"\n[b]\\");
     try std.testing.expectEqualStrings("\"a\\\"\\n[b]\\\\\"", output.written());
+}
+
+test "Rathole node service comparison ignores order but detects changes" {
+    const first = config.RatholeClientService{
+        .node_name = "node",
+        .service_name = "first",
+        .local_address = "127.0.0.1",
+        .local_port = 8001,
+    };
+    const second = config.RatholeClientService{
+        .node_name = "node",
+        .service_name = "second",
+        .local_address = "127.0.0.1",
+        .local_port = 8002,
+    };
+    const unrelated = config.RatholeClientService{
+        .node_name = "other",
+        .service_name = "ignored",
+        .local_address = "127.0.0.1",
+        .local_port = 9000,
+    };
+    const reordered = [_]config.RatholeClientService{ second, unrelated, first };
+    try std.testing.expect(services_eql_for_node(config.RatholeClientService, &.{ first, second }, &reordered, "node"));
+
+    var changed = second;
+    changed.local_port += 1;
+    try std.testing.expect(!services_eql_for_node(config.RatholeClientService, &.{ first, second }, &.{ first, changed }, "node"));
 }
 
 test "embedded client accepts generated TOML and repeated lifecycle" {

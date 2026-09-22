@@ -75,7 +75,7 @@ pub fn startForwarding(projectHandle: *project_status.ProjectHandle) !void {
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
-    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
+    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(projectHandle.app_forward_loop_mode);
 
     // Create LoopManager if not already present
     if (projectHandle.runtime_manager == null) {
@@ -116,7 +116,7 @@ pub fn startForwardingWithLoopManager(projectHandle: *project_status.ProjectHand
     projectHandle.beginStartup();
     if (!projectHandle.cfg.enable_app_forward) return;
 
-    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(.per_project);
+    const mode = projectHandle.cfg.effectiveAppForwardLoopMode(projectHandle.app_forward_loop_mode);
     var had_failure = false;
     if (projectHandle.cfg.port_mappings.len > 0) {
         for (projectHandle.cfg.port_mappings) |mapping| {

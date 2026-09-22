@@ -32,9 +32,7 @@ fn myLogFn(
 
     std.debug.print("[" ++ level.asText() ++ "] " ++ format ++ "\n", args);
 
-    if (file_log.getGlobalFileLogger()) |logger| {
-        logger.log(level, scope, format, args);
-    }
+    file_log.logToFile(level, scope, format, args);
 }
 
 const VersionInfo = struct {
@@ -169,9 +167,6 @@ pub fn main(init: std.process.Init) !void {
     // 加载配置
     const result = try loadConfigFrom(allocator, cfg_source, cfg_path);
 
-    if (result.log_config.enabled) {
-        file_log.initGlobalFileLogger(allocator, result.log_config);
-    }
     defer file_log.deinitGlobalFileLogger();
 
     // RuntimeController takes ownership of the live config and every project

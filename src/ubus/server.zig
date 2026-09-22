@@ -586,6 +586,11 @@ fn ubusThread(state: *RuntimeState) void {
 
 const GetStatusResponse = struct {
     status: []const u8,
+    generation: u64,
+    apply_status: []const u8,
+    changed_projects: u32,
+    failed_projects: u32,
+    failed_components: u32,
     total_projects: u32,
     active_ports: u32,
     total_bytes_in: u64,
@@ -805,6 +810,11 @@ const DdnsStatusSection = struct {
 
 const FullStatusResponse = struct {
     status: []const u8,
+    generation: u64,
+    apply_status: []const u8,
+    changed_projects: u32,
+    failed_projects: u32,
+    failed_components: u32,
     uptime: u64,
     total_projects: u32,
     active_ports: u32,
@@ -928,6 +938,11 @@ fn getStatus(allocator: std.mem.Allocator, request: *RequestContext) !GetStatusR
     const snapshot = try request.guard.snapshot(allocator);
     return .{
         .status = snapshot.status,
+        .generation = snapshot.generation,
+        .apply_status = snapshot.apply_status,
+        .changed_projects = snapshot.changed_projects,
+        .failed_projects = snapshot.failed_projects,
+        .failed_components = snapshot.failed_components,
         .total_projects = snapshot.total_projects,
         .active_ports = snapshot.active_ports,
         .total_bytes_in = snapshot.total_bytes_in,
@@ -1329,6 +1344,11 @@ fn getFullStatus(allocator: std.mem.Allocator, request: *RequestContext) !FullSt
 
     return .{
         .status = snapshot.status,
+        .generation = snapshot.generation,
+        .apply_status = snapshot.apply_status,
+        .changed_projects = snapshot.changed_projects,
+        .failed_projects = snapshot.failed_projects,
+        .failed_components = snapshot.failed_components,
         .uptime = snapshot.uptime,
         .total_projects = snapshot.total_projects,
         .active_ports = snapshot.active_ports,

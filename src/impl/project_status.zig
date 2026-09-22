@@ -73,6 +73,7 @@ pub const ProjectHandle = struct {
     startup_failures: std.array_list.Managed(ForwarderFailure),
     lock: std.Io.Mutex = .init,
     cfg: types.Project,
+    app_forward_loop_mode: types.LoopMode = .per_project,
     use_nftables: bool,
     error_code: i32 = 0,
     active_ports: u32 = 0,

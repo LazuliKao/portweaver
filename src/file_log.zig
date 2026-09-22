@@ -69,9 +69,11 @@ pub const FileLogger = struct {
         const file_path = try allocator.dupe(u8, config.file_path);
         errdefer allocator.free(file_path);
 
+        var owned_config = config;
+        owned_config.file_path = file_path;
         self.* = .{
             .allocator = allocator,
-            .config = config,
+            .config = owned_config,
             .file = null,
             .file_path = file_path,
             .current_size = 0,
@@ -341,37 +343,57 @@ var global_file_logger: ?*FileLogger = null;
 var global_logger_lock: std.Io.Mutex = .init;
 
 pub fn initGlobalFileLogger(allocator: std.mem.Allocator, config: LogConfig) void {
-    global_logger_lock.lockUncancelable(compat.io());
-    defer global_logger_lock.unlock(compat.io());
-
-    if (global_file_logger == null) {
-        global_file_logger = FileLogger.init(allocator, config) catch |err| {
-            std.log.err("Failed to initialize file logger: {any}", .{err});
-            return;
-        };
-    }
+    replaceGlobalFileLogger(allocator, config) catch |err| {
+        std.log.err("Failed to initialize file logger: {any}", .{err});
+    };
 }
 
 pub fn deinitGlobalFileLogger() void {
+    var old_logger: ?*FileLogger = null;
     global_logger_lock.lockUncancelable(compat.io());
-    defer global_logger_lock.unlock(compat.io());
-
-    if (global_file_logger) |logger| {
-        logger.deinit();
-        global_file_logger = null;
-    }
+    old_logger = global_file_logger;
+    global_file_logger = null;
+    global_logger_lock.unlock(compat.io());
+    if (old_logger) |logger| logger.deinit();
 }
 
-pub fn getGlobalFileLogger() ?*FileLogger {
+/// Builds a replacement before publishing it. On failure the current logger is
+/// unchanged. The old logger is destroyed only after no writer can retain it.
+pub fn replaceGlobalFileLogger(allocator: std.mem.Allocator, config: LogConfig) !void {
+    const replacement = if (config.enabled) blk: {
+        const logger = try FileLogger.init(allocator, config);
+        if (logger.file == null) {
+            logger.deinit();
+            return error.LogFileUnavailable;
+        }
+        break :blk logger;
+    } else null;
+    var old_logger: ?*FileLogger = null;
     global_logger_lock.lockUncancelable(compat.io());
-    defer global_logger_lock.unlock(compat.io());
-    return global_file_logger;
+    old_logger = global_file_logger;
+    global_file_logger = replacement;
+    global_logger_lock.unlock(compat.io());
+    if (old_logger) |logger| logger.deinit();
 }
 
 pub fn logToFile(level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
-    if (getGlobalFileLogger()) |logger| {
-        logger.log(level, scope, format, args);
-    }
+    global_logger_lock.lockUncancelable(compat.io());
+    defer global_logger_lock.unlock(compat.io());
+    if (global_file_logger) |logger| logger.log(level, scope, format, args);
+}
+
+test "FileLogger owns its configuration path" {
+    const allocator = std.testing.allocator;
+    const source_path = try allocator.dupe(u8, "unused-owned-path.log");
+    var logger = try FileLogger.init(allocator, .{
+        .enabled = false,
+        .file_path = source_path,
+    });
+    allocator.free(source_path);
+    defer logger.deinit();
+
+    try std.testing.expectEqualStrings("unused-owned-path.log", logger.config.file_path);
+    try std.testing.expectEqual(logger.file_path.ptr, logger.config.file_path.ptr);
 }
 
 test "FileLogger basic operations" {

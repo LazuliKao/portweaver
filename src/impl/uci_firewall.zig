@@ -59,6 +59,7 @@ pub fn addFirewallAcceptRule(
     proto: []const u8,
     port_str: []const u8,
     remark: []const u8,
+    project_name: []const u8,
     family: ?types.AddressFamily,
 ) !void {
     var fw_pkg = try ctx.load("firewall");
@@ -78,6 +79,7 @@ pub fn addFirewallAcceptRule(
 
     // 设置各个选项 - 使用 UciPtr
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
+    try setUciOption(ctx, allocator, "firewall", sec_name, "portweaver_project", project_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", "*");
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "dest_port", port_str);
@@ -118,6 +120,7 @@ pub fn addFirewallNat(
     dest_ip: []const u8,
     dest_port_str: []const u8,
     remark: []const u8,
+    project_name: []const u8,
     family: ?types.AddressFamily,
 ) !void {
     var fw_pkg = try ctx.load("firewall");
@@ -134,6 +137,7 @@ pub fn addFirewallNat(
     defer allocator.free(rule_name);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
+    try setUciOption(ctx, allocator, "firewall", sec_name, "portweaver_project", project_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", src_zone);
 
     var proto_iter = std.mem.splitSequence(u8, proto, ",");
@@ -173,6 +177,7 @@ pub fn addFirewallRedirectRule(
     dest_ip: []const u8,
     dest_port_str: []const u8,
     remark: []const u8,
+    project_name: []const u8,
     family: ?types.AddressFamily,
     preserve_source_ip: bool,
 ) !void {
@@ -187,6 +192,7 @@ pub fn addFirewallRedirectRule(
             dest_ip,
             dest_port_str,
             remark,
+            project_name,
             family,
         );
     }
@@ -206,6 +212,7 @@ pub fn addFirewallRedirectRule(
     defer allocator.free(rule_name);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "name", rule_name);
+    try setUciOption(ctx, allocator, "firewall", sec_name, "portweaver_project", project_name);
     try setUciOption(ctx, allocator, "firewall", sec_name, "src", src_zone);
 
     try setUciOption(ctx, allocator, "firewall", sec_name, "src_dport", listen_port_str);
@@ -288,6 +295,45 @@ pub fn clearFirewallRules(ctx: uci.UciContext, allocator: std.mem.Allocator) !vo
     try fw_pkg.commit(overwrite);
 }
 
+/// Removes only rules owned by the named PortWeaver project sections.
+/// Project names are borrowed for the duration of this call.
+pub fn clearFirewallRulesForProjects(
+    ctx: uci.UciContext,
+    allocator: std.mem.Allocator,
+    project_names: *const std.StringHashMap(void),
+) !void {
+    if (project_names.count() == 0) return;
+
+    var fw_pkg = try ctx.load("firewall");
+    defer fw_pkg.unload() catch {};
+    var sections_to_delete = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (sections_to_delete.items) |name| allocator.free(name);
+        sections_to_delete.deinit();
+    }
+
+    var sec_it = uci.sections(fw_pkg);
+    while (sec_it.next()) |sec| {
+        var opt_it = sec.options();
+        while (opt_it.next()) |opt| {
+            if (!std.mem.eql(u8, uci.cStr(opt.name()), "portweaver_project") or !opt.isString()) continue;
+            if (project_names.contains(uci.cStr(opt.getString()))) {
+                try sections_to_delete.append(try allocator.dupe(u8, uci.cStr(sec.name())));
+            }
+            break;
+        }
+    }
+
+    for (sections_to_delete.items) |sec_name| {
+        var ptr = uci.UciPtr.init();
+        const ptr_str = try std.fmt.allocPrintSentinel(allocator, "firewall.{s}", .{sec_name}, 0);
+        defer allocator.free(ptr_str);
+        try ctx.parsePtr(&ptr, @constCast(@as([*c]u8, @ptrCast(ptr_str.ptr))));
+        try ctx.delete(&ptr);
+    }
+    try fw_pkg.commit(false);
+}
+
 /// 根据配置项应用防火墙规则
 ///
 /// 逻辑说明：
@@ -319,18 +365,18 @@ pub fn applyFirewallRulesForProject(
             if (project.open_firewall_port) {
                 if (mapping.protocol == .both) {
                     if (project.family == .any or project.family == .ipv4) {
-                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, .ipv4);
-                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, .ipv4);
+                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, project.section_name, .ipv4);
+                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, project.section_name, .ipv4);
                     }
                     if (project.family == .any or project.family == .ipv6) {
-                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, .ipv6);
-                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, .ipv6);
+                        try addFirewallAcceptRule(ctx, allocator, "tcp", mapping.listen_port, project.remark, project.section_name, .ipv6);
+                        try addFirewallAcceptRule(ctx, allocator, "udp", mapping.listen_port, project.remark, project.section_name, .ipv6);
                     }
                 } else {
                     if (project.family == .any) {
-                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, null);
+                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, project.section_name, null);
                     } else {
-                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, family);
+                        try addFirewallAcceptRule(ctx, allocator, proto, mapping.listen_port, project.remark, project.section_name, family);
                     }
                 }
             }
@@ -356,6 +402,7 @@ pub fn applyFirewallRulesForProject(
                             project.target_address,
                             mapping.target_port,
                             project.remark,
+                            project.section_name,
                             family,
                             project.preserve_source_ip,
                         );
@@ -383,21 +430,21 @@ pub fn applyFirewallRulesForProject(
             if (project.protocol == .both) {
                 // IPv4 和 IPv6 分别处理
                 if (project.family == .any or project.family == .ipv4) {
-                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, .ipv4);
-                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, .ipv4);
+                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, project.section_name, .ipv4);
+                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, project.section_name, .ipv4);
                 }
                 if (project.family == .any or project.family == .ipv6) {
-                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, .ipv6);
-                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, .ipv6);
+                    try addFirewallAcceptRule(ctx, allocator, "tcp", listen_port_str, project.remark, project.section_name, .ipv6);
+                    try addFirewallAcceptRule(ctx, allocator, "udp", listen_port_str, project.remark, project.section_name, .ipv6);
                 }
             } else {
                 // 单协议情况
                 if (project.family == .any) {
                     // 不指定 family 时添加规则
-                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, null);
+                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, project.section_name, null);
                 } else {
                     // 指定了 family
-                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, family);
+                    try addFirewallAcceptRule(ctx, allocator, proto, listen_port_str, project.remark, project.section_name, family);
                 }
             }
         }
@@ -423,6 +470,7 @@ pub fn applyFirewallRulesForProject(
                         project.target_address,
                         target_port_str,
                         project.remark,
+                        project.section_name,
                         family,
                         project.preserve_source_ip,
                     );
