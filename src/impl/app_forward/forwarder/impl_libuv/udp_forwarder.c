@@ -627,7 +627,6 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     int *out_error)
 {
     (void)connect_timeout_ms;
-    (void)max_connections;
     if (!runtime)
     {
         set_forwarder_error(out_error, FORWARDER_ERROR_UNKNOWN);
@@ -690,6 +689,8 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     __atomic_store_n(&fwd->bytes_in, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&fwd->bytes_out, 0, __ATOMIC_RELAXED);
     fwd->max_sessions = udp_compute_session_limit();
+    if (max_connections > 0 && max_connections < fwd->max_sessions)
+        fwd->max_sessions = max_connections;
     memset(fwd->session_hash, 0, sizeof(fwd->session_hash));
 
     rc = cache_destination_addr(&fwd->cached_dest_addr, family, fwd->target_address, fwd->target_port);

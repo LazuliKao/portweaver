@@ -57,6 +57,10 @@ struct tcp_forwarder
     int enable_stats;
     uint32_t connect_timeout_ms;
     unsigned int max_connections;
+#ifdef PORTWEAVER_TEST
+    int test_force_connect_timeout;
+    unsigned int test_connect_timeouts;
+#endif
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
@@ -626,7 +630,12 @@ static void tcp_action_timer_cb(uv_timer_t *timer)
     ctx->action_timer_purpose = TCP_TIMER_NONE;
     if (purpose == TCP_TIMER_CONNECT_TIMEOUT)
     {
-        uv_cancel((uv_req_t *)&ctx->connect_req);
+#ifdef PORTWEAVER_TEST
+        __atomic_fetch_add(&ctx->forwarder->test_connect_timeouts, 1u, __ATOMIC_RELAXED);
+#endif
+        // uv_cancel does not cancel uv_connect_t. Closing the target socket
+        // cancels the pending connect and bounds the lifetime of this session.
+        tcp_terminate_connection(ctx);
         return;
     }
     if (purpose == TCP_TIMER_RETRY_DELAY && ctx->retry_deadline_ms > 0)
@@ -665,8 +674,29 @@ static void tcp_start_connect(tcp_conn_ctx_t *ctx)
         return;
     }
     if (ctx->forwarder->connect_timeout_ms > 0)
+    {
         tcp_schedule_action(ctx, TCP_TIMER_CONNECT_TIMEOUT, ctx->forwarder->connect_timeout_ms);
+#ifdef PORTWEAVER_TEST
+        // Exercise the exact timer callback before libuv can complete a
+        // localhost connect, without relying on an unroutable test network.
+        if (ctx->forwarder->test_force_connect_timeout)
+            tcp_action_timer_cb(&ctx->action_timer);
+#endif
+    }
 }
+
+#ifdef PORTWEAVER_TEST
+// Test-only hook. Must be called on the runtime's owning thread before start.
+void tcp_forwarder_test_force_connect_timeout(tcp_forwarder_t *forwarder)
+{
+    forwarder->test_force_connect_timeout = 1;
+}
+
+unsigned int tcp_forwarder_test_connect_timeouts(tcp_forwarder_t *forwarder)
+{
+    return __atomic_load_n(&forwarder->test_connect_timeouts, __ATOMIC_RELAXED);
+}
+#endif
 
 static void tcp_begin_wol_connect(tcp_conn_ctx_t *ctx, uint32_t delay_ms)
 {

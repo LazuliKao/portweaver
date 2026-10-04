@@ -7,11 +7,14 @@ const loop_manager = @import("./impl/app_forward/loop_manager.zig");
 const project_status = @import("./impl/project_status.zig");
 const forwarder_runtime = @import("./impl/app_forward/forwarder_runtime.zig");
 const compat = @import("./compat.zig");
-const build_options = @import("build_options");
 
 const run_duration_ns = 1 * std.time.ns_per_s;
 const forwarder_ready_ns = 100 * std.time.ns_per_ms;
 const ForwarderKind = enum { tcp, udp };
+
+// Available in all forwarder module test binaries (PORTWEAVER_TEST).
+extern fn tcp_forwarder_test_force_connect_timeout(forwarder: *anyopaque) void;
+extern fn tcp_forwarder_test_connect_timeouts(forwarder: *anyopaque) c_uint;
 
 const ThreadSafeFailingAllocator = struct {
     backing: std.mem.Allocator,
@@ -148,6 +151,15 @@ const TcpDestroyContext = struct {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
         const token = forwarder_runtime.runtimeToken(ctx.runtime.ctx.?);
         ctx.forwarder.destroyOnRuntimeThread(token);
+    }
+};
+
+const TcpForceTimeoutContext = struct {
+    forwarder: *app_forward.TcpForwarder,
+
+    fn run(ptr: *anyopaque) !void {
+        const ctx: *@This() = @ptrCast(@alignCast(ptr));
+        tcp_forwarder_test_force_connect_timeout(@ptrCast(ctx.forwarder.forwarder.?));
     }
 };
 
@@ -1043,6 +1055,159 @@ test "app forward: tcp single connection with data transfer" {
     try testing.expectEqualStrings(message, response);
 
     forwarder.requestStop();
+}
+
+test "app forward: connect timeout releases sessions while another project forwards" {
+    const alloc = testing.allocator;
+    const io = compat.io();
+    const bad_port = testListenPort(91, 0);
+    const good_port = testListenPort(92, 0);
+    const bad_target = testTargetPort(91, 0);
+    const good_target = testTargetPort(92, 0);
+
+    var bad_handle = try makeSinglePortHandle(alloc, 91, .tcp, bad_port, bad_target);
+    defer cleanupProjectHandle(&bad_handle);
+    bad_handle.cfg.connect_timeout_ms = 20;
+    bad_handle.cfg.max_connections = 2;
+    var good_handle = try makeSinglePortHandle(alloc, 92, .tcp, good_port, good_target);
+    defer cleanupProjectHandle(&good_handle);
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const bad = try createTcpForwarderOnRuntime(alloc, &bad_handle, &runtime, bad_port, bad_target);
+    defer destroyTcpForwarderOnRuntime(&runtime, bad);
+    const good = try createTcpForwarderOnRuntime(alloc, &good_handle, &runtime, good_port, good_target);
+    defer destroyTcpForwarderOnRuntime(&runtime, good);
+
+    // Keep a target listener available; the test hook fires the real timeout
+    // path before connect completion, independent of OS routing/timing.
+    var target_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", bad_target);
+    var target_server = try target_address.listen(io, .{ .reuse_address = true, .mode = .stream, .protocol = .tcp });
+    defer target_server.deinit(io);
+
+    var hook = TcpForceTimeoutContext{ .forwarder = bad };
+    try runtime.marshal(.{ .callback = TcpForceTimeoutContext.run, .context = &hook });
+    var bad_start = TcpRunContext{ .handle = &bad_handle, .runtime = &runtime, .forwarder = bad };
+    tcpStartThread(&bad_start);
+    try testing.expect(bad_start.start_error == null);
+    var good_start = TcpRunContext{ .handle = &good_handle, .runtime = &runtime, .forwarder = good };
+    tcpStartThread(&good_start);
+    try testing.expect(good_start.start_error == null);
+
+    var bad_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", bad_port);
+    var clients: [3]std.Io.net.Stream = undefined;
+    var connected: usize = 0;
+    defer for (clients[0..connected]) |client| client.close(io);
+    for (&clients, 0..) |*client, index| {
+        client.* = try bad_address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+        connected += 1;
+        // Allow close callbacks to return the slot before the next arrival.
+        // Both waits are bounded; a regression fails within 400 ms per client.
+        var attempts: usize = 0;
+        while (attempts < 20 and tcp_forwarder_test_connect_timeouts(@ptrCast(bad.forwarder.?)) < index + 1) : (attempts += 1) {
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        }
+        try testing.expectEqual(@as(c_uint, @intCast(index + 1)), tcp_forwarder_test_connect_timeouts(@ptrCast(bad.forwarder.?)));
+        attempts = 0;
+        while (attempts < 20 and bad.getStats().active_sessions != 0) : (attempts += 1) {
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        }
+        try testing.expectEqual(@as(u32, 0), bad.getStats().active_sessions);
+    }
+
+    const echo_thread = try std.Thread.spawn(app_forward.getThreadConfig(), tcpEchoServerThread, .{good_target});
+    defer echo_thread.join();
+    compat.sleepNanos(forwarder_ready_ns);
+    const response = try tcpClientTest(good_port, "healthy project", std.time.ns_per_s);
+    defer alloc.free(response);
+    try testing.expectEqualStrings("healthy project", response);
+}
+
+test "app forward: UDP max connections caps distinct clients" {
+    const alloc = testing.allocator;
+    const io = compat.io();
+    const listen_port = testListenPort(93, 0);
+    const target_port = testTargetPort(93, 0);
+    var handle = try makeSinglePortHandle(alloc, 93, .udp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+    handle.cfg.max_connections = 2;
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createUdpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyUdpForwarderOnRuntime(&runtime, forwarder);
+    var start = UdpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    udpStartThread(&start);
+    try testing.expect(start.start_error == null);
+
+    // An unbound UDP target can return ICMP port-unreachable (notably on
+    // Windows), causing the backend to discard sessions before we count them.
+    var target_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", target_port);
+    const target_server = try target_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer target_server.close(io);
+
+    var server_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", listen_port);
+    var local_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const client1 = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer client1.close(io);
+    const client2 = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer client2.close(io);
+    const overflow_client = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer overflow_client.close(io);
+
+    try client1.send(io, &server_address, "one");
+    try client2.send(io, &server_address, "two");
+    var attempts: usize = 0;
+    while (attempts < 80 and forwarder.getStats().active_sessions < 2) : (attempts += 1) {
+        compat.sleepNanos(10 * std.time.ns_per_ms);
+    }
+    try testing.expectEqual(@as(u32, 2), forwarder.getStats().active_sessions);
+
+    for (0..8) |_| try overflow_client.send(io, &server_address, "overflow");
+    compat.sleepNanos(50 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u32, 2), forwarder.getStats().active_sessions);
+}
+
+test "app forward: TCP max connections rejects excess clients" {
+    const alloc = testing.allocator;
+    const io = compat.io();
+    const listen_port = testListenPort(94, 0);
+    const target_port = testTargetPort(94, 0);
+    var handle = try makeSinglePortHandle(alloc, 94, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+    handle.cfg.max_connections = 1;
+
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+    var target_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", target_port);
+    var target_server = try target_address.listen(io, .{ .reuse_address = true, .mode = .stream, .protocol = .tcp });
+    defer target_server.deinit(io);
+
+    var start = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    tcpStartThread(&start);
+    try testing.expect(start.start_error == null);
+
+    var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", listen_port);
+    const first = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer first.close(io);
+    var attempts: usize = 0;
+    while (attempts < 20 and forwarder.getStats().active_sessions != 1) : (attempts += 1) {
+        compat.sleepNanos(10 * std.time.ns_per_ms);
+    }
+    try testing.expectEqual(@as(u32, 1), forwarder.getStats().active_sessions);
+
+    const second = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer second.close(io);
+    compat.sleepNanos(50 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u32, 1), forwarder.getStats().active_sessions);
 }
 
 test "app forward: udp single datagram with data transfer" {

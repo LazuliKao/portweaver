@@ -1091,6 +1091,7 @@ fn addForwarderBackend(
     optimize: std.builtin.OptimizeMode,
     backend: ForwardBackend,
     root_module: *std.Build.Module,
+    test_hooks: bool,
 ) void {
     root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
 
@@ -1107,7 +1108,14 @@ fn addForwarderBackend(
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (test_hooks and optimize == .Debug)
+                    &.{ "-DDEBUG", "-DPORTWEAVER_TEST" }
+                else if (test_hooks)
+                    &.{"-DPORTWEAVER_TEST"}
+                else if (optimize == .Debug)
+                    &.{"-DDEBUG"}
+                else
+                    &.{},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
@@ -1132,7 +1140,14 @@ fn addForwarderBackend(
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/tcp_forwarder.cpp"),
-                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+                .flags = if (test_hooks and optimize == .Debug)
+                    &.{ "-std=c++17", "-DDEBUG", "-DPORTWEAVER_TEST" }
+                else if (test_hooks)
+                    &.{ "-std=c++17", "-DPORTWEAVER_TEST" }
+                else if (optimize == .Debug)
+                    &.{ "-std=c++17", "-DDEBUG" }
+                else
+                    &.{"-std=c++17"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/udp_forwarder.cpp"),
@@ -1175,7 +1190,14 @@ fn addForwarderBackend(
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/tcp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
+                .flags = if (test_hooks and optimize == .Debug)
+                    &.{ "-DDEBUG", "-D_GNU_SOURCE", "-DPORTWEAVER_TEST" }
+                else if (test_hooks)
+                    &.{ "-D_GNU_SOURCE", "-DPORTWEAVER_TEST" }
+                else if (optimize == .Debug)
+                    &.{ "-DDEBUG", "-D_GNU_SOURCE" }
+                else
+                    &.{"-D_GNU_SOURCE"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/udp_forwarder.c"),
@@ -1224,6 +1246,7 @@ pub fn build(b: *std.Build) void {
 
     const forward_backend = b.option(ForwardBackend, "forward_backend", "Forwarding backend (libuv, asio or io_uring)") orelse .libuv;
     options.addOption(ForwardBackend, "forward_backend", forward_backend);
+    const test_filter = b.option([]const u8, "test-filter", "Run only tests matching this name");
 
     const options_mod = options.createModule();
 
@@ -1366,7 +1389,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Add C/C++ forwarder implementation (selected via -Dforward_backend)
-    addForwarderBackend(b, target, optimize, forward_backend, exe.root_module);
+    addForwarderBackend(b, target, optimize, forward_backend, exe.root_module, false);
 
     // Add C include paths for UCI library headers
     exe.root_module.addIncludePath(b.path("deps/uci"));
@@ -1476,6 +1499,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (test_filter) |filter| mod_tests.filters = b.allocator.dupe([]const u8, &.{filter}) catch @panic("Out of memory");
 
     if (frpc or ddns or frps) {
         const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
@@ -1488,7 +1512,7 @@ pub fn build(b: *std.Build) void {
         linkRatholeLibrary(b, target, rathole_lib, mod_tests.root_module, &mod_tests.step);
     }
 
-    addForwarderBackend(b, target, optimize, forward_backend, mod_tests.root_module);
+    addForwarderBackend(b, target, optimize, forward_backend, mod_tests.root_module, true);
     mod_tests.root_module.addIncludePath(b.path("deps/uci"));
     mod_tests.root_module.addIncludePath(b.path("deps/fix"));
     mod_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
@@ -1552,7 +1576,7 @@ pub fn build(b: *std.Build) void {
     if (rathole) |rathole_lib| {
         linkRatholeLibrary(b, target, rathole_lib, exe_tests.root_module, &exe_tests.step);
     }
-    addForwarderBackend(b, target, optimize, forward_backend, exe_tests.root_module);
+    addForwarderBackend(b, target, optimize, forward_backend, exe_tests.root_module, false);
     exe_tests.root_module.addIncludePath(b.path("deps/uci"));
     exe_tests.root_module.addIncludePath(b.path("deps/fix"));
     exe_tests.root_module.addIncludePath(b.path("deps/openwrt-tools"));
@@ -1596,7 +1620,8 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    // The name filter targets module tests; the executable has no matching tests.
+    if (test_filter == null) test_step.dependOn(&run_exe_tests.step);
 
     // Development remote mode: auto-build and upload to remote device
     const dev_remote_step = b.step("dev-remote", "Watch, build, and auto-upload to remote OpenWrt device");

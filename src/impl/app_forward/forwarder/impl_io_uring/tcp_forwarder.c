@@ -73,6 +73,10 @@ struct tcp_forwarder {
     unsigned long long bytes_in;
     unsigned long long bytes_out;
     unsigned int active_sessions;
+#ifdef PORTWEAVER_TEST
+    int test_force_connect_timeout;
+    unsigned int test_connect_timeouts;
+#endif
     uint16_t listen_port;
     int enable_stats;
     int started;
@@ -107,6 +111,9 @@ struct tcp_connection {
     struct connect_operation connect_op;
     struct timeout_operation timeout_op;
     struct __kernel_timespec timeout;
+#ifdef PORTWEAVER_TEST
+    struct __kernel_timespec test_stalled_connect;
+#endif
     struct timer_operation action_timer;
     struct timer_operation inspection_timer;
     struct stream_operation client_to_target;
@@ -398,8 +405,12 @@ static void timeout_complete(struct io_uring_cqe *cqe, void *runtime_context)
     operation->pending = 0;
     connection->pending--;
     forwarder_runtime_dec_active(connection->forwarder->runtime);
-    if (cqe->res == -ETIME)
+    if (cqe->res == -ETIME) {
         connection->connect_timed_out = 1;
+#ifdef PORTWEAVER_TEST
+        __atomic_fetch_add(&connection->forwarder->test_connect_timeouts, 1u, __ATOMIC_RELAXED);
+#endif
+    }
     if (connection->closing) {
         maybe_free_connection(connection);
         return;
@@ -473,20 +484,41 @@ static int start_connect(struct tcp_connection *connection)
     connection->connect_result = -EINPROGRESS;
     connection->connect_timed_out = 0;
 
+    struct io_uring *ring = forwarder_runtime_get_ring(fwd->runtime);
+    // A linked timeout must be submitted in the same batch as the connect.
+    // Reserve both slots before preparing either SQE; get_sqe() may submit
+    // a full queue, which would otherwise break the link.
+    if (fwd->connect_timeout_ms > 0 && io_uring_sq_space_left(ring) < 2) {
+        int submitted = io_uring_submit(ring);
+        if (submitted < 0)
+            return submitted;
+        if (io_uring_sq_space_left(ring) < 2)
+            return -ENOMEM;
+    }
     struct io_uring_sqe *connect_sqe = get_sqe(fwd);
     if (connect_sqe == NULL)
         return -ENOMEM;
     connection->connect_op.op.callback = connect_complete;
-    io_uring_prep_connect(connect_sqe, connection->target_fd,
-                          (const struct sockaddr *)&fwd->destination,
-                          fwd->destination_len);
+#ifdef PORTWEAVER_TEST
+    if (fwd->test_force_connect_timeout) {
+        // Simulate a stalled connect using a cancellable kernel operation.
+        // The actual linked timeout SQE/callback must cancel it in 20 ms.
+        set_timeout_ms(&connection->test_stalled_connect, 5000);
+        io_uring_prep_timeout(connect_sqe, &connection->test_stalled_connect, 0, 0);
+    } else
+#endif
+    {
+        io_uring_prep_connect(connect_sqe, connection->target_fd,
+                              (const struct sockaddr *)&fwd->destination,
+                              fwd->destination_len);
+    }
     io_uring_sqe_set_data(connect_sqe, &connection->connect_op);
     connection->connect_op.pending = 1;
     connection->pending++;
     forwarder_runtime_inc_active(fwd->runtime);
 
     if (fwd->connect_timeout_ms > 0) {
-        struct io_uring_sqe *timeout_sqe = get_sqe(fwd);
+        struct io_uring_sqe *timeout_sqe = io_uring_get_sqe(ring);
         if (timeout_sqe == NULL) {
             return -ENOMEM;
         }
@@ -913,6 +945,19 @@ traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *fwd)
     stats.listen_port = fwd->listen_port;
     return stats;
 }
+
+#ifdef PORTWEAVER_TEST
+void tcp_forwarder_test_force_connect_timeout(tcp_forwarder_t *fwd)
+{
+    if (fwd != NULL)
+        fwd->test_force_connect_timeout = 1;
+}
+
+unsigned int tcp_forwarder_test_connect_timeouts(tcp_forwarder_t *fwd)
+{
+    return fwd != NULL ? __atomic_load_n(&fwd->test_connect_timeouts, __ATOMIC_RELAXED) : 0;
+}
+#endif
 
 void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd,
                                        tcp_first_packet_cb_t callback,

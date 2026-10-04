@@ -717,7 +717,7 @@ udp_forwarder_t *udp_forwarder_create_on_runtime(
     fwd->enable_stats = enable_stats;
     fwd->max_sessions = udp_compute_session_limit();
     fwd->max_connections = max_connections;
-    if (max_connections > 0)
+    if (max_connections > 0 && max_connections < fwd->max_sessions)
         fwd->max_sessions = max_connections;
 
     if (!cache_destination_addr(&fwd->cached_dest_addr, family, fwd->target_address, target_port))

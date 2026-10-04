@@ -115,6 +115,7 @@ class tcp_conn_ctx : public std::enable_shared_from_this<tcp_conn_ctx>
   private:
     void schedule_connect(uint32_t delay_ms);
     void async_connect_to_target();
+    void on_connect_timeout();
     void handle_connect_failure();
     void start_inspection_timer();
     void cancel_inspection_timer();
@@ -175,6 +176,10 @@ struct tcp_forwarder
     std::atomic<unsigned long long> bytes_in;
     std::atomic<unsigned long long> bytes_out;
     std::atomic<unsigned int> active_sessions;
+#ifdef PORTWEAVER_TEST
+    bool test_force_connect_timeout = false;
+    std::atomic<unsigned int> test_connect_timeouts{0};
+#endif
     asio::ip::tcp::endpoint cached_dest_addr;
     std::mutex sessions_mutex;
     std::vector<std::shared_ptr<tcp_conn_ctx>> active_conns;
@@ -393,10 +398,8 @@ void tcp_conn_ctx::async_connect_to_target()
     {
         connect_timer.expires_after(std::chrono::milliseconds(owner->connect_timeout_ms));
         connect_timer.async_wait([self](const asio::error_code &ec) {
-            if (ec || self->closing)
-                return;
-            asio::error_code ignored;
-            self->target_socket.close(ignored);
+            if (!ec)
+                self->on_connect_timeout();
         });
     }
 
@@ -414,6 +417,22 @@ void tcp_conn_ctx::async_connect_to_target()
             self->start_inspection_timer();
         self->maybe_start_forwarding();
     });
+#ifdef PORTWEAVER_TEST
+    // Run the real timeout path before the connect completion can be dispatched.
+    if (owner->test_force_connect_timeout && owner->connect_timeout_ms > 0)
+        on_connect_timeout();
+#endif
+}
+
+void tcp_conn_ctx::on_connect_timeout()
+{
+    if (closing)
+        return;
+#ifdef PORTWEAVER_TEST
+    owner->test_connect_timeouts.fetch_add(1u, std::memory_order_relaxed);
+#endif
+    asio::error_code ignored;
+    target_socket.close(ignored);
 }
 
 void tcp_conn_ctx::handle_connect_failure()
@@ -985,6 +1004,19 @@ extern "C" traffic_stats_t tcp_forwarder_get_stats(tcp_forwarder_t *forwarder)
     stats.listen_port = forwarder->listen_port;
     return stats;
 }
+
+#ifdef PORTWEAVER_TEST
+extern "C" void tcp_forwarder_test_force_connect_timeout(tcp_forwarder_t *forwarder)
+{
+    if (forwarder)
+        forwarder->test_force_connect_timeout = true;
+}
+
+extern "C" unsigned int tcp_forwarder_test_connect_timeouts(tcp_forwarder_t *forwarder)
+{
+    return forwarder ? forwarder->test_connect_timeouts.load(std::memory_order_relaxed) : 0;
+}
+#endif
 
 extern "C" void tcp_forwarder_set_first_packet_cb(tcp_forwarder_t *fwd, tcp_first_packet_cb_t cb, void *user_data, tcp_first_packet_destroy_cb_t destroy_cb)
 {
