@@ -1125,6 +1125,94 @@ test "app forward: connect timeout releases sessions while another project forwa
     try testing.expectEqualStrings("healthy project", response);
 }
 
+extern fn tcp_forwarder_test_backpressure(forwarder: *anyopaque, field: c_int) usize;
+
+const BackpressureSender = struct {
+    stream: std.Io.net.Stream,
+    err: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        self.send() catch |err| {
+            self.err = err;
+        };
+    }
+
+    fn send(self: *@This()) !void {
+        var buffer: [4096]u8 = undefined;
+        var writer = self.stream.writer(compat.io(), &buffer);
+        const chunk = [_]u8{0xa5} ** 65536;
+        for (0..512) |_| try writer.interface.writeAll(&chunk);
+        try writer.interface.flush();
+        try self.stream.shutdown(compat.io(), .send);
+    }
+};
+
+test "app forward: libuv backpressure bounds both directions and preserves half-close" {
+    if (@import("build_options").forward_backend != .libuv) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const io = compat.io();
+    const listen_port = testListenPort(95, 0);
+    const target_port = testTargetPort(95, 0);
+    var handle = try makeSinglePortHandle(alloc, 95, .tcp, listen_port, target_port);
+    defer cleanupProjectHandle(&handle);
+    var runtime = loop_manager.LoopRuntime.init(alloc);
+    try runtime.start();
+    defer runtime.deinit();
+    const forwarder = try createTcpForwarderOnRuntime(alloc, &handle, &runtime, listen_port, target_port);
+    defer destroyTcpForwarderOnRuntime(&runtime, forwarder);
+    var target_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", target_port);
+    var server = try target_address.listen(io, .{ .reuse_address = true, .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    var start = TcpRunContext{ .handle = &handle, .runtime = &runtime, .forwarder = forwarder };
+    tcpStartThread(&start);
+    try testing.expect(start.start_error == null);
+    var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", listen_port);
+    const client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(io);
+    const target = try server.accept(io);
+    defer target.close(io);
+    const raw: *anyopaque = @ptrCast(forwarder.forwarder.?);
+    for (0..2) |direction| {
+        const pauses_before = tcp_forwarder_test_backpressure(raw, 0);
+        var sender = BackpressureSender{ .stream = if (direction == 0) client else target };
+        const thread = try std.Thread.spawn(app_forward.getThreadConfig(), BackpressureSender.run, .{&sender});
+        defer thread.join();
+        var attempts: usize = 0;
+        while (attempts < 80 and tcp_forwarder_test_backpressure(raw, 0) == pauses_before) : (attempts += 1)
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        try testing.expect(tcp_forwarder_test_backpressure(raw, 0) > pauses_before);
+        var buffer: [4096]u8 = undefined;
+        var reader = (if (direction == 0) target else client).reader(io, &buffer);
+        var chunk: [65536]u8 = undefined;
+        for (0..512) |_| {
+            try reader.interface.readSliceAll(&chunk);
+            for (chunk) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
+        }
+        try testing.expectEqual(@as(usize, 0), try reader.interface.readSliceShort(chunk[0..1]));
+        try testing.expect(tcp_forwarder_test_backpressure(raw, 1) > 0);
+        try testing.expect(tcp_forwarder_test_backpressure(raw, 2) <= 320 * 1024);
+    }
+    // Stop with a blocked receiver and outstanding writes. Cancellation must
+    // release both the retained buffers and the connection slot.
+    const blocked_client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer blocked_client.close(io);
+    const blocked_target = try server.accept(io);
+    defer blocked_target.close(io);
+    const pauses_before = tcp_forwarder_test_backpressure(raw, 0);
+    var sender = BackpressureSender{ .stream = blocked_client };
+    const thread = try std.Thread.spawn(app_forward.getThreadConfig(), BackpressureSender.run, .{&sender});
+    defer thread.join();
+    var attempts: usize = 0;
+    while (attempts < 80 and tcp_forwarder_test_backpressure(raw, 0) == pauses_before) : (attempts += 1)
+        compat.sleepNanos(10 * std.time.ns_per_ms);
+    forwarder.requestStop();
+    try testing.expect(tcp_forwarder_test_backpressure(raw, 0) > pauses_before);
+    attempts = 0;
+    while (attempts < 80 and forwarder.getStats().active_sessions != 0) : (attempts += 1)
+        compat.sleepNanos(10 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u32, 0), forwarder.getStats().active_sessions);
+}
+
 test "app forward: UDP max connections caps distinct clients" {
     const alloc = testing.allocator;
     const io = compat.io();

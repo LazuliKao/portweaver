@@ -6,6 +6,9 @@
 
 #define TCP_INSPECTION_BUFFER_SIZE 16384
 #define TCP_INSPECTION_TIMEOUT_MS 2000
+#define TCP_WRITE_HIGH_WATER (256 * 1024)
+#define TCP_WRITE_LOW_WATER (128 * 1024)
+#define TCP_READ_BUFFER_SIZE (64 * 1024)
 
 typedef enum tcp_conn_phase
 {
@@ -60,6 +63,9 @@ struct tcp_forwarder
 #ifdef PORTWEAVER_TEST
     int test_force_connect_timeout;
     unsigned int test_connect_timeouts;
+    unsigned int test_pauses;
+    unsigned int test_resumes;
+    size_t test_peak_queued;
 #endif
     unsigned long long bytes_in;
     unsigned long long bytes_out;
@@ -106,6 +112,8 @@ typedef struct tcp_conn_ctx
     int target_connected;
     int client_reading;
     int target_reading;
+    size_t queued_bytes[2];
+    int read_paused[2];
     uint64_t retry_deadline_ms;
     int first_packet_inspected;
     char *client_inspection_buffer;
@@ -119,6 +127,8 @@ typedef struct fwd_write_req
     uv_write_t req;
     struct tcp_forwarder *fwd;
     tcp_conn_ctx_t *ctx;
+    size_t length;
+    int direction;
 } fwd_write_req_t;
 
 static void tcp_forwarder_ref(struct tcp_forwarder *fwd)
@@ -128,6 +138,17 @@ static void tcp_forwarder_ref(struct tcp_forwarder *fwd)
         fwd->ref_count++;
     }
 }
+
+#ifdef PORTWEAVER_TEST
+size_t tcp_forwarder_test_backpressure(tcp_forwarder_t *fwd, int field)
+{
+    if (field == 0)
+        return __atomic_load_n(&fwd->test_pauses, __ATOMIC_RELAXED);
+    if (field == 1)
+        return __atomic_load_n(&fwd->test_resumes, __ATOMIC_RELAXED);
+    return __atomic_load_n(&fwd->test_peak_queued, __ATOMIC_RELAXED);
+}
+#endif
 
 static void tcp_forwarder_unref(struct tcp_forwarder *fwd)
 {
@@ -156,6 +177,25 @@ static void tcp_begin_wol_connect(tcp_conn_ctx_t *ctx, uint32_t delay_ms);
 static void tcp_start_forwarding(tcp_conn_ctx_t *ctx);
 static void tcp_action_timer_cb(uv_timer_t *timer);
 static void tcp_inspection_timeout_cb(uv_timer_t *timer);
+static int tcp_start_reading(tcp_conn_ctx_t *ctx, int client, int target);
+
+/* Requests retain their entire buffer until completion, including any prefix
+ * already sent by libuv. Only resume the source of the drained direction. */
+static void tcp_write_completed(fwd_write_req_t *fw, int status)
+{
+    tcp_conn_ctx_t *ctx = fw->ctx;
+    int direction = fw->direction;
+    ctx->queued_bytes[direction] -= fw->length;
+    if (status == 0 && !ctx->closed && ctx->read_paused[direction] &&
+        ctx->queued_bytes[direction] <= TCP_WRITE_LOW_WATER)
+    {
+        ctx->read_paused[direction] = 0;
+#ifdef PORTWEAVER_TEST
+        __atomic_fetch_add(&ctx->forwarder->test_resumes, 1u, __ATOMIC_RELAXED);
+#endif
+        tcp_start_reading(ctx, direction == 0, direction == 1);
+    }
+}
 
 static void tcp_free_context(tcp_conn_ctx_t *ctx)
 {
@@ -177,6 +217,7 @@ static void tcp_maybe_free_context(tcp_conn_ctx_t *ctx)
 static void tcp_on_client_write(uv_write_t *req, int status)
 {
     fwd_write_req_t *fw = (fwd_write_req_t *)req;
+    tcp_write_completed(fw, status);
     struct tcp_forwarder *fwd = fw->fwd;
     if (status != 0)
     {
@@ -192,6 +233,7 @@ static void tcp_on_client_write(uv_write_t *req, int status)
 static void tcp_on_target_write(uv_write_t *req, int status)
 {
     fwd_write_req_t *fw = (fwd_write_req_t *)req;
+    tcp_write_completed(fw, status);
     struct tcp_forwarder *fwd = fw->fwd;
     if (status != 0)
     {
@@ -216,6 +258,8 @@ static int tcp_queue_write(tcp_conn_ctx_t *ctx, int client_to_target, char *data
     }
     fw->fwd = fwd;
     fw->ctx = ctx;
+    fw->length = length;
+    fw->direction = client_to_target ? 0 : 1;
     uv_buf_t wbuf = uv_buf_init(data, (unsigned int)length);
     fw->req.data = data;
     uv_stream_t *destination = client_to_target ? (uv_stream_t *)&ctx->target : (uv_stream_t *)&ctx->client;
@@ -228,6 +272,23 @@ static int tcp_queue_write(tcp_conn_ctx_t *ctx, int client_to_target, char *data
         DATA_FREE(fwd, fw);
         tcp_terminate_connection(ctx);
         return -1;
+    }
+    ctx->queued_bytes[fw->direction] += length;
+#ifdef PORTWEAVER_TEST
+    if (ctx->queued_bytes[fw->direction] > __atomic_load_n(&fwd->test_peak_queued, __ATOMIC_RELAXED))
+        __atomic_store_n(&fwd->test_peak_queued, ctx->queued_bytes[fw->direction], __ATOMIC_RELAXED);
+#endif
+    if (ctx->queued_bytes[fw->direction] >= TCP_WRITE_HIGH_WATER)
+    {
+#ifdef PORTWEAVER_TEST
+        __atomic_fetch_add(&fwd->test_pauses, 1u, __ATOMIC_RELAXED);
+#endif
+        ctx->read_paused[fw->direction] = 1;
+        uv_read_stop(client_to_target ? (uv_stream_t *)&ctx->client : (uv_stream_t *)&ctx->target);
+        if (client_to_target)
+            ctx->client_reading = 0;
+        else
+            ctx->target_reading = 0;
     }
     return 0;
 }
@@ -515,6 +576,8 @@ static void tcp_terminate_connection(tcp_conn_ctx_t *ctx)
 
 static void tcp_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
 {
+    if (suggested_size > TCP_READ_BUFFER_SIZE)
+        suggested_size = TCP_READ_BUFFER_SIZE;
     if (handle && handle->data)
     {
         tcp_conn_ctx_t *ctx = (tcp_conn_ctx_t *)handle->data;
@@ -533,13 +596,15 @@ static int tcp_start_reading(tcp_conn_ctx_t *ctx, int client, int target)
 {
     int r1 = 0;
     int r2 = 0;
-    if (client && !ctx->client_reading)
+    if (ctx->closed)
+        return 0;
+    if (client && !ctx->client_reading && !ctx->client_eof && !ctx->read_paused[0])
     {
         r1 = uv_read_start((uv_stream_t *)&ctx->client, tcp_alloc_cb, tcp_on_client_read);
         if (r1 == 0)
             ctx->client_reading = 1;
     }
-    if (target && !ctx->target_reading)
+    if (target && !ctx->target_reading && !ctx->target_eof && !ctx->read_paused[1])
     {
         r2 = uv_read_start((uv_stream_t *)&ctx->target, tcp_alloc_cb, tcp_on_target_read);
         if (r2 == 0)
