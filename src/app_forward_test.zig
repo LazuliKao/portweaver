@@ -536,15 +536,16 @@ test "app forward: udp init returns OutOfMemory when wrapper allocation fails" {
 }
 
 test "app forward: tcp init cleans up C allocations on malloc failure" {
-    try expectForwarderInitMallocFailure(.tcp, 26, 2);
-    try expectForwarderInitMallocFailure(.tcp, 27, 3);
-    try expectForwarderInitMallocFailure(.tcp, 28, 4);
+    // Marshal no longer allocates: wrapper is allocation 0, C state starts at 1.
+    try expectForwarderInitMallocFailure(.tcp, 26, 1);
+    try expectForwarderInitMallocFailure(.tcp, 27, 2);
+    try expectForwarderInitMallocFailure(.tcp, 28, 3);
 }
 
 test "app forward: udp init cleans up C allocations on malloc failure" {
-    try expectForwarderInitMallocFailure(.udp, 29, 2);
-    try expectForwarderInitMallocFailure(.udp, 30, 3);
-    try expectForwarderInitMallocFailure(.udp, 31, 4);
+    try expectForwarderInitMallocFailure(.udp, 29, 1);
+    try expectForwarderInitMallocFailure(.udp, 30, 2);
+    try expectForwarderInitMallocFailure(.udp, 31, 3);
 }
 
 test "app forward: tcp forwarder runs for 3s then exits cleanly" {
@@ -653,6 +654,33 @@ test "app forward: project startup uses the handle allocator for persistent stat
     try testing.expect(owner_allocator.allocations > 0);
     try testing.expectEqual(project_status.StartupStatus.success, handle.startup_status);
     try testing.expect(handle.runtime_manager != null);
+}
+
+test "app forward: teardown requires no allocations in every loop mode" {
+    inline for (.{ .global, .per_project, .per_listener }) |mode| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        const alloc = failing.allocator();
+        var manager = try loop_manager.LoopManager.init(alloc);
+        defer manager.deinit();
+        var first = try makeSinglePortHandle(alloc, 60, .both, testListenPort(60, 0), testTargetPort(60, 0));
+        defer cleanupProjectHandle(&first);
+        var second = try makeSinglePortHandle(alloc, 61, .both, testListenPort(61, 0), testTargetPort(61, 0));
+        defer cleanupProjectHandle(&second);
+        first.cfg.app_forward_loop_mode = mode;
+        second.cfg.app_forward_loop_mode = mode;
+        try app_forward.startForwardingWithLoopManager(&first, &manager);
+        try app_forward.startForwardingWithLoopManager(&second, &manager);
+        try testing.expectEqual(@as(u32, 2), first.active_ports);
+        try testing.expectEqual(@as(u32, 2), second.active_ports);
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        first.teardownForwarders();
+        try testing.expectEqual(@as(u32, 0), first.active_ports);
+        try testing.expectEqual(@as(u32, 2), second.active_ports);
+        second.teardownForwarders();
+        try testing.expectEqual(@as(usize, 0), manager.debugRuntimeCount(mode));
+        try testing.expect(!failing.has_induced_failure);
+    }
 }
 
 test "app forward: per_project shared loop hosts two tcp listeners" {

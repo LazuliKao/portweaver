@@ -23,6 +23,8 @@ pub const LoopJob = struct {
 const QueuedJob = struct {
     job: LoopJob,
     next: ?*QueuedJob = null,
+    done: bool = false,
+    result: ?anyerror = null,
 };
 
 /// Owns one forwarder runtime and the thread that runs it.
@@ -45,7 +47,8 @@ pub const LoopRuntime = struct {
     stop_requested: bool = false,
     init_done: bool = false,
     init_status: c_int = 0,
-    last_job_error: ?anyerror = null,
+    // Borrowed until join; lifecycle serialization permits one retiring project.
+    retiring_project: ?*project_status.ProjectHandle = null,
 
     pub fn init(allocator: std.mem.Allocator) LoopRuntime {
         return .{
@@ -102,19 +105,18 @@ pub const LoopRuntime = struct {
     }
 
     pub fn marshal(self: *LoopRuntime, job: LoopJob) !void {
-        const node = try self.allocator.create(QueuedJob);
-        node.* = .{ .job = job };
+        // Synchronous callers own the node until their own callback completes.
+        var queued = QueuedJob{ .job = job };
+        const node = &queued;
 
         self.lock.lockUncancelable(compat.io());
         if (self.stopping or !self.started) {
             self.lock.unlock(compat.io());
-            self.allocator.destroy(node);
             return LoopError.RuntimeStopped;
         }
 
         const runtime_ctx = self.ctx orelse {
             self.lock.unlock(compat.io());
-            self.allocator.destroy(node);
             return LoopError.RuntimeStopped;
         };
 
@@ -133,13 +135,11 @@ pub const LoopRuntime = struct {
         self.lock.lockUncancelable(compat.io());
         defer self.lock.unlock(compat.io());
         self.active_wakes -= 1;
-        while (self.active_jobs > 0 and self.last_job_error == null) {
+        self.condition.broadcast(compat.io());
+        while (!node.done) {
             self.condition.waitUncancelable(compat.io(), &self.lock);
         }
-        if (self.last_job_error) |err| {
-            self.last_job_error = null;
-            return err;
-        }
+        if (node.result) |err| return err;
     }
 
     pub fn addShutdownJob(self: *LoopRuntime, job: LoopJob) !void {
@@ -232,6 +232,9 @@ pub const LoopRuntime = struct {
         _ = c.forwarder_runtime_run(self.ctx);
 
         self.drainShutdownJobs();
+        if (self.retiring_project) |project| {
+            project.destroySharedForwarderCResourcesForRuntime(self.ctx.?);
+        }
 
         _ = c.forwarder_runtime_close(self.ctx);
         c.forwarder_runtime_free(self.ctx);
@@ -278,13 +281,13 @@ pub const LoopRuntime = struct {
             self.lock.unlock(compat.io());
 
             const result = node.job.callback(node.job.context);
-            self.allocator.destroy(node);
 
             self.lock.lockUncancelable(compat.io());
             self.active_jobs -= 1;
             if (result) |_| {} else |err| {
-                self.last_job_error = err;
+                node.result = err;
             }
+            node.done = true;
             self.condition.broadcast(compat.io());
             self.lock.unlock(compat.io());
         }
@@ -371,13 +374,11 @@ pub const RuntimeLease = struct {
 };
 
 const RuntimeForwarderDestroyContext = struct {
-    allocator: std.mem.Allocator,
     project: *project_status.ProjectHandle,
     runtime: *LoopRuntime,
 
     fn run(ptr: *anyopaque) !void {
         const ctx: *@This() = @ptrCast(@alignCast(ptr));
-        defer ctx.allocator.destroy(ctx);
 
         if (ctx.runtime.ctx) |runtime_ctx| {
             ctx.project.destroySharedForwarderCResourcesForRuntime(runtime_ctx);
@@ -419,13 +420,14 @@ pub const LoopManager = struct {
         switch (mode) {
             .global => {
                 if (self.global) |*entry| {
-                    entry.refs += 1;
                     try self.addGlobalProjectRef(project);
+                    entry.refs += 1;
                     return .{ .runtime = entry.runtime, .mode = mode, .project = project };
                 }
                 const runtime = try createStartedRuntime(self.allocator);
-                self.global = .{ .runtime = runtime, .refs = 1, .mode = mode };
+                errdefer destroyRuntime(self.allocator, runtime);
                 try self.addGlobalProjectRef(project);
+                self.global = .{ .runtime = runtime, .refs = 1, .mode = mode };
                 return .{ .runtime = runtime, .mode = mode, .project = project };
             },
             .per_project => {
@@ -436,11 +438,13 @@ pub const LoopManager = struct {
                     }
                 }
                 const runtime = try createStartedRuntime(self.allocator);
+                errdefer destroyRuntime(self.allocator, runtime);
                 try self.project_runtimes.append(.{ .runtime = runtime, .refs = 1, .mode = mode, .project = project });
                 return .{ .runtime = runtime, .mode = mode, .project = project };
             },
             .per_listener => {
                 const runtime = try createStartedRuntime(self.allocator);
+                errdefer destroyRuntime(self.allocator, runtime);
                 try self.listener_runtimes.append(.{ .runtime = runtime, .refs = 1, .mode = mode, .project = project });
                 return .{ .runtime = runtime, .mode = mode, .project = project };
             },
@@ -459,77 +463,56 @@ pub const LoopManager = struct {
     }
 
     pub fn releaseProjectRuntime(self: *LoopManager, project: *project_status.ProjectHandle) !void {
-        var runtimes_to_destroy = std.array_list.Managed(*LoopRuntime).init(self.allocator);
-        defer runtimes_to_destroy.deinit();
-        var runtimes_to_cleanup = std.array_list.Managed(*LoopRuntime).init(self.allocator);
-        defer runtimes_to_cleanup.deinit();
-
+        // No allocations after retirement starts: teardown must work during OOM.
+        // Control-plane lifecycle operations are serialized by the controller.
+        try project.stopSharedForwarders();
+        while (self.takeProjectRuntime(&self.project_runtimes, project)) |runtime| {
+            runtime.retiring_project = project;
+            destroyRuntime(self.allocator, runtime);
+        }
+        while (self.takeProjectRuntime(&self.listener_runtimes, project)) |runtime| {
+            runtime.retiring_project = project;
+            destroyRuntime(self.allocator, runtime);
+        }
+        var global_runtime: ?*LoopRuntime = null;
+        var destroy_global = false;
         self.lock.lockUncancelable(compat.io());
-
-        var index: usize = 0;
-        while (index < self.project_runtimes.items.len) {
-            if (self.project_runtimes.items[index].project == project) {
-                const entry = self.project_runtimes.swapRemove(index);
-                runtimes_to_destroy.append(entry.runtime) catch |err| {
-                    self.lock.unlock(compat.io());
-                    return err;
-                };
-                continue;
-            }
-            index += 1;
-        }
-        index = 0;
-        while (index < self.listener_runtimes.items.len) {
-            if (self.listener_runtimes.items[index].project == project) {
-                const entry = self.listener_runtimes.swapRemove(index);
-                runtimes_to_destroy.append(entry.runtime) catch |err| {
-                    self.lock.unlock(compat.io());
-                    return err;
-                };
-                continue;
-            }
-            index += 1;
-        }
         if (self.global) |*global_entry| {
             const removed_refs = self.removeGlobalProjectRefs(project);
             if (removed_refs > 0) {
+                global_runtime = global_entry.runtime;
                 if (global_entry.refs > removed_refs) {
                     global_entry.refs -= removed_refs;
-                    runtimes_to_cleanup.append(global_entry.runtime) catch |err| {
-                        self.lock.unlock(compat.io());
-                        return err;
-                    };
                 } else {
-                    runtimes_to_destroy.append(global_entry.runtime) catch |err| {
-                        self.lock.unlock(compat.io());
-                        return err;
-                    };
+                    destroy_global = true;
                     self.global = null;
                 }
             } else if (project.active_ports > 0 and self.global_project_refs.items.len == 0) {
-                runtimes_to_destroy.append(global_entry.runtime) catch |err| {
-                    self.lock.unlock(compat.io());
-                    return err;
-                };
+                global_runtime = global_entry.runtime;
+                destroy_global = true;
                 self.global = null;
             }
         }
         self.lock.unlock(compat.io());
-
-        for (runtimes_to_destroy.items) |runtime| {
-            try scheduleForwarderDestroy(self.allocator, runtime, project);
-        }
-        try project.stopSharedForwarders();
-        for (runtimes_to_cleanup.items) |runtime| {
-            try runForwarderDestroyOnRuntime(self.allocator, runtime, project);
-        }
-        for (runtimes_to_destroy.items) |runtime| {
-            runtime.deinit();
+        if (global_runtime) |runtime| {
+            if (destroy_global) {
+                runtime.retiring_project = project;
+                destroyRuntime(self.allocator, runtime);
+            } else {
+                var ctx = RuntimeForwarderDestroyContext{ .project = project, .runtime = runtime };
+                try runtime.marshal(.{ .callback = RuntimeForwarderDestroyContext.run, .context = &ctx });
+            }
         }
         try project.destroySharedForwardersAfterRuntimeStop();
-        for (runtimes_to_destroy.items) |runtime| {
-            self.allocator.destroy(runtime);
+    }
+
+    fn takeProjectRuntime(self: *LoopManager, list: *std.array_list.Managed(RuntimeRef), project: *project_status.ProjectHandle) ?*LoopRuntime {
+        self.lock.lockUncancelable(compat.io());
+        defer self.lock.unlock(compat.io());
+        for (list.items, 0..) |entry, index| {
+            if (entry.project == project) return list.swapRemove(index).runtime;
         }
+        return null;
     }
 
     pub fn debugRuntimeCount(self: *LoopManager, mode: types.LoopMode) usize {
@@ -639,32 +622,11 @@ pub const LoopManager = struct {
     }
 };
 
-fn scheduleForwarderDestroy(allocator: std.mem.Allocator, runtime: *LoopRuntime, project: *project_status.ProjectHandle) !void {
-    const ctx = try allocator.create(RuntimeForwarderDestroyContext);
-    ctx.* = .{
-        .allocator = allocator,
-        .project = project,
-        .runtime = runtime,
-    };
-    errdefer allocator.destroy(ctx);
-    try runtime.addShutdownJob(.{ .callback = RuntimeForwarderDestroyContext.run, .context = ctx });
-}
-
-fn runForwarderDestroyOnRuntime(allocator: std.mem.Allocator, runtime: *LoopRuntime, project: *project_status.ProjectHandle) !void {
-    const ctx = try allocator.create(RuntimeForwarderDestroyContext);
-    ctx.* = .{
-        .allocator = allocator,
-        .project = project,
-        .runtime = runtime,
-    };
-    errdefer allocator.destroy(ctx);
-    try runtime.marshal(.{ .callback = RuntimeForwarderDestroyContext.run, .context = ctx });
-}
-
 fn createStartedRuntime(allocator: std.mem.Allocator) !*LoopRuntime {
     const runtime = try allocator.create(LoopRuntime);
     runtime.* = LoopRuntime.init(allocator);
     runtime.start() catch |err| {
+        runtime.deinit();
         allocator.destroy(runtime);
         return err;
     };
@@ -692,6 +654,25 @@ test "loop runtime marshal executes on runtime thread" {
     var ctx = Context{};
     try runtime.marshal(.{ .callback = Context.run, .context = &ctx });
     try std.testing.expect(ctx.ran);
+}
+
+test "loop manager registration OOM rolls back runtime ownership" {
+    inline for (.{ .global, .per_project, .per_listener }) |mode| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var manager = try LoopManager.init(std.testing.allocator);
+        defer manager.deinit();
+        manager.global_project_refs.allocator = failing.allocator();
+        manager.project_runtimes.allocator = failing.allocator();
+        manager.listener_runtimes.allocator = failing.allocator();
+        var project = project_status.ProjectHandle.init(std.testing.allocator, 1, .{
+            .listen_port = 1,
+            .target_port = 1,
+            .target_address = "127.0.0.1",
+        }, false);
+        defer project.deinit();
+        try std.testing.expectError(error.OutOfMemory, manager.acquire(mode, &project));
+        try std.testing.expectEqual(@as(usize, 0), manager.debugRuntimeCount(mode));
+    }
 }
 
 test "loop manager reference accounting" {

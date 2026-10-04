@@ -287,8 +287,8 @@ pub const ProjectHandle = struct {
         defer self.lock.unlock(compat.io());
         if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;
         defer self.updateRuntimeStatus();
-        self.active_ports += 1;
         try self.tcp_forwarders.append(fwd);
+        self.active_ports += 1;
     }
     pub fn deregisterUdpHandle(self: *ProjectHandle, fwd: *UdpForwarder) !void {
         self.lock.lockUncancelable(compat.io());
@@ -305,8 +305,8 @@ pub const ProjectHandle = struct {
         defer self.lock.unlock(compat.io());
         if (self.shutting_down.load(.seq_cst)) return error.ProjectStopping;
         defer self.updateRuntimeStatus();
-        self.active_ports += 1;
         try self.udp_forwarders.append(fwd);
+        self.active_ports += 1;
     }
 
     /// Returns allocator-owned listener records attached to one runtime.
@@ -336,31 +336,14 @@ pub const ProjectHandle = struct {
     /// destroyed the C resources on the runtime thread.
     pub fn destroySharedForwardersAfterRuntimeStop(self: *ProjectHandle) !void {
         self.lock.lockUncancelable(compat.io());
-        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            return err;
-        };
-        errdefer self.allocator.free(tcp_forwarders);
-        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            return err;
-        };
-        self.lock.unlock(compat.io());
-        defer self.allocator.free(tcp_forwarders);
-        defer self.allocator.free(udp_forwarders);
-
-        for (tcp_forwarders) |fwd| {
-            self.deregisterTcpHandle(fwd) catch |err| {
-                std.log.warn("Failed to deregister TCP forwarder for project {d}: {}", .{ self.id, err });
-            };
-            fwd.destroyWrapper();
-        }
-        for (udp_forwarders) |fwd| {
-            self.deregisterUdpHandle(fwd) catch |err| {
-                std.log.warn("Failed to deregister UDP forwarder for project {d}: {}", .{ self.id, err });
-            };
-            fwd.destroyWrapper();
-        }
+        defer self.lock.unlock(compat.io());
+        // C callbacks have drained; wrappers do not call back into this handle.
+        for (self.tcp_forwarders.items) |fwd| fwd.destroyWrapper();
+        for (self.udp_forwarders.items) |fwd| fwd.destroyWrapper();
+        self.tcp_forwarders.clearRetainingCapacity();
+        self.udp_forwarders.clearRetainingCapacity();
+        self.active_ports = 0;
+        self.updateRuntimeStatus();
     }
 
     /// Runs on the owning runtime thread during runtime shutdown, after backend
@@ -368,27 +351,14 @@ pub const ProjectHandle = struct {
     pub fn destroySharedForwarderCResourcesForRuntime(self: *ProjectHandle, runtime: *c.forwarder_runtime_t) void {
         const token = forwarder_runtime.runtimeToken(runtime);
         self.lock.lockUncancelable(compat.io());
-        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            std.log.err("Failed to snapshot TCP forwarders for C destroy in project {d}: {}", .{ self.id, err });
-            return;
-        };
-        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            self.allocator.free(tcp_forwarders);
-            std.log.err("Failed to snapshot UDP forwarders for C destroy in project {d}: {}", .{ self.id, err });
-            return;
-        };
-        self.lock.unlock(compat.io());
-        defer self.allocator.free(tcp_forwarders);
-        defer self.allocator.free(udp_forwarders);
+        defer self.lock.unlock(compat.io());
 
-        for (tcp_forwarders) |fwd| {
+        for (self.tcp_forwarders.items) |fwd| {
             if (fwd.belongsToRuntime(runtime)) {
                 fwd.destroyOnRuntimeThread(token);
             }
         }
-        for (udp_forwarders) |fwd| {
+        for (self.udp_forwarders.items) |fwd| {
             if (fwd.belongsToRuntime(runtime)) {
                 fwd.destroyOnRuntimeThread(token);
             }
@@ -400,23 +370,12 @@ pub const ProjectHandle = struct {
     /// per-listener/session allocations while the libuv loop is still alive.
     pub fn stopSharedForwarders(self: *ProjectHandle) !void {
         self.lock.lockUncancelable(compat.io());
-        const tcp_forwarders = self.allocator.dupe(*TcpForwarder, self.tcp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            return err;
-        };
-        errdefer self.allocator.free(tcp_forwarders);
-        const udp_forwarders = self.allocator.dupe(*UdpForwarder, self.udp_forwarders.items) catch |err| {
-            self.lock.unlock(compat.io());
-            return err;
-        };
-        self.lock.unlock(compat.io());
-        defer self.allocator.free(tcp_forwarders);
-        defer self.allocator.free(udp_forwarders);
+        defer self.lock.unlock(compat.io());
 
-        for (tcp_forwarders) |fwd| {
+        for (self.tcp_forwarders.items) |fwd| {
             fwd.requestStop();
         }
-        for (udp_forwarders) |fwd| {
+        for (self.udp_forwarders.items) |fwd| {
             fwd.requestStop();
         }
     }
@@ -722,6 +681,24 @@ pub fn stopAll(handles: *ProjectHandleList) void {
         handle.allocator.destroy(handle);
     }
     handles.clearAndFree();
+}
+
+test "project status: registration OOM leaves counters and ownership unchanged" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var handle = ProjectHandle.init(failing.allocator(), 0, .{
+        .listen_port = 1,
+        .target_port = 1,
+        .target_address = "127.0.0.1",
+    }, false);
+    defer handle.deinit();
+    var tcp = TcpForwarder{ .allocator = failing.allocator(), .forwarder = null, .listen_port = 1 };
+    var udp = UdpForwarder{ .allocator = failing.allocator(), .forwarder = null, .listen_port = 1 };
+    try std.testing.expectError(error.OutOfMemory, handle.registerTcpHandle(&tcp));
+    try std.testing.expectError(error.OutOfMemory, handle.registerUdpHandle(&udp));
+    try std.testing.expectEqual(@as(u32, 0), handle.active_ports);
+    try std.testing.expectEqual(@as(usize, 0), handle.tcp_forwarders.items.len);
+    try std.testing.expectEqual(@as(usize, 0), handle.udp_forwarders.items.len);
+    try std.testing.expect(!handle.isRuntimeEnabled());
 }
 
 test "project status: init yields empty runtime info" {
