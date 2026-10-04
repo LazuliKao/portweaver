@@ -1,6 +1,5 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const rathole_enabled = build_options.rathole_client_mode or build_options.rathole_server_mode;
 const config = @import("config/mod.zig");
 const ubus_server = if (build_options.ubus_mode) @import("ubus/server.zig") else void;
 const uci = if (build_options.uci_mode) @import("uci/mod.zig") else void;
@@ -190,21 +189,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 应用配置并启动服务
-    const has_app_forward = try runtime.start();
+    const has_services = try runtime.start();
 
-    if (build_options.ubus_mode) {
+    const ubus_started = if (build_options.ubus_mode) started: {
         ubus_server.start(allocator, &runtime) catch |err| {
             std.log.warn("Failed to start ubus server: {any}", .{err});
+            break :started false;
         };
-        defer ubus_server.stop();
-    }
+        break :started true;
+    } else false;
+    defer if (build_options.ubus_mode and ubus_started) ubus_server.stop();
 
     std.log.info("PortWeaver started successfully.", .{});
 
-    // 保持程序运行（如果有应用层转发或 UBUS 服务）
-    if (has_app_forward or build_options.ubus_mode or rathole_enabled) {
-        const service_type = if (has_app_forward) "Application layer forwarding" else "UBUS server";
-        std.log.info("{s} is running. Press Ctrl+C to stop.\n", .{service_type});
+    if (has_services or ubus_started or reload.isWatching()) {
+        std.log.info("Runtime services are running. Press Ctrl+C to stop.\n", .{});
 
         while (true) {
             const event = process_lock.waitForEvent();

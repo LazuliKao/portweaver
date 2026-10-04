@@ -235,7 +235,7 @@ pub const RuntimeController = struct {
         self.current_config.deinit(self.allocator);
     }
 
-    /// Creates initial project handles and starts configured runtime services.
+    /// Starts services and reports whether any long-lived runtime started.
     pub fn start(self: *RuntimeController) !bool {
         self.mutex.lockUncancelable(compat.io());
         defer self.mutex.unlock(compat.io());
@@ -257,7 +257,12 @@ pub const RuntimeController = struct {
                 std.log.warn("Failed to start configured FRPS servers: {any}", .{err});
             };
         }
-        return self.startForwardingLocked();
+        const app_started = try self.startForwardingLocked();
+        return app_started or
+            (build_options.frpc_mode and frpc_forward.hasStartedServices()) or
+            (build_options.frps_mode and frps_forward.hasStartedServices()) or
+            (build_options.ddns_mode and ddns_manager.hasStartedServices()) or
+            (rathole_enabled and rathole_forward.hasStartedServices());
     }
 
     /// Applies a validated candidate config. It always consumes new_cfg: on
@@ -406,8 +411,8 @@ pub const RuntimeController = struct {
                 handle.setDisabled();
                 continue;
             }
-            if (handle.cfg.enable_app_forward) has_app_forward = true;
             startForwardingForHandle(handle, &self.app_loop_manager);
+            if (handle.getProjectRuntimeInfo().active_ports > 0) has_app_forward = true;
             if (build_options.frpc_mode) {
                 frpc_forward.startForwarding(handle, &self.current_config.frpc_nodes) catch |err| {
                     frpc_failed = true;

@@ -17,6 +17,20 @@ var servers: ?std.StringHashMap(*ServerHolder) = null;
 var servers_allocator: ?std.mem.Allocator = null;
 var servers_lock: std.Io.Mutex = .init;
 
+pub fn hasStartedServices() bool {
+    servers_lock.lockUncancelable(compat.io());
+    defer servers_lock.unlock(compat.io());
+    const map = if (servers) |*value| value else return false;
+    var it = map.valueIterator();
+    while (it.next()) |holder| {
+        holder.*.lock.lockUncancelable(compat.io());
+        const started = holder.*.started;
+        holder.*.lock.unlock(compat.io());
+        if (started) return true;
+    }
+    return false;
+}
+
 fn startFrpsServer(holder: *ServerHolder, node_name: []const u8) !void {
     if (holder.started) {
         std.log.debug("[FRPS] Server {s} already started", .{node_name});

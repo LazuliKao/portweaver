@@ -19,6 +19,12 @@ var lock: std.Io.Mutex = .init;
 var instances: std.ArrayList(Holder) = .empty;
 var owner: ?std.mem.Allocator = null;
 
+pub fn hasStartedServices() bool {
+    lock.lockUncancelable(compat.io());
+    defer lock.unlock(compat.io());
+    return instances.items.len != 0;
+}
+
 fn quoted(writer: *std.Io.Writer, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |byte| switch (byte) {

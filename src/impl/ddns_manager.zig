@@ -68,6 +68,17 @@ var instances: ?std.StringHashMap(*InstanceHolder) = null;
 var instances_allocator: ?std.mem.Allocator = null;
 var instances_lock: std.Io.Mutex = .init;
 
+pub fn hasStartedServices() bool {
+    instances_lock.lockUncancelable(compat.io());
+    defer instances_lock.unlock(compat.io());
+    const map = if (instances) |*value| value else return false;
+    var it = map.valueIterator();
+    while (it.next()) |holder| {
+        if (holder.*.thread != null) return true;
+    }
+    return false;
+}
+
 fn ddnsUpdateThread(holder: *InstanceHolder) void {
     std.log.debug("[DDNS] Update thread started for {s}", .{holder.config.name});
 

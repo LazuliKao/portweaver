@@ -21,6 +21,11 @@ extern "c" fn file_watcher_stop(handle: ?*anyopaque) void;
 
 var watcher_handle: ?*anyopaque = null;
 
+/// Main-thread lifecycle query; failed/unsupported watchers do not keep alive.
+pub fn isWatching() bool {
+    return watcher_handle != null;
+}
+
 fn onFileChanged(user_data: ?*anyopaque) callconv(.c) void {
     _ = user_data;
     std.log.info("Config file changed, triggering reload...", .{});

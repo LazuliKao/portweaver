@@ -18,6 +18,21 @@ var clients: ?std.StringHashMap(*ClientHolder) = null;
 var clients_allocator: ?std.mem.Allocator = null;
 var clients_lock: std.Io.Mutex = .init;
 
+/// Includes reconnecting clients: successful start owns a long-lived worker.
+pub fn hasStartedServices() bool {
+    clients_lock.lockUncancelable(compat.io());
+    defer clients_lock.unlock(compat.io());
+    const map = if (clients) |*value| value else return false;
+    var it = map.valueIterator();
+    while (it.next()) |holder| {
+        holder.*.lock.lockUncancelable(compat.io());
+        const started = holder.*.started;
+        holder.*.lock.unlock(compat.io());
+        if (started) return true;
+    }
+    return false;
+}
+
 /// Initialize the process-wide FRPC client registry.
 /// `allocator` owns every client, key, and registry allocation until `stopAll`.
 /// Call this during service startup, before adding project-generated proxies.
