@@ -5,6 +5,7 @@
 #if defined(PORTWEAVER_BACKEND_ASIO)
 
 #include "forwarder.h"
+#include "udp_budget.h"
 
 #include <asio.hpp>
 
@@ -143,6 +144,7 @@ class udp_client_session : public std::enable_shared_from_this<udp_client_sessio
     asio::steady_timer timeout_timer;
     std::chrono::steady_clock::time_point last_activity;
     udp_forwarder *fwd;
+    bool budget_reserved = false;
 
     udp_client_session(asio::io_context &io_ctx, udp_forwarder *forwarder, const asio::ip::udp::endpoint &client)
         : sock(io_ctx),
@@ -154,6 +156,15 @@ class udp_client_session : public std::enable_shared_from_this<udp_client_sessio
           recv_from_endpoint(),
           recv_buffer{}
     {
+    }
+
+    ~udp_client_session()
+    {
+        // Last callback has released ownership. Close before returning the slot,
+        // including open/bind failures that never entered the session map.
+        std::error_code ignored;
+        sock.close(ignored);
+        if (budget_reserved) udp_budget_release();
     }
 
     bool open_and_bind();
@@ -551,7 +562,12 @@ std::shared_ptr<udp_client_session> udp_forwarder::create_session(const asio::ip
     }
 
     auto session = forwarder_make_shared<udp_client_session>(this, io_ctx, this, client_addr);
-    if (!session || !session->open_and_bind())
+    if (!session || !udp_budget_try_acquire())
+    {
+        return nullptr;
+    }
+    session->budget_reserved = true;
+    if (!session->open_and_bind())
     {
         return nullptr;
     }

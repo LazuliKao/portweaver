@@ -1,4 +1,5 @@
 #include "io_uring_internal.h"
+#include "udp_budget.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -175,6 +176,7 @@ static void remove_session(struct udp_session *session)
         cursor = &(*cursor)->hash_next;
     }
     __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
+    udp_budget_release();
     fwd_free(fwd, session);
     maybe_free_forwarder(fwd);
 }
@@ -364,9 +366,14 @@ static struct udp_session *create_session(struct udp_forwarder *fwd,
 {
     if (__atomic_load_n(&fwd->active_sessions, __ATOMIC_RELAXED) >= fwd->max_sessions)
         return NULL;
+    if (!udp_budget_try_acquire())
+        return NULL;
     struct udp_session *session = fwd_alloc(fwd, sizeof(*session));
     if (session == NULL)
+    {
+        udp_budget_release();
         return NULL;
+    }
     memset(session, 0, sizeof(*session));
     session->forwarder = fwd;
     session->socket_fd = -1;
@@ -402,6 +409,7 @@ fail:
     if (session->timer_fd >= 0)
         close(session->timer_fd);
     fwd_free(fwd, session);
+    udp_budget_release();
     return NULL;
 }
 

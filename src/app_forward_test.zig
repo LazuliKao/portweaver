@@ -1241,6 +1241,61 @@ test "app forward: libuv backpressure bounds both directions and preserves half-
     try testing.expectEqual(@as(u32, 0), forwarder.getStats().active_sessions);
 }
 
+extern fn udp_budget_test_set_limit(limit: c_uint) c_uint;
+extern fn udp_budget_active() c_uint;
+extern fn udp_budget_rejected() c_uint;
+
+test "app forward: UDP budget spans projects and recovers after teardown" {
+    try testing.expectEqual(@as(c_uint, 0), udp_budget_active());
+    const old_limit = udp_budget_test_set_limit(2);
+    defer _ = udp_budget_test_set_limit(old_limit);
+    const alloc = testing.allocator;
+    const io = compat.io();
+    inline for (.{ .global, .per_project, .per_listener }) |mode| {
+        var manager = try loop_manager.LoopManager.init(alloc);
+        defer manager.deinit();
+        var first = try makeSinglePortHandle(alloc, 62, .udp, testListenPort(62, 0), testTargetPort(62, 0));
+        defer cleanupProjectHandle(&first);
+        var second = try makeSinglePortHandle(alloc, 63, .udp, testListenPort(63, 0), testTargetPort(62, 0));
+        defer cleanupProjectHandle(&second);
+        first.cfg.app_forward_loop_mode = mode;
+        second.cfg.app_forward_loop_mode = mode;
+        // Both zero/default and an explicit large limit obey the shared ceiling.
+        first.cfg.max_connections = 0;
+        second.cfg.max_connections = 100;
+        var target_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", testTargetPort(62, 0));
+        const target = try target_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+        defer target.close(io);
+        try app_forward.startForwardingWithLoopManager(&first, &manager);
+        try app_forward.startForwardingWithLoopManager(&second, &manager);
+        try udpSendOnly(testListenPort(62, 0), "first");
+        try udpSendOnly(testListenPort(63, 0), "second");
+        var attempts: usize = 0;
+        while (attempts < 50 and udp_budget_active() != 2) : (attempts += 1)
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(c_uint, 2), udp_budget_active());
+        const rejected = udp_budget_rejected();
+        try udpSendOnly(testListenPort(63, 0), "overflow");
+        attempts = 0;
+        while (attempts < 50 and udp_budget_rejected() == rejected) : (attempts += 1)
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        try testing.expect(udp_budget_rejected() > rejected);
+        try testing.expectEqual(@as(u32, 1), second.getProjectStats().active_sessions);
+        first.teardownForwarders();
+        attempts = 0;
+        while (attempts < 50 and udp_budget_active() != 1) : (attempts += 1)
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(c_uint, 1), udp_budget_active());
+        try udpSendOnly(testListenPort(63, 0), "recovered");
+        attempts = 0;
+        while (attempts < 50 and second.getProjectStats().active_sessions != 2) : (attempts += 1)
+            compat.sleepNanos(10 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(u32, 2), second.getProjectStats().active_sessions);
+        second.teardownForwarders();
+        try testing.expectEqual(@as(c_uint, 0), udp_budget_active());
+    }
+}
+
 test "app forward: UDP max connections caps distinct clients" {
     const alloc = testing.allocator;
     const io = compat.io();

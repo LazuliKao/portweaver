@@ -626,7 +626,10 @@ pub const Project = struct {
     app_forward_loop_mode: ?LoopMode = null,
     /// TCP connect timeout in milliseconds. Null = no timeout (OS default, typically 60-120s).
     connect_timeout_ms: ?u32 = null,
-    /// Maximum concurrent connections per listener. Null = unlimited.
+    /// Maximum concurrent connections per listener. Null/0 adds no configured cap.
+    /// UDP always obeys backend safety ceilings (at most 4000 per listener) and
+    /// a shared process budget: at most 4000, reduced by the descriptor limit.
+    /// A nonzero configured limit only lowers these ceilings. TCP has no default cap.
     max_connections: ?u32 = null,
     /// 启用 Wake-on-LAN 功能
     enable_wol: bool = false,

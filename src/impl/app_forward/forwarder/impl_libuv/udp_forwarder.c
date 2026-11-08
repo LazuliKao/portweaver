@@ -1,4 +1,5 @@
 #include "forwarder.h"
+#include "udp_budget.h"
 #include "uv.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,6 +185,7 @@ static void udp_session_close_cb(uv_handle_t *handle)
             __atomic_fetch_sub(&fwd->active_sessions, 1u, __ATOMIC_RELAXED);
         }
         DATA_FREE(fwd, session);
+        udp_budget_release();
         udp_forwarder_unref(fwd);
     }
 }
@@ -313,9 +315,14 @@ static udp_client_session_t *udp_session_create(struct udp_forwarder *fwd, const
         return NULL;
     }
 
+    if (!udp_budget_try_acquire())
+        return NULL;
     udp_client_session_t *s = (udp_client_session_t *)DATA_ALLOC(fwd, sizeof(udp_client_session_t));
     if (!s)
+    {
+        udp_budget_release();
         return NULL;
+    }
     memset(s, 0, sizeof(*s));
 
     s->fwd = fwd;
@@ -331,6 +338,7 @@ static udp_client_session_t *udp_session_create(struct udp_forwarder *fwd, const
     if (r < 0)
     {
         DATA_FREE(fwd, s);
+        udp_budget_release();
         udp_forwarder_unref(fwd);
         return NULL;
     }

@@ -1094,6 +1094,10 @@ fn addForwarderBackend(
     test_hooks: bool,
 ) void {
     root_module.addIncludePath(b.path("src/impl/app_forward/forwarder"));
+    root_module.addCSourceFile(.{
+        .file = b.path("src/impl/app_forward/forwarder/udp_budget.c"),
+        .flags = if (test_hooks) &.{"-DPORTWEAVER_TEST"} else &.{},
+    });
 
     switch (backend) {
         .libuv => {
