@@ -14,12 +14,11 @@ pub fn serializeRoot(buf: *c.blob_buf, value: anytype, allocator: std.mem.Alloca
     switch (type_info) {
         .@"struct" => |info| {
             if (T == RawJson) {
-                const json_z = try allocator.dupeZ(u8, value.json);
+                const json_z = try allocator.dupeSentinel(u8, value.json, 0);
                 try libblobmsg_json.blobmsg_add_json_from_string(buf, json_z);
             } else {
-                inline for (info.fields) |field| {
-                    const field_name_z: [:0]const u8 = field.name[0..field.name.len :0];
-                    try serialize(buf, field_name_z, @field(value, field.name), allocator);
+                inline for (info.field_names) |field_name| {
+                    try serialize(buf, field_name, @field(value, field_name), allocator);
                 }
             }
         },
@@ -52,7 +51,7 @@ pub fn serialize(buf: *c.blob_buf, name: ?[:0]const u8, value: anytype, allocato
                 if (is_null_terminated) {
                     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, field_name, value.ptr, value.len + 1);
                 } else {
-                    const val_z = try allocator.dupeZ(u8, value);
+                    const val_z = try allocator.dupeSentinel(u8, value, 0);
                     try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, field_name, val_z.ptr, val_z.len + 1);
                 }
             } else if (info.size == .slice) {
@@ -83,14 +82,13 @@ pub fn serialize(buf: *c.blob_buf, name: ?[:0]const u8, value: anytype, allocato
         },
         .@"struct" => |info| {
             if (T == RawJson) {
-                const json_z = try allocator.dupeZ(u8, value.json);
+                const json_z = try allocator.dupeSentinel(u8, value.json, 0);
                 try libblobmsg_json.blobmsg_add_json_from_string(buf, json_z);
             } else {
                 const cookie = try ubox.blobmsgOpenNested(buf, name, false);
                 if (cookie) |cookie_ptr| {
-                    inline for (info.fields) |field| {
-                        const field_name_z: [:0]const u8 = field.name[0..field.name.len :0];
-                        try serialize(buf, field_name_z, @field(value, field.name), allocator);
+                    inline for (info.field_names) |member_name| {
+                        try serialize(buf, member_name, @field(value, member_name), allocator);
                     }
                     try ubox.blobNestEnd(buf, cookie_ptr);
                 }
@@ -98,7 +96,7 @@ pub fn serialize(buf: *c.blob_buf, name: ?[:0]const u8, value: anytype, allocato
         },
         .@"enum" => {
             const tag = @tagName(value);
-            const tag_z = try allocator.dupeZ(u8, tag);
+            const tag_z = try allocator.dupeSentinel(u8, tag, 0);
             try ubox.blobmsgAddField(buf, c.BLOBMSG_TYPE_STRING, field_name, tag_z.ptr, tag_z.len + 1);
         },
         else => @compileError("Unsupported type for serialization: " ++ @typeName(T)),
@@ -158,18 +156,18 @@ pub fn parseArgs(comptime T: type, msg: ?*c.blob_attr, comptime policy: []const 
     var result: T = undefined;
     const struct_info = @typeInfo(T).@"struct";
 
-    inline for (struct_info.fields) |field| {
+    inline for (struct_info.field_names, struct_info.field_types) |field_name, FieldType| {
         const idx = comptime blk: {
-            break :blk findPolicyIndex(field.name, policy) orelse {
-                @compileError("Field '" ++ field.name ++ "' not found in ubus policy");
+            break :blk findPolicyIndex(field_name, policy) orelse {
+                @compileError("Field '" ++ field_name ++ "' not found in ubus policy");
             };
         };
 
         if (tb[idx]) |attr| {
-            @field(result, field.name) = try parseAttr(field.type, attr);
+            @field(result, field_name) = try parseAttr(FieldType, attr);
         } else {
-            if (@typeInfo(field.type) == .optional) {
-                @field(result, field.name) = null;
+            if (@typeInfo(FieldType) == .optional) {
+                @field(result, field_name) = null;
             } else {
                 return error.InvalidArgument;
             }

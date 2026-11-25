@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-pub const c = @cImport({
-    @cInclude("forwarder.h");
-});
+pub const c = @import("c_forwarder");
 
 /// Capability passed only while executing on a forwarder runtime thread.
 /// It intentionally wraps the C runtime pointer so forwarder lifecycle APIs do

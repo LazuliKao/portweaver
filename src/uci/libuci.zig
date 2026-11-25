@@ -2,9 +2,7 @@ const std = @import("std");
 const DynamicLibLoader = @import("../loader/dynamic_lib.zig").DynamicLibLoader;
 
 // 从 C 头文件导入类型定义 - 导出这些类型以便其他模块使用
-pub const c = @cImport({
-    @cInclude("uci.h");
-});
+pub const c = @import("c_uci");
 
 const uci_alloc_context_fn = *const fn () callconv(.c) [*c]c.uci_context;
 const uci_free_context_fn = *const fn (ctx: [*c]c.uci_context) callconv(.c) void;

@@ -39,5 +39,5 @@ pub fn sleepNanos(nanos: u64) void {
 }
 
 pub fn isDebugBuild() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }

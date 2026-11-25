@@ -1,8 +1,6 @@
 const std = @import("std");
 const compat = @import("../compat.zig");
-const c = @cImport({
-    @cInclude("rathole.h");
-});
+const c = @import("c_rathole");
 
 pub const RatholeError = error{
     InitFailed,
@@ -31,9 +29,9 @@ pub const Instance = struct {
 
     pub fn initClient(allocator: std.mem.Allocator, toml: []const u8, name: []const u8) !Instance {
         try ensureInit();
-        const c_toml = try allocator.dupeZ(u8, toml);
+        const c_toml = try allocator.dupeSentinel(u8, toml, 0);
         defer allocator.free(c_toml);
-        const c_name = try allocator.dupeZ(u8, name);
+        const c_name = try allocator.dupeSentinel(u8, name, 0);
         defer allocator.free(c_name);
         const id = c.RatholeCreateClientFromToml(c_toml.ptr, c_name.ptr);
         if (id < 0) return RatholeError.CreateInstanceFailed;
@@ -42,9 +40,9 @@ pub const Instance = struct {
 
     pub fn initServer(allocator: std.mem.Allocator, toml: []const u8, name: []const u8) !Instance {
         try ensureInit();
-        const c_toml = try allocator.dupeZ(u8, toml);
+        const c_toml = try allocator.dupeSentinel(u8, toml, 0);
         defer allocator.free(c_toml);
-        const c_name = try allocator.dupeZ(u8, name);
+        const c_name = try allocator.dupeSentinel(u8, name, 0);
         defer allocator.free(c_name);
         const id = c.RatholeCreateServerFromToml(c_toml.ptr, c_name.ptr);
         if (id < 0) return RatholeError.CreateInstanceFailed;

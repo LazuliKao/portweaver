@@ -1,8 +1,6 @@
 const std = @import("std");
 const compat = @import("../../compat.zig");
-const c = @cImport({
-    @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
-});
+const c = @import("c_golibs");
 
 pub const FrpcError = error{
     InitFailed,
@@ -45,24 +43,24 @@ pub const FrpcClient = struct {
 
     pub fn init(allocator: std.mem.Allocator, server_addr: []const u8, server_port: u16, token: ?[]const u8, log_level: ?[]const u8, client_name: ?[]const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
-        const c_addr = try allocator.dupeZ(u8, server_addr);
+        const c_addr = try allocator.dupeSentinel(u8, server_addr, 0);
         defer allocator.free(c_addr);
 
         var token_buf: ?[:0]u8 = null;
         if (token) |t| {
-            token_buf = try allocator.dupeZ(u8, t);
+            token_buf = try allocator.dupeSentinel(u8, t, 0);
         }
         defer if (token_buf) |tb| allocator.free(tb);
 
         var log_level_buf: ?[:0]u8 = null;
         if (log_level) |ll| {
-            log_level_buf = try allocator.dupeZ(u8, ll);
+            log_level_buf = try allocator.dupeSentinel(u8, ll, 0);
         }
         defer if (log_level_buf) |llb| allocator.free(llb);
 
         var client_name_buf: ?[:0]u8 = null;
         if (client_name) |cn| {
-            client_name_buf = try allocator.dupeZ(u8, cn);
+            client_name_buf = try allocator.dupeSentinel(u8, cn, 0);
         }
         defer if (client_name_buf) |cnb| allocator.free(cnb);
 
@@ -89,11 +87,11 @@ pub const FrpcClient = struct {
 
     pub fn initFromFile(allocator: std.mem.Allocator, path: []const u8, format: []const u8, client_name: []const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
-        const c_format = try allocator.dupeZ(u8, format);
+        const c_format = try allocator.dupeSentinel(u8, format, 0);
         defer allocator.free(c_format);
-        const c_name = try allocator.dupeZ(u8, client_name);
+        const c_name = try allocator.dupeSentinel(u8, client_name, 0);
         defer allocator.free(c_name);
 
         const client_id = FrpcCreateClientFromFile(c_path.ptr, c_format.ptr, c_name.ptr);
@@ -103,11 +101,11 @@ pub const FrpcClient = struct {
 
     pub fn initFromContent(allocator: std.mem.Allocator, content: []const u8, format: []const u8, client_name: []const u8, use_encryption: bool, use_compression: bool) !FrpcClient {
         try ensureFrpcInit();
-        const c_content = try allocator.dupeZ(u8, content);
+        const c_content = try allocator.dupeSentinel(u8, content, 0);
         defer allocator.free(c_content);
-        const c_format = try allocator.dupeZ(u8, format);
+        const c_format = try allocator.dupeSentinel(u8, format, 0);
         defer allocator.free(c_format);
-        const c_name = try allocator.dupeZ(u8, client_name);
+        const c_name = try allocator.dupeSentinel(u8, client_name, 0);
         defer allocator.free(c_name);
 
         const client_id = FrpcCreateClientFromContent(c_content.ptr, c_format.ptr, c_name.ptr);
@@ -116,10 +114,10 @@ pub const FrpcClient = struct {
     }
 
     pub fn addTcpProxy(self: *FrpcClient, proxy_name: []const u8, local_ip: []const u8, local_port: u16, remote_port: u16) !void {
-        const c_name = try self.allocator.dupeZ(u8, proxy_name);
+        const c_name = try self.allocator.dupeSentinel(u8, proxy_name, 0);
         defer self.allocator.free(c_name);
 
-        const c_ip = try self.allocator.dupeZ(u8, local_ip);
+        const c_ip = try self.allocator.dupeSentinel(u8, local_ip, 0);
         defer self.allocator.free(c_ip);
 
         const result = c.FrpcAddTcpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port), if (self.use_encryption) @as(c_int, 1) else @as(c_int, 0), if (self.use_compression) @as(c_int, 1) else @as(c_int, 0));
@@ -129,10 +127,10 @@ pub const FrpcClient = struct {
     }
 
     pub fn addUdpProxy(self: *FrpcClient, proxy_name: []const u8, local_ip: []const u8, local_port: u16, remote_port: u16) !void {
-        const c_name = try self.allocator.dupeZ(u8, proxy_name);
+        const c_name = try self.allocator.dupeSentinel(u8, proxy_name, 0);
         defer self.allocator.free(c_name);
 
-        const c_ip = try self.allocator.dupeZ(u8, local_ip);
+        const c_ip = try self.allocator.dupeSentinel(u8, local_ip, 0);
         defer self.allocator.free(c_ip);
 
         const result = c.FrpcAddUdpProxy(self.id, c_name.ptr, c_ip.ptr, @intCast(local_port), @intCast(remote_port), if (self.use_encryption) @as(c_int, 1) else @as(c_int, 0), if (self.use_compression) @as(c_int, 1) else @as(c_int, 0));
@@ -196,9 +194,9 @@ pub const FrpcClient = struct {
 
 /// Returns an allocated parser error, or an empty slice when configuration is valid.
 pub fn validateConfig(allocator: std.mem.Allocator, content: []const u8, format: []const u8) ![]const u8 {
-    const c_content = try allocator.dupeZ(u8, content);
+    const c_content = try allocator.dupeSentinel(u8, content, 0);
     defer allocator.free(c_content);
-    const c_format = try allocator.dupeZ(u8, format);
+    const c_format = try allocator.dupeSentinel(u8, format, 0);
     defer allocator.free(c_format);
 
     const c_error = FrpcClient.FrpcValidateConfig(c_content.ptr, c_format.ptr);

@@ -1,8 +1,6 @@
 const DynamicLibLoader = @import("../loader/dynamic_lib.zig").DynamicLibLoader;
 
-pub const c = @cImport({
-    @cInclude("libnftables.h");
-});
+pub const c = @import("c_nftables");
 
 const nft_ctx_new_fn = *const fn (flags: u32) callconv(.c) ?*c.nft_ctx;
 const nft_ctx_free_fn = *const fn (ctx: ?*c.nft_ctx) callconv(.c) void;

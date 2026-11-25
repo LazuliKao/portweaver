@@ -304,6 +304,6 @@ test "first packet callback waits for fragments and strictly rejects unknown dat
     try std.testing.expectEqual(INSPECTION_NEED_MORE, firstPacketCallback(&ctx, rdp[0..6].ptr, 6, 1));
     try std.testing.expectEqual(INSPECTION_ALLOW, firstPacketCallback(&ctx, &rdp, rdp.len, 1));
 
-    const unknown = [_]u8{0x7f} ** protocol_detector.MAX_INSPECTION_BYTES;
+    const unknown: [protocol_detector.MAX_INSPECTION_BYTES]u8 = @splat(0x7f);
     try std.testing.expectEqual(INSPECTION_REJECT, firstPacketCallback(&ctx, &unknown, unknown.len, 1));
 }

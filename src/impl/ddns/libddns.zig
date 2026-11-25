@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
-});
+const c = @import("c_golibs");
 
 pub const DdnsError = error{
     InitFailed,
@@ -33,7 +31,7 @@ fn logCallbackBridge(instance_id: c_int, level: c_int, message: [*c]const u8) ca
     if (global_log_callback) |callback| {
         const msg_len = std.mem.len(message);
         const msg_slice = message[0..msg_len];
-        const log_level: LogLevel = @enumFromInt(level);
+        const log_level: LogLevel = @fromBackingInt(@intCast(level));
         callback(@intCast(instance_id), log_level, msg_slice);
     }
 }
@@ -159,7 +157,7 @@ pub const DdnsInstance = struct {
         _ = c.DdnsInit();
 
         const provider_str = provider.toString();
-        const c_provider = try allocator.dupeZ(u8, provider_str);
+        const c_provider = try allocator.dupeSentinel(u8, provider_str, 0);
         defer allocator.free(c_provider);
 
         const instance_id = c.DdnsCreateInstance(c_provider.ptr);
@@ -184,12 +182,12 @@ pub const DdnsInstance = struct {
         var c_secret: ?[:0]u8 = null;
 
         if (id) |i| {
-            c_id = try self.allocator.dupeZ(u8, i);
+            c_id = try self.allocator.dupeSentinel(u8, i, 0);
         }
         defer if (c_id) |ci| self.allocator.free(ci);
 
         if (secret) |s| {
-            c_secret = try self.allocator.dupeZ(u8, s);
+            c_secret = try self.allocator.dupeSentinel(u8, s, 0);
         }
         defer if (c_secret) |cs| self.allocator.free(cs);
 
@@ -206,7 +204,7 @@ pub const DdnsInstance = struct {
 
     pub fn setExtParam(self: *DdnsInstance, ext_param: ?[]const u8) !void {
         if (ext_param) |ep| {
-            const c_ext = try self.allocator.dupeZ(u8, ep);
+            const c_ext = try self.allocator.dupeSentinel(u8, ep, 0);
             defer self.allocator.free(c_ext);
             const result = c.DdnsSetExtParam(self.id, c_ext.ptr);
             if (result < 0) {
@@ -221,12 +219,12 @@ pub const DdnsInstance = struct {
     }
 
     pub fn addDomain(self: *DdnsInstance, config: DomainConfig) !void {
-        const c_domain = try self.allocator.dupeZ(u8, config.domain_name);
+        const c_domain = try self.allocator.dupeSentinel(u8, config.domain_name, 0);
         defer self.allocator.free(c_domain);
 
         var c_subdomain: ?[:0]u8 = null;
         if (config.sub_domain) |sub| {
-            c_subdomain = try self.allocator.dupeZ(u8, sub);
+            c_subdomain = try self.allocator.dupeSentinel(u8, sub, 0);
         }
         defer if (c_subdomain) |cs| self.allocator.free(cs);
 
@@ -244,12 +242,12 @@ pub const DdnsInstance = struct {
     }
 
     pub fn removeDomain(self: *DdnsInstance, domain_name: []const u8, sub_domain: ?[]const u8) !void {
-        const c_domain = try self.allocator.dupeZ(u8, domain_name);
+        const c_domain = try self.allocator.dupeSentinel(u8, domain_name, 0);
         defer self.allocator.free(c_domain);
 
         var c_subdomain: ?[:0]u8 = null;
         if (sub_domain) |sub| {
-            c_subdomain = try self.allocator.dupeZ(u8, sub);
+            c_subdomain = try self.allocator.dupeSentinel(u8, sub, 0);
         }
         defer if (c_subdomain) |cs| self.allocator.free(cs);
 
@@ -272,7 +270,7 @@ pub const DdnsInstance = struct {
     }
 
     pub fn setIPv4Address(self: *DdnsInstance, ipv4_addr: []const u8) !void {
-        const c_addr = try self.allocator.dupeZ(u8, ipv4_addr);
+        const c_addr = try self.allocator.dupeSentinel(u8, ipv4_addr, 0);
         defer self.allocator.free(c_addr);
 
         const result = c.DdnsSetIPv4Address(self.id, c_addr.ptr);
@@ -282,7 +280,7 @@ pub const DdnsInstance = struct {
     }
 
     pub fn setIPv4GetType(self: *DdnsInstance, get_type: []const u8) !void {
-        const c_type = try self.allocator.dupeZ(u8, get_type);
+        const c_type = try self.allocator.dupeSentinel(u8, get_type, 0);
         defer self.allocator.free(c_type);
 
         const result = c.DdnsSetIPv4GetType(self.id, c_type.ptr);
@@ -292,7 +290,7 @@ pub const DdnsInstance = struct {
     }
 
     pub fn setIPv6Address(self: *DdnsInstance, ipv6_addr: []const u8) !void {
-        const c_addr = try self.allocator.dupeZ(u8, ipv6_addr);
+        const c_addr = try self.allocator.dupeSentinel(u8, ipv6_addr, 0);
         defer self.allocator.free(c_addr);
 
         const result = c.DdnsSetIPv6Address(self.id, c_addr.ptr);
@@ -302,7 +300,7 @@ pub const DdnsInstance = struct {
     }
 
     pub fn setIPv6GetType(self: *DdnsInstance, get_type: []const u8) !void {
-        const c_type = try self.allocator.dupeZ(u8, get_type);
+        const c_type = try self.allocator.dupeSentinel(u8, get_type, 0);
         defer self.allocator.free(c_type);
 
         const result = c.DdnsSetIPv6GetType(self.id, c_type.ptr);

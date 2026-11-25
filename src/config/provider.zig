@@ -44,7 +44,7 @@ pub const JsonProvider = if (build_options.uci_mode) struct {
 
 test "config provider: loadFrom delegates to source load" {
     const TestSource = struct {
-        fn load(_: @This(), allocator: std.mem.Allocator) !types.Config {
+        pub fn load(_: @This(), allocator: std.mem.Allocator) !types.Config {
             const projects = try allocator.alloc(types.Project, 0);
             errdefer allocator.free(projects);
 

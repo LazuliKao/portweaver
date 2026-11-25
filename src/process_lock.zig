@@ -271,7 +271,7 @@ fn createOrOpenWindowsTakeoverEvent() !windows.HANDLE {
 }
 
 fn signalWindowsTakeoverEvent(takeover_event: windows.HANDLE) !void {
-    const false_bool: windows.BOOL = @enumFromInt(0);
+    const false_bool: windows.BOOL = @fromBackingInt(@intCast(0));
     if (SetEvent(takeover_event) == false_bool) {
         std.log.err("SetEvent failed: {any}", .{windows.GetLastError()});
         return error.SignalTakeoverFailed;
@@ -367,7 +367,7 @@ fn takeOverExistingInstance(allocator: std.mem.Allocator, pid_file_path: []const
         } else |err| switch (err) {
             error.OldProcessStillRunning => {
                 // Lock still held, check if process is alive
-                if (std.c.kill(pid_int, @enumFromInt(0)) == 0) {
+                if (std.c.kill(pid_int, @fromBackingInt(@intCast(0))) == 0) {
                     std.log.warn("Previous PortWeaver instance (PID: {d}) did not exit after SIGTERM; sending SIGKILL...", .{pid_int});
                     const kill_result = std.c.kill(pid_int, std.posix.SIG.KILL);
                     if (kill_result != 0) {

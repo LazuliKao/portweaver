@@ -55,7 +55,7 @@ pub const UdpForwarder = struct {
             .any => c.ADDR_FAMILY_ANY,
         };
 
-        const target_host_z = try self.allocator.dupeZ(u8, target_address);
+        const target_host_z = try self.allocator.dupeSentinel(u8, target_address, 0);
         defer self.allocator.free(target_host_z);
 
         const forwarder = c.udp_forwarder_create_on_runtime(

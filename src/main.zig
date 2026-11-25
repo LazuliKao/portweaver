@@ -27,7 +27,7 @@ fn myLogFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(level) > @intFromEnum(global_log_level)) return;
+    if (@backingInt(level) > @backingInt(global_log_level)) return;
 
     std.debug.print("[" ++ level.asText() ++ "] " ++ format ++ "\n", args);
 

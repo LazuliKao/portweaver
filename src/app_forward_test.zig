@@ -92,11 +92,14 @@ const ThreadSafeFailingAllocator = struct {
 };
 
 fn testListenPort(id: u16, offset: u16) u16 {
-    return 40000 + id * 4 + offset;
+    // Avoid Linux's default ephemeral range (32768+): outgoing test clients
+    // can otherwise occupy a later test's listener port, including TIME_WAIT.
+    return 20000 + id * 4 + offset;
 }
 
 fn testTargetPort(id: u16, offset: u16) u16 {
-    return 50000 + id * 4 + offset;
+    // Stay below Windows' dynamic range (49152+), where Hyper-V reserves UDP ports.
+    return 30000 + id * 4 + offset;
 }
 
 const TcpRunContext = struct {
@@ -1168,7 +1171,7 @@ const BackpressureSender = struct {
     fn send(self: *@This()) !void {
         var buffer: [4096]u8 = undefined;
         var writer = self.stream.writer(compat.io(), &buffer);
-        const chunk = [_]u8{0xa5} ** 65536;
+        const chunk: [65536]u8 = @splat(0xa5);
         for (0..512) |_| try writer.interface.writeAll(&chunk);
         try writer.interface.flush();
         try self.stream.shutdown(compat.io(), .send);

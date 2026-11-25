@@ -11,13 +11,14 @@ fn parseRatholeRecord(comptime T: type, allocator: std.mem.Allocator, value: std
     const parsed = try std.json.parseFromValue(T, allocator, value, .{});
     defer parsed.deinit();
     var result = parsed.value;
-    inline for (std.meta.fields(T)) |field| {
-        if (field.type == []const u8) @field(result, field.name) = "";
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        if (FieldType == []const u8) @field(result, name) = "";
     }
     if (comptime @hasField(T, "source")) @field(result, "source") = .{};
     errdefer result.deinit(allocator);
-    inline for (std.meta.fields(T)) |field| {
-        if (field.type == []const u8) @field(result, field.name) = try types.dupeIfNonEmpty(allocator, @field(parsed.value, field.name));
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        if (FieldType == []const u8) @field(result, name) = try types.dupeIfNonEmpty(allocator, @field(parsed.value, name));
     }
     if (comptime @hasField(T, "source")) {
         @field(result, "source").path = try types.dupeIfNonEmpty(allocator, @field(parsed.value, "source").path);

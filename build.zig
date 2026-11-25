@@ -1,5 +1,19 @@
 const std = @import("std");
-fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
+
+/// Resolve source-owned paths only; generated paths must stay lazy until make.
+fn sourcePath(b: *std.Build, path: std.Build.LazyPath) []const u8 {
+    return switch (path) {
+        .src_path => |src| src.owner.root.joinString(b.allocator, src.sub_path) catch @panic("OOM"),
+        .cwd_relative => |raw| raw,
+        else => @panic("expected a source path"),
+    };
+}
+
+/// External toolchains keep their mutable caches separate from Zig's make cache.
+fn toolCachePath(b: *std.Build, parts: []const []const u8) []const u8 {
+    return b.root.joinString(b.allocator, b.pathJoin(&.{ ".zig-cache", b.pathJoin(parts) })) catch @panic("OOM");
+}
+fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize) void {
     // fix x_cgo_setenv crash
     if (target.result.abi.isMusl()) {
         exe.link_function_sections = true;
@@ -8,32 +22,33 @@ fn applyLinkOptimization(_: *std.Build, target: std.Build.ResolvedTarget, exe: *
     }
     if (target.result.os.tag == .linux) {
         if (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64) {
-            if (optimize == .ReleaseSmall) {
+            if (optimize == .small) {
                 exe.lto = .full;
             }
         }
     }
 
-    if (optimize == .ReleaseSmall) {
-        exe.root_module.unwind_tables = .none;
+    if (optimize == .small) {
+        // Windows' CRT uses SEH directives and requires unwind frames even in small builds.
+        if (target.result.os.tag != .windows) exe.root_module.unwind_tables = .none;
         exe.root_module.strip = true;
     }
 }
-fn applyCOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
-    if (optimize == .ReleaseSmall) {
+fn applyCOptimizationCmd(_: *std.Build, optimize: std.lang.Optimize) []const u8 {
+    if (optimize == .small) {
         return "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer";
     } else {
         return "-O1 -ffunction-sections -fdata-sections";
     }
 }
-fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.builtin.OptimizeMode) []const u8 {
-    if (optimize == .ReleaseSmall) {
+fn applyLinkOptimizationCmd(_: *std.Build, optimize: std.lang.Optimize) []const u8 {
+    if (optimize == .small) {
         return "-Wl,--gc-sections,--strip-all,--strip-debug,--discard-all,--no-eh-frame-hdr";
     } else {
         return "-Wl,--gc-sections";
     }
 }
-fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step.Compile {
     // MIPS targets use -mabicalls by default (required by the N32/N64 ABI),
     // which is incompatible with -fno-PIC that Zig passes to static libs.
     // Force PIC on MIPS so clang doesn't error out.
@@ -57,17 +72,16 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     // targets when compiling C files via the build system (unlike `zig cc`).
     // Manually add them so that <stdio.h> and friends are found.
     if (is_mips) {
-        const zig_lib = b.graph.zig_lib_directory.path orelse @panic("zig_lib_directory path is null");
-        const libc_include = b.pathJoin(&.{ zig_lib, "libc", "include" });
+        const libc_include = b.graph.path(.zig_lib, "libc/include");
         const arch_tag = switch (target.result.cpu.arch) {
             .mips64, .mips64el => "mips64-linux-musl",
             .mips, .mipsel => "mips-linux-musl",
             else => unreachable,
         };
-        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, arch_tag }) });
-        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "generic-musl" }) });
-        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "mips-linux-any" }) });
-        uv.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ libc_include, "any-linux-any" }) });
+        uv.root_module.addSystemIncludePath(libc_include.path(b, arch_tag));
+        uv.root_module.addSystemIncludePath(libc_include.path(b, "generic-musl"));
+        uv.root_module.addSystemIncludePath(libc_include.path(b, "mips-linux-any"));
+        uv.root_module.addSystemIncludePath(libc_include.path(b, "any-linux-any"));
     }
     const libuv_dep = b.dependency("libuv", .{});
 
@@ -217,7 +231,7 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
 /// basename is sufficient (Go finds it via PATH and it's executable).
 fn wrapperBashCmd(b: *std.Build, wrapper: std.Build.LazyPath) []const u8 {
     if (@import("builtin").os.tag == .windows) {
-        const raw = wrapper.getPath(b);
+        const raw = sourcePath(b, wrapper);
         const buf = b.allocator.alloc(u8, raw.len + 5) catch @panic("OOM");
         @memcpy(buf[0..5], "bash ");
         for (raw, 0..) |c, i| {
@@ -225,7 +239,7 @@ fn wrapperBashCmd(b: *std.Build, wrapper: std.Build.LazyPath) []const u8 {
         }
         return buf;
     } else {
-        return std.fs.path.basename(wrapper.getPath(b));
+        return std.fs.path.basename(sourcePath(b, wrapper));
     }
 }
 fn createWrapperScript(
@@ -279,11 +293,11 @@ fn createWrapperScript(
     );
     const io = b.graph.io;
     const file = if (@import("builtin").os.tag == .windows)
-        try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
+        try std.Io.Dir.cwd().createFile(io, sourcePath(b, wrapper_path), .{
             .truncate = true,
         })
     else
-        try std.Io.Dir.cwd().createFile(io, wrapper_path.getPath(b), .{
+        try std.Io.Dir.cwd().createFile(io, sourcePath(b, wrapper_path), .{
             .truncate = true,
             .permissions = .fromMode(0o755),
         });
@@ -411,8 +425,7 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
     if (host_os != .linux and host_os != .windows) {
         return null;
     }
-    const go_root = b.cache_root.join(b.allocator, &.{"portweaver-go"}) catch @panic("OOM");
-    const go_root_path = b.path(go_root).getPath(b);
+    const go_root_path = toolCachePath(b, &.{"portweaver-go"});
 
     if (detectCustomGoBin(b, host_os, go_root_path)) |cached_go_bin| {
         std.debug.print("Using cached patched Go: {s}\n", .{cached_go_bin});
@@ -426,8 +439,7 @@ fn ensureMuslGoToolchain(b: *std.Build) ?[]const u8 {
             std.debug.print("Warning: failed to clean incomplete Go toolchain cache: {}\n", .{err});
         };
         const tarball_ext = if (host_os == .windows) ".zip" else ".tar.gz";
-        const temp_tarball = b.cache_root.join(b.allocator, &.{b.fmt("portweaver-go{s}", .{tarball_ext})}) catch @panic("OOM");
-        const temp_tarball_path = b.path(temp_tarball).getPath(b);
+        const temp_tarball_path = toolCachePath(b, &.{b.fmt("portweaver-go{s}", .{tarball_ext})});
 
         // Determine download URL based on host OS
         const go_url = switch (host_os) {
@@ -496,8 +508,7 @@ fn ensureUpx(b: *std.Build) ?[]const u8 {
         return null;
     }
 
-    const upx_root = b.cache_root.join(b.allocator, &.{"portweaver-upx"}) catch @panic("OOM");
-    const upx_root_path = b.path(upx_root).getPath(b);
+    const upx_root_path = toolCachePath(b, &.{"portweaver-upx"});
 
     // Check for cached binary
     const upx_bin = if (host_os == .windows)
@@ -536,8 +547,7 @@ fn ensureUpx(b: *std.Build) ?[]const u8 {
 
         const is_zip = (host_os == .windows);
         const archive_ext = if (is_zip) ".zip" else ".tar.xz";
-        const temp_archive = b.cache_root.join(b.allocator, &.{b.fmt("portweaver-upx{s}", .{archive_ext})}) catch @panic("OOM");
-        const temp_archive_path = b.path(temp_archive).getPath(b);
+        const temp_archive_path = toolCachePath(b, &.{b.fmt("portweaver-upx{s}", .{archive_ext})});
 
         downloadFileWithFallback(b, host_os, url, temp_archive_path);
 
@@ -601,7 +611,7 @@ fn ensureUpx(b: *std.Build) ?[]const u8 {
 fn addGoLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     output_path: []const u8, // Full output path including directory and filename
     tags: ?[]const u8,
 ) *std.Build.Step {
@@ -675,7 +685,7 @@ fn addGoLibrary(
         go_args.append(b.allocator, b.fmt("-tags={s}", .{t})) catch @panic("OOM");
     }
 
-    if (optimize == .ReleaseSmall) {
+    if (optimize == .small) {
         go_args.appendSlice(b.allocator, &.{
             "-trimpath",
             "-ldflags=-linkmode external -s -w -buildid= -extldflags=-static",
@@ -707,8 +717,7 @@ fn addGoLibrary(
     // Use architecture-specific GOCACHE to avoid conflicts during parallel builds
     // GOCACHE must be an absolute path, use zig's cache root
     const target_triple_for_cache = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
-    const go_cache = b.cache_root.join(b.allocator, &.{ "go", goos, target_triple_for_cache }) catch @panic("OOM");
-    const go_cache_rel = b.path(go_cache).getPath(b);
+    const go_cache_rel = toolCachePath(b, &.{ "go", goos, target_triple_for_cache });
 
     // std.debug.print("Go cache path: {s}\n", .{go_cache_rel});
 
@@ -732,14 +741,12 @@ fn addGoLibrary(
         go_cmd.setEnvironmentVariable("GOROOT", go_root_path);
 
         // Set GOMODCACHE to cache path for isolation
-        const go_modcache = b.cache_root.join(b.allocator, &.{ "go", "modcache" }) catch @panic("OOM");
-        const go_modcache_path = b.path(go_modcache).getPath(b);
+        const go_modcache_path = toolCachePath(b, &.{ "go", "modcache" });
         go_cmd.setEnvironmentVariable("GOMODCACHE", go_modcache_path);
         go_cmd.setEnvironmentVariable("GOFLAGS", "-modcacherw");
 
         // Set GOPATH as well to avoid GOPATH-derived defaults becoming invalid.
-        const go_path = b.cache_root.join(b.allocator, &.{"go"}) catch @panic("OOM");
-        go_cmd.setEnvironmentVariable("GOPATH", b.path(go_path).getPath(b));
+        go_cmd.setEnvironmentVariable("GOPATH", toolCachePath(b, &.{"go"}));
 
         // Prevent empty/invalid GOPROXY inherited from host from breaking module downloads.
         if (b.graph.environ_map.get("GOPROXY")) |goproxy| {
@@ -787,7 +794,11 @@ fn addGoLibrary(
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
     const is_msvc = target.result.os.tag == .windows and target.result.abi == .msvc;
     const wrapper_dir = b.path("wrapper");
-    go_cmd.addPathDir(wrapper_dir.getPath(b));
+    go_cmd.setEnvironmentVariable("PATH", b.fmt("{s}{c}{s}", .{
+        sourcePath(b, wrapper_dir),
+        std.fs.path.delimiter,
+        b.graph.environ_map.get("PATH") orelse "",
+    }));
     const is_win_host = b.graph.host.result.os.tag == .windows;
     if (is_msvc) {
         // MSVC targets: Go CGO adds -mthreads and GOGCCFLAGS which Zig rejects.
@@ -797,7 +808,7 @@ fn addGoLibrary(
         const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
         go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
         go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
-        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
+        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(sourcePath(b, ar_wrapper)));
         // MSVC doesn't support GCC-style -static / -Wl flags
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", applyCOptimizationCmd(b, optimize));
         go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", applyCOptimizationCmd(b, optimize));
@@ -822,7 +833,7 @@ fn addGoLibrary(
         const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
         go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
         go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
-        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(ar_wrapper.getPath(b)));
+        go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(sourcePath(b, ar_wrapper)));
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
         go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
         go_cmd.setEnvironmentVariable("CGO_LDFLAGS", b.fmt("-static {s}", .{applyLinkOptimizationCmd(b, optimize)}));
@@ -892,7 +903,7 @@ fn ratholeRustTarget(target: std.Build.ResolvedTarget) ?[]const u8 {
 fn addRatholeLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) RatholeLibResult {
     const rust_target = ratholeRustTarget(target) orelse {
         return .{
@@ -916,7 +927,7 @@ fn addRatholeLibrary(
             .root = b.path("."),
         };
     };
-    const profile_name = if (optimize == .ReleaseSmall) "minimal" else "debug";
+    const profile_name = if (optimize == .small) "minimal" else "debug";
     const libfilename = if (target.result.os.tag == .windows) "rathole.lib" else "librathole.a";
     const cargo_cmd = b.addSystemCommand(&.{
         "cargo",
@@ -930,13 +941,13 @@ fn addRatholeLibrary(
         "--target",
         rust_target,
     });
-    if (optimize == .ReleaseSmall) cargo_cmd.addArgs(&.{ "--profile", "minimal" });
+    if (optimize == .small) cargo_cmd.addArgs(&.{ "--profile", "minimal" });
     cargo_cmd.addArg("--target-dir");
     // Cargo owns its target directory. Registering it as a Run output causes Zig
     // 0.16 to emit a spurious "failed command" diagnostic after a successful build.
     const cargo_target_dir_path = std.fs.path.resolve(b.allocator, &.{
-        b.build_root.path orelse ".",
-        b.cache_root.path orelse ".",
+        b.root.toString(b.allocator) catch @panic("OOM"),
+        toolCachePath(b, &.{}),
         "rathole-target",
     }) catch @panic("Failed to determine Rathole target directory");
     const cargo_target_dir: std.Build.LazyPath = .{ .cwd_relative = cargo_target_dir_path };
@@ -973,7 +984,7 @@ fn linkRatholeLibrary(
 fn addCombinedGoLib(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     frpc: bool,
     ddns: bool,
     frps: bool,
@@ -1033,7 +1044,7 @@ const LibUringResult = struct {
 fn addLiburing(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) ?LibUringResult {
     const liburing_dep = b.lazyDependency("liburing", .{}) orelse return null;
     const is_mips = switch (target.result.cpu.arch) {
@@ -1088,7 +1099,7 @@ fn addLiburing(
 fn addForwarderBackend(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     backend: ForwardBackend,
     root_module: *std.Build.Module,
     test_hooks: bool,
@@ -1108,26 +1119,26 @@ fn addForwarderBackend(
             root_module.addIncludePath(libuv_dep.path("src"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/runtime.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (optimize == .debug) &.{"-DDEBUG"} else &.{},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/tcp_forwarder.c"),
-                .flags = if (test_hooks and optimize == .Debug)
+                .flags = if (test_hooks and optimize == .debug)
                     &.{ "-DDEBUG", "-DPORTWEAVER_TEST" }
                 else if (test_hooks)
                     &.{"-DPORTWEAVER_TEST"}
-                else if (optimize == .Debug)
+                else if (optimize == .debug)
                     &.{"-DDEBUG"}
                 else
                     &.{},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_libuv/udp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (optimize == .debug) &.{"-DDEBUG"} else &.{},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/file_watcher.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (optimize == .debug) &.{"-DDEBUG"} else &.{},
             });
         },
         .asio => {
@@ -1140,26 +1151,26 @@ fn addForwarderBackend(
             root_module.addIncludePath(asio_dep.path("include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/runtime.cpp"),
-                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+                .flags = if (optimize == .debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/tcp_forwarder.cpp"),
-                .flags = if (test_hooks and optimize == .Debug)
+                .flags = if (test_hooks and optimize == .debug)
                     &.{ "-std=c++17", "-DDEBUG", "-DPORTWEAVER_TEST" }
                 else if (test_hooks)
                     &.{ "-std=c++17", "-DPORTWEAVER_TEST" }
-                else if (optimize == .Debug)
+                else if (optimize == .debug)
                     &.{ "-std=c++17", "-DDEBUG" }
                 else
                     &.{"-std=c++17"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_asio/udp_forwarder.cpp"),
-                .flags = if (optimize == .Debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
+                .flags = if (optimize == .debug) &.{ "-std=c++17", "-DDEBUG" } else &.{"-std=c++17"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/file_watcher.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (optimize == .debug) &.{"-DDEBUG"} else &.{},
             });
             root_module.linkSystemLibrary("c++", .{});
             if (target.result.os.tag == .windows) {
@@ -1180,7 +1191,7 @@ fn addForwarderBackend(
             root_module.addIncludePath(libuv_dep.path("src"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/file_watcher.c"),
-                .flags = if (optimize == .Debug) &.{"-DDEBUG"} else &.{},
+                .flags = if (optimize == .debug) &.{"-DDEBUG"} else &.{},
             });
             const liburing_dep = b.lazyDependency("liburing", .{}) orelse return;
             const uring_res = addLiburing(b, target, optimize) orelse return;
@@ -1190,22 +1201,22 @@ fn addForwarderBackend(
             root_module.addIncludePath(liburing_dep.path("src/include"));
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/runtime.c"),
-                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
+                .flags = if (optimize == .debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/tcp_forwarder.c"),
-                .flags = if (test_hooks and optimize == .Debug)
+                .flags = if (test_hooks and optimize == .debug)
                     &.{ "-DDEBUG", "-D_GNU_SOURCE", "-DPORTWEAVER_TEST" }
                 else if (test_hooks)
                     &.{ "-D_GNU_SOURCE", "-DPORTWEAVER_TEST" }
-                else if (optimize == .Debug)
+                else if (optimize == .debug)
                     &.{ "-DDEBUG", "-D_GNU_SOURCE" }
                 else
                     &.{"-D_GNU_SOURCE"},
             });
             root_module.addCSourceFile(.{
                 .file = b.path("src/impl/app_forward/forwarder/impl_io_uring/udp_forwarder.c"),
-                .flags = if (optimize == .Debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
+                .flags = if (optimize == .debug) &.{ "-DDEBUG", "-D_GNU_SOURCE" } else &.{"-D_GNU_SOURCE"},
             });
         },
     }
@@ -1216,7 +1227,39 @@ fn addForwarderBackend(
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
+fn addCBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, root: *std.Build.Module, go_step: ?*std.Build.Step, rathole: bool) void {
+    const Binding = struct { name: []const u8, header: []const u8 };
+    const bindings = [_]Binding{
+        .{ .name = "c_forwarder", .header = "#include <forwarder.h>\n" },
+        .{ .name = "c_uci", .header = "#include <uci.h>\n" },
+        // Avoid translate-c synthesizing a blob_attr.data method that collides
+        // with its flexible-array accessor. Only inline helpers are renamed.
+        .{ .name = "c_ubus", .header = "#define blob_data portweaver_blob_payload\n#define blobmsg_data portweaver_blobmsg_payload\n#include <posix_missing_fix.h>\n#include <libubox/blobmsg_json.h>\n#include <libubox/uloop.h>\n#include <libubus.h>\n" },
+        .{ .name = "c_nftables", .header = "#include <libnftables.h>\n" },
+        .{ .name = "c_golibs", .header = if (target.result.os.tag == .windows) "#include <golibs.h>\n" else "#include <libgolibs.h>\n" },
+        .{ .name = "c_rathole", .header = "#include <rathole.h>\n" },
+    };
+    for (bindings) |binding| {
+        const is_go = std.mem.eql(u8, binding.name, "c_golibs");
+        if (go_step == null and is_go) continue;
+        if (!rathole and std.mem.eql(u8, binding.name, "c_rathole")) continue;
+        const header = b.addWriteFiles().add(b.fmt("{s}.h", .{binding.name}), binding.header);
+        const translate = b.addTranslateC(.{ .root_source_file = header, .target = target, .optimize = optimize });
+        // Go emits its C header alongside the archive; translation must wait for it.
+        if (is_go) translate.step.dependOn(go_step.?);
+        translate.include_dirs.appendSlice(b.allocator, root.include_dirs.items) catch @panic("OOM");
+        for (root.include_dirs.items) |include| switch (include) {
+            .path, .path_system, .path_after, .framework_path, .framework_path_system, .embed_path => |path| path.addStepDependencies(&translate.step),
+            .config_header_step => |config| translate.step.dependOn(&config.step),
+            .other_step => |compile| translate.step.dependOn(&compile.step),
+        };
+        root.addImport(binding.name, translate.createModule());
+    }
+}
+
 pub fn build(b: *std.Build) void {
+    // Discovery, downloads, and wrapper generation have configure-time side effects.
+    b.graph.poisonCache();
     const options = b.addOptions();
 
     const uci = b.option(bool, "uci", "UCI Mode") orelse false;
@@ -1265,7 +1308,7 @@ pub fn build(b: *std.Build) void {
         // },
     });
     // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
+    // between debug, safe, fast, and small. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
     // It's also possible to define more custom flags to toggle optional features
@@ -1274,6 +1317,10 @@ pub fn build(b: *std.Build) void {
     // in this directory.
     const rathole = if (rathole_client or rathole_server)
         addRatholeLibrary(b, target, optimize)
+    else
+        null;
+    const golibs = if (frpc or ddns or frps)
+        addCombinedGoLib(b, target, optimize, frpc, ddns, frps)
     else
         null;
 
@@ -1297,7 +1344,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    if (optimize == .ReleaseSmall) {
+    if (optimize == .small and target.result.os.tag != .windows) {
         mod.unwind_tables = .none;
     }
     mod.addImport("build_options", options_mod);
@@ -1347,8 +1394,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Build and link combined Go library (FRP, DDNS, and FRPS) when any feature is enabled
-    if (frpc or ddns or frps) {
-        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
+    if (golibs) |libgolibs_build_step| {
 
         // Add combined library header file path
         exe.root_module.addIncludePath(libgolibs_build_step.dir);
@@ -1356,15 +1402,15 @@ pub fn build(b: *std.Build) void {
         // Static link libgolibs.a
         if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) {
             const real_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
-            std.debug.print("Extracting object files from {s}\n", .{real_path.getPath(b)});
+            std.debug.print("Extracting object files from {s}\n", .{sourcePath(b, real_path)});
             const extract_objects = b.addSystemCommand(&.{
                 b.graph.zig_exe,
                 "ar",
                 "x",
-                real_path.getPath(b),
+                sourcePath(b, real_path),
             });
             const extract_objects_dir = libgolibs_build_step.dir.join(b.allocator, "obj") catch @panic("Failed to get path for extracted object files");
-            const extract_objects_dir_real = extract_objects_dir.getPath(b);
+            const extract_objects_dir_real = sourcePath(b, extract_objects_dir);
             std.Io.Dir.cwd().access(b.graph.io, extract_objects_dir_real, .{}) catch {
                 std.Io.Dir.cwd().createDirPath(b.graph.io, extract_objects_dir_real) catch @panic("Failed to create dist directory");
             };
@@ -1416,18 +1462,9 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .macos) {
-        if (b.sysroot) |sysroot| {
-            // Add framework search path if sysroot is specified.
-            // See: https://github.com/ziglang/zig/issues/22704
-            // Framework paths need manual sysroot prefix, unlike library paths.
-            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            exe.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
-            // Only add /usr/lib, build system appends it to sysroot automatically
-            exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-            exe.root_module.linkFramework("CoreFoundation", .{});
-            exe.root_module.linkFramework("Security", .{});
-            exe.root_module.linkFramework("IOKit", .{});
-        }
+        exe.root_module.linkFramework("CoreFoundation", .{});
+        exe.root_module.linkFramework("Security", .{});
+        exe.root_module.linkFramework("IOKit", .{});
     }
     if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
         exe.root_module.linkSystemLibrary("resolv", .{ .search_strategy = .mode_first });
@@ -1445,7 +1482,7 @@ pub fn build(b: *std.Build) void {
         if (ensureUpx(b)) |upx_bin| {
             const install_artifact = b.addInstallArtifact(exe, .{});
             const upx_cmd = b.addSystemCommand(&.{ upx_bin, "--best" });
-            upx_cmd.addArg(b.pathJoin(&.{ b.exe_dir, exe.out_filename }));
+            upx_cmd.addFileArg(b.graph.path(.install_bin, exe.out_filename));
             upx_cmd.step.dependOn(&install_artifact.step);
             b.getInstallStep().dependOn(&upx_cmd.step);
         } else {
@@ -1477,9 +1514,7 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -1505,8 +1540,7 @@ pub fn build(b: *std.Build) void {
     });
     if (test_filter) |filter| mod_tests.filters = b.allocator.dupe([]const u8, &.{filter}) catch @panic("Out of memory");
 
-    if (frpc or ddns or frps) {
-        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
+    if (golibs) |libgolibs_build_step| {
         mod_tests.root_module.addIncludePath(libgolibs_build_step.dir);
         const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
         mod_tests.root_module.addObjectFile(libgolibs_path);
@@ -1536,15 +1570,9 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .macos) {
-        if (b.sysroot) |sysroot| {
-            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            mod_tests.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
-            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-
-            mod_tests.root_module.linkFramework("CoreFoundation", .{});
-            mod_tests.root_module.linkFramework("Security", .{});
-            mod_tests.root_module.linkFramework("IOKit", .{});
-        }
+        mod_tests.root_module.linkFramework("CoreFoundation", .{});
+        mod_tests.root_module.linkFramework("Security", .{});
+        mod_tests.root_module.linkFramework("IOKit", .{});
     }
 
     if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
@@ -1570,8 +1598,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    if (frpc or ddns or frps) {
-        const libgolibs_build_step = addCombinedGoLib(b, target, optimize, frpc, ddns, frps);
+    if (golibs) |libgolibs_build_step| {
         exe_tests.root_module.addIncludePath(libgolibs_build_step.dir);
         const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
         exe_tests.root_module.addObjectFile(libgolibs_path);
@@ -1600,15 +1627,9 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .macos) {
-        if (b.sysroot) |sysroot| {
-            const framework_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            exe_tests.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
-            exe_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-
-            exe_tests.root_module.linkFramework("CoreFoundation", .{});
-            exe_tests.root_module.linkFramework("Security", .{});
-            exe_tests.root_module.linkFramework("IOKit", .{});
-        }
+        exe_tests.root_module.linkFramework("CoreFoundation", .{});
+        exe_tests.root_module.linkFramework("Security", .{});
+        exe_tests.root_module.linkFramework("IOKit", .{});
     }
 
     if (target.result.os.tag == .macos or target.result.os.tag == .linux) {
@@ -1616,6 +1637,10 @@ pub fn build(b: *std.Build) void {
     }
 
     // A run step that will run the second test executable.
+    const go_step = if (golibs) |lib| lib.step else null;
+    addCBindings(b, target, optimize, exe.root_module, go_step, rathole != null);
+    addCBindings(b, target, optimize, mod_tests.root_module, go_step, rathole != null);
+    addCBindings(b, target, optimize, exe_tests.root_module, go_step, rathole != null);
     const run_exe_tests = b.addRunArtifact(exe_tests);
     b.installArtifact(exe_tests);
 

@@ -378,7 +378,7 @@ test "inspectProtocol waits for fragmented RDP and rejects at capacity" {
     try std.testing.expectEqual(Detection.need_more, inspectProtocol(valid[0..6]));
     try std.testing.expectEqual(Protocol.rdp, inspectProtocol(&valid).matched);
 
-    const unknown = [_]u8{0x7f} ** MAX_INSPECTION_BYTES;
+    const unknown: [MAX_INSPECTION_BYTES]u8 = @splat(0x7f);
     try std.testing.expectEqual(Detection.unknown, inspectProtocol(&unknown));
 }
 
@@ -638,10 +638,10 @@ test "extractTlsSni returns null for truncated and non-TLS data" {
     try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&[_]u8{ 0x16, 0x03, 0x01 }));
 
     // Not a Handshake record (ContentType 0x15 = Alert)
-    const alert = [_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02 } ++ [_]u8{0} ** 40;
+    const alert = [_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02 } ++ @as([40]u8, @splat(0));
     try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&alert));
 
     // Handshake but not ClientHello (HandshakeType 0x02 = ServerHello)
-    const server_hello = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x30, 0x02 } ++ [_]u8{0} ** 44;
+    const server_hello = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x30, 0x02 } ++ @as([44]u8, @splat(0));
     try std.testing.expectEqual(@as(?[]const u8, null), extractTlsSni(&server_hello));
 }

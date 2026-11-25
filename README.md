@@ -75,12 +75,14 @@ For a complete configuration example, see [docs/example_config.json](docs/exampl
 
 ## Building
 
+Requires Zig 0.17.0 or newer. Zig 0.17 uses the optimization names `debug`, `safe`, `fast`, and `small`.
+
 ### Standard Build
 
 ```bash
 zig build                              # Default build
-zig build -Doptimize=Debug            # Debug build
-zig build -Doptimize=ReleaseSmall     # Optimized for embedded (LTO, stripped)
+zig build -Doptimize=debug            # Debug build
+zig build -Doptimize=small            # Optimized for embedded (LTO, stripped)
 ```
 
 ### Feature Flags
@@ -100,7 +102,7 @@ All Go-based features (FRPC, FRPS, DDNS) are compiled together into a single `li
 zig build -Duci=true -Dubus=true -Dfrpc=true -Dfrps=true -Dddns=true
 
 # Example: embedded deployment with FRP client
-zig build -Doptimize=ReleaseSmall -Duci=true -Dubus=true -Dfrpc=true
+zig build -Doptimize=small -Duci=true -Dubus=true -Dfrpc=true
 ```
 
 ### Testing and Formatting

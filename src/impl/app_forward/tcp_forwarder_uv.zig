@@ -48,7 +48,7 @@ pub const TcpForwarder = struct {
         max_connections: u32,
         out_error_code: *i32,
     ) !void {
-        const target_z = try self.allocator.dupeZ(u8, target_address);
+        const target_z = try self.allocator.dupeSentinel(u8, target_address, 0);
         defer self.allocator.free(target_z);
 
         const c_family: c.addr_family_t = switch (family) {

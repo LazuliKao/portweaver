@@ -1,10 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const uci = @import("../uci/mod.zig");
 const types = @import("../config/types.zig");
 
 pub const FirewallError = error{
     UciOperationFailed,
     InvalidConfiguration,
+    UnsupportedPlatform,
 };
 
 /// 设置 UCI 选项的辅助函数
@@ -486,6 +488,7 @@ extern "c" fn waitpid(i32, *i32, i32) i32;
 
 /// 重新加载防火墙配置
 pub fn reloadFirewall(allocator: std.mem.Allocator) !void {
+    if (comptime builtin.os.tag != .linux) return FirewallError.UnsupportedPlatform;
     // 使用 fork/execve 避免复杂的 stdio 管理
     const pid = fork();
     if (pid < 0) {

@@ -885,13 +885,14 @@ pub const DdnsConfig = struct {
 fn clone_ddns_fields(comptime T: type, source: T, allocator: std.mem.Allocator) !T {
     var result: T = .{};
     errdefer result.deinit(allocator);
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        @field(result, field.name) = if (field.type == []const u8)
-            try allocator.dupe(u8, @field(source, field.name))
-        else if (@typeInfo(field.type) == .@"struct")
-            try clone_ddns_fields(field.type, @field(source, field.name), allocator)
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        @field(result, name) = if (FieldType == []const u8)
+            try allocator.dupe(u8, @field(source, name))
+        else if (@typeInfo(FieldType) == .@"struct")
+            try clone_ddns_fields(FieldType, @field(source, name), allocator)
         else
-            @field(source, field.name);
+            @field(source, name);
     }
     return result;
 }

@@ -2,12 +2,7 @@ const std = @import("std");
 const compat = @import("../compat.zig");
 const DynamicLibLoader = @import("../loader/dynamic_lib.zig").DynamicLibLoader;
 
-pub const c = @cImport({
-    @cInclude("posix_missing_fix.h");
-    @cInclude("libubox/blobmsg_json.h");
-    @cInclude("libubox/uloop.h");
-    @cInclude("libubus.h");
-});
+pub const c = @import("c_ubus");
 
 const BLOB_ATTR_LEN_MASK: u32 = 0x00ffffff;
 const BLOB_ATTR_EXTENDED: u32 = 0x80000000;

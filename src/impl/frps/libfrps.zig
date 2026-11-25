@@ -1,8 +1,6 @@
 const std = @import("std");
 const compat = @import("../../compat.zig");
-const c = @cImport({
-    @cInclude(if (@import("builtin").os.tag == .windows) "golibs.h" else "libgolibs.h");
-});
+const c = @import("c_golibs");
 
 pub const FrpsError = error{
     InitFailed,
@@ -80,7 +78,7 @@ pub const FrpsServer = struct {
         const toCString = struct {
             fn call(alloc: std.mem.Allocator, str: ?[]const u8) !?[*:0]const u8 {
                 if (str) |s| {
-                    return try alloc.dupeZ(u8, s);
+                    return try alloc.dupeSentinel(u8, s, 0);
                 }
                 return null;
             }
@@ -180,11 +178,11 @@ pub const FrpsServer = struct {
     ) !FrpsServer {
         try ensureFrpsInit();
 
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
-        const c_format = try allocator.dupeZ(u8, format);
+        const c_format = try allocator.dupeSentinel(u8, format, 0);
         defer allocator.free(c_format);
-        const c_name = try allocator.dupeZ(u8, server_name);
+        const c_name = try allocator.dupeSentinel(u8, server_name, 0);
         defer allocator.free(c_name);
 
         const server_id = FrpsCreateServerFromFile(c_path.ptr, c_format.ptr, c_name.ptr);
@@ -201,11 +199,11 @@ pub const FrpsServer = struct {
     ) !FrpsServer {
         try ensureFrpsInit();
 
-        const c_content = try allocator.dupeZ(u8, content);
+        const c_content = try allocator.dupeSentinel(u8, content, 0);
         defer allocator.free(c_content);
-        const c_format = try allocator.dupeZ(u8, format);
+        const c_format = try allocator.dupeSentinel(u8, format, 0);
         defer allocator.free(c_format);
-        const c_name = try allocator.dupeZ(u8, server_name);
+        const c_name = try allocator.dupeSentinel(u8, server_name, 0);
         defer allocator.free(c_name);
 
         const server_id = FrpsCreateServerFromContent(c_content.ptr, c_format.ptr, c_name.ptr);
@@ -254,9 +252,9 @@ pub const FrpsServer = struct {
 
 /// Returns an allocated parser error, or an empty slice when configuration is valid.
 pub fn validateConfig(allocator: std.mem.Allocator, content: []const u8, format: []const u8) ![]const u8 {
-    const c_content = try allocator.dupeZ(u8, content);
+    const c_content = try allocator.dupeSentinel(u8, content, 0);
     defer allocator.free(c_content);
-    const c_format = try allocator.dupeZ(u8, format);
+    const c_format = try allocator.dupeSentinel(u8, format, 0);
     defer allocator.free(c_format);
 
     const c_error = FrpsServer.FrpsValidateConfig(c_content.ptr, c_format.ptr);

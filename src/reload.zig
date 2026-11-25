@@ -39,7 +39,7 @@ fn startWatcher() void {
     const path = config_path orelse return;
     const alloc = allocator orelse return;
 
-    const c_path = alloc.dupeZ(u8, path) catch |err| {
+    const c_path = alloc.dupeSentinel(u8, path, 0) catch |err| {
         std.log.warn("Failed to allocate watcher path: {any}", .{err});
         return;
     };

@@ -55,6 +55,8 @@ alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, desec, cloudflare, hu
 
 ## 编译
 
+需要 Zig 0.17.0 或更新版本。Zig 0.17 的优化模式名称为 `debug`、`safe`、`fast` 和 `small`。
+
 ### 基础构建
 
 ```bash
@@ -62,10 +64,10 @@ alidns, aliesa, tencentcloud, trafficroute, dnspod, dnsla, desec, cloudflare, hu
 zig build
 
 # 调试构建
-zig build -Doptimize=Debug
+zig build -Doptimize=debug
 
-# 针对嵌入式优化（ReleaseSmall）
-zig build -Doptimize=ReleaseSmall
+# 针对嵌入式优化（small）
+zig build -Doptimize=small
 ```
 
 ### 功能标志

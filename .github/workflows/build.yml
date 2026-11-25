@@ -36,7 +36,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - uses: actions/setup-go@v7
         with:
@@ -152,7 +152,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - uses: actions/setup-go@v7
         # if: ${{ !matrix.custom_golang }}
@@ -200,7 +200,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          ZIG_FLAGS="-Doptimize=ReleaseSmall -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true -Dnftables=true -Dwol=true"
+          ZIG_FLAGS="-Doptimize=small -Duci=false -Dubus=false -Dfrpc=true -Dfrps=true -Dddns=true -Dnftables=true -Dwol=true"
           if [ -n "${{ matrix.cpu }}" ]; then
             ZIG_FLAGS="$ZIG_FLAGS -Dcpu=${{ matrix.cpu }}"
           fi

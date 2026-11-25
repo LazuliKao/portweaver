@@ -11,8 +11,8 @@ PortWeaver is a high-performance port forwarding engine for OpenWrt, written in 
 ### Standard Build
 ```bash
 zig build                    # Build with default settings
-zig build -Doptimize=Debug  # Debug build
-zig build -Doptimize=ReleaseSmall  # Optimized for embedded
+zig build -Doptimize=debug  # Debug build (Zig 0.17+)
+zig build -Doptimize=small  # Optimized for embedded
 ```
 
 ### Feature Flags (Conditional Compilation)
@@ -25,7 +25,7 @@ zig build -Duci=true        # Enable UCI config support
 zig build -Dubus=true       # Enable UBUS integration
 
 # Combined example (all Go features compiled into single libgolibs.a):
-zig build -Dfrpc=true -Dddns=true -Dfrps=true -Doptimize=ReleaseSmall
+zig build -Dfrpc=true -Dddns=true -Dfrps=true -Doptimize=small
 
 # test
 zig build test --test-timeout 10s --summary all

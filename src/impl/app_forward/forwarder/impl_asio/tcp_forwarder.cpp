@@ -908,6 +908,19 @@ extern "C" tcp_forwarder_t *tcp_forwarder_create_on_runtime(
             return nullptr;
         }
 
+#if !defined(_WIN32)
+        // Match libuv's Unix listener behavior so reloads can rebind while
+        // connections from the previous listener are still in TIME_WAIT.
+        forwarder->acceptor.set_option(asio::socket_base::reuse_address(true), ec);
+        if (ec)
+        {
+            forwarder->~tcp_forwarder();
+            runtime_free(runtime, forwarder);
+            set_forwarder_error(out_error, map_asio_init_error(ec));
+            return nullptr;
+        }
+#endif
+
         forwarder->acceptor.bind(listen_endpoint, ec);
         if (ec)
         {

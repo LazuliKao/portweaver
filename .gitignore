@@ -6,3 +6,5 @@ zig-out/
 /.sisyphus
 /.antigravitycli
 /zig-pkg
+/.rathole-size-cache-off
+/.rathole-size-cache-on
