@@ -796,36 +796,25 @@ fn addGoLibrary(
     }));
     const is_win_host = b.graph.host.result.os.tag == .windows;
     if (is_win_host) {
-        // Go's external linker invokes "ar" directly rather than consulting AR.
-        const ar_path = b.pathJoin(&.{ sourcePath(b, wrapper_dir), "ar.exe" });
-        const ar_build = b.addSystemCommand(&.{ go_exe, "build", "-o", ar_path });
-        ar_build.addFileArg(b.path("src/impl/golibs/tools/zig-cc-wrapper.go"));
-        ar_build.setEnvironmentVariable("GOOS", "windows");
-        ar_build.setEnvironmentVariable("GOARCH", switch (b.graph.host.result.cpu.arch) {
-            .x86_64 => "amd64",
-            .aarch64 => "arm64",
-            .x86 => "386",
-            else => @panic("Unsupported Windows host architecture"),
+        const wrapper = b.addExecutable(.{
+            .name = "zig-cc-wrapper",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/impl/golibs/tools/zig-cc-wrapper.zig"),
+                .target = b.graph.host,
+                .optimize = .small,
+            }),
         });
-        ar_build.setEnvironmentVariable("CGO_ENABLED", "0");
-        go_cmd.step.dependOn(&ar_build.step);
+        const copies = b.addUpdateSourceFiles();
+        const wrapper_subdir = b.pathJoin(&.{ ".zig-cache", "wrapper", target_triple });
+        copies.addCopyFileToSource(wrapper.getEmittedBin(), b.pathJoin(&.{ wrapper_subdir, "ar.exe" }));
+        if (is_msvc) copies.addCopyFileToSource(wrapper.getEmittedBin(), b.pathJoin(&.{ wrapper_subdir, "zig-cc-wrapper.exe" }));
+        go_cmd.step.dependOn(&copies.step);
         go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG", zig_exe);
     }
     if (is_msvc and is_win_host) {
         // CGO expects a native executable on Windows. Build a small host tool
         // to filter GCC-only flags without depending on a shell installation.
         const wrapper_path = b.pathJoin(&.{ sourcePath(b, wrapper_dir), "zig-cc-wrapper.exe" });
-        const wrapper_build = b.addSystemCommand(&.{ go_exe, "build", "-o", wrapper_path });
-        wrapper_build.addFileArg(b.path("src/impl/golibs/tools/zig-cc-wrapper.go"));
-        wrapper_build.setEnvironmentVariable("GOOS", "windows");
-        wrapper_build.setEnvironmentVariable("GOARCH", switch (b.graph.host.result.cpu.arch) {
-            .x86_64 => "amd64",
-            .aarch64 => "arm64",
-            .x86 => "386",
-            else => @panic("Unsupported Windows host architecture"),
-        });
-        wrapper_build.setEnvironmentVariable("CGO_ENABLED", "0");
-        go_cmd.step.dependOn(&wrapper_build.step);
         go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG", zig_exe);
         go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG_TARGET", target_triple);
         go_cmd.setEnvironmentVariable("CC", b.fmt("\"{s}\" cc", .{wrapper_path}));
@@ -1678,6 +1667,12 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    const wrapper_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/impl/golibs/tools/zig-cc-wrapper.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(wrapper_tests).step);
     // The name filter targets module tests; the executable has no matching tests.
     if (test_filter == null) test_step.dependOn(&run_exe_tests.step);
 
