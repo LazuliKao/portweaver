@@ -652,7 +652,14 @@ fn addGoLibrary(
     } else null;
 
     var go_args = std.ArrayListUnmanaged([]const u8).empty;
-    const go_exe = if (custom_go_path) |path| path else "go";
+    // Resolve Go before scheduling a subprocess: Zig 0.17.1 can panic while
+    // reporting failed make steps, including a missing executable or addFail.
+    const go_name = custom_go_path orelse "go";
+    const go_exe = b.findProgram(.{ .names = &.{go_name} }) orelse
+        std.process.fatal(
+            "Go compiler not found: '{s}'. Install Go and add its bin directory to PATH, or disable -Dfrpc/-Dfrps/-Dddns.",
+            .{go_name},
+        );
     go_args.appendSlice(b.allocator, &.{
         go_exe,
         "build",
@@ -1288,7 +1295,10 @@ fn addCBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
         for (root.include_dirs.items) |include| switch (include) {
             .path, .path_system, .path_after, .framework_path, .framework_path_system, .embed_path => |path| path.addStepDependencies(&translate.step),
             .config_header_step => |config| translate.step.dependOn(&config.step),
-            .other_step => |compile| translate.step.dependOn(&compile.step),
+            .other_step => |compile| {
+                compile.getEmittedIncludeTree().addStepDependencies(&translate.step);
+                translate.step.dependOn(&compile.step);
+            },
         };
         root.addImport(binding.name, translate.createModule());
     }
