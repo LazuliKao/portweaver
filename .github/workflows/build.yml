@@ -117,11 +117,9 @@ jobs:
           - target: aarch64-windows-gnu
             os: windows-latest
             name: portweaver-windows-aarch64-gnu.exe
-            objfix: true
           - target: aarch64-windows-msvc
             os: windows-latest
             name: portweaver-windows-aarch64-msvc.exe
-            objfix: true
 
 
           # macOS
@@ -206,9 +204,6 @@ jobs:
           fi
           if [ "${{ runner.os }}" == "macOS" ]; then
             ZIG_FLAGS="$ZIG_FLAGS --sysroot $SDKROOT"
-          fi
-          if [ "${{ matrix.objfix }}" == "true" ]; then
-            zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }} || true
           fi
           zig build $ZIG_FLAGS -Dtarget=${{ matrix.target }}
 

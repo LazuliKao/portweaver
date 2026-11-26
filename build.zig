@@ -226,21 +226,9 @@ fn addLibuv(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     return uv;
 }
 
-/// Returns the CC value for a wrapper script. On Windows hosts, Go cannot find .sh files
-/// in PATH, so we use "bash <abs-path>" with forward-slash conversion. On Linux, the wrapper
-/// basename is sufficient (Go finds it via PATH and it's executable).
-fn wrapperBashCmd(b: *std.Build, wrapper: std.Build.LazyPath) []const u8 {
-    if (@import("builtin").os.tag == .windows) {
-        const raw = sourcePath(b, wrapper);
-        const buf = b.allocator.alloc(u8, raw.len + 5) catch @panic("OOM");
-        @memcpy(buf[0..5], "bash ");
-        for (raw, 0..) |c, i| {
-            buf[i + 5] = if (c == '\\') '/' else c;
-        }
-        return buf;
-    } else {
-        return std.fs.path.basename(sourcePath(b, wrapper));
-    }
+/// On Unix hosts Go finds the executable wrapper by name in PATH.
+fn wrapperCommand(b: *std.Build, wrapper: std.Build.LazyPath) []const u8 {
+    return std.fs.path.basename(sourcePath(b, wrapper));
 }
 fn createWrapperScript(
     b: *std.Build,
@@ -267,18 +255,16 @@ fn createWrapperScript(
     } else zig_exe;
     const script_content = if (target_triple) |triple| blk: {
         if (is_msvc) {
-            // Filter GCC-only flags from GOGCCFLAGS that Zig rejects for MSVC targets.
+            // Zig's MSVC driver rejects Go's Windows-specific -mthreads flag.
             break :blk b.fmt(
-                "#!/bin/sh\n" ++
+                "#!/usr/bin/env bash\n" ++
                     "zig='{s}'\n" ++
-                    "\"$zig\" {s} -target {s} $(skip=0; for a in \"$@\"; do\n" ++
-                    "  if [ \"$skip\" = 1 ]; then skip=0; continue; fi\n" ++
-                    "  case \"$a\" in -mthreads|-m64|-gno-record-gcc-switches) continue;;\n" ++
-                    "  -Wl) skip=1; continue;;\n" ++
-                    "  -fmessage-length*|-ffile-prefix-map=*|-fmacro-prefix-map=*|-fdebug-prefix-map=*) continue;;\n" ++
-                    "  esac\n" ++
-                    "  printf '%s\\n' \"$a\"\n" ++
-                    "done)\n",
+                    "args=()\n" ++
+                    "for a in \"$@\"; do\n" ++
+                    "  if [ \"$a\" = -mthreads ]; then continue; fi\n" ++
+                    "  args+=(\"$a\")\n" ++
+                    "done\n" ++
+                    "exec \"$zig\" {s} -target {s} \"${{args[@]}}\"\n",
                 .{ zig_fwd, cc_or_cxx, triple },
             );
         } else {
@@ -793,21 +779,62 @@ fn addGoLibrary(
     const target_triple = target.result.linuxTriple(b.allocator) catch @panic("Failed to get target triple");
     go_cmd.setEnvironmentVariable("CGO_ENABLED", "1");
     const is_msvc = target.result.os.tag == .windows and target.result.abi == .msvc;
-    const wrapper_dir = b.path("wrapper");
+    // Different cross-builds must not overwrite one another's compiler wrappers.
+    const wrapper_dir: std.Build.LazyPath = .{ .cwd_relative = toolCachePath(b, &.{ "wrapper", target_triple }) };
+    std.Io.Dir.cwd().createDirPath(b.graph.io, sourcePath(b, wrapper_dir)) catch @panic("Failed to create compiler wrapper directory");
     go_cmd.setEnvironmentVariable("PATH", b.fmt("{s}{c}{s}", .{
         sourcePath(b, wrapper_dir),
         std.fs.path.delimiter,
         b.graph.environ_map.get("PATH") orelse "",
     }));
     const is_win_host = b.graph.host.result.os.tag == .windows;
-    if (is_msvc) {
+    if (is_win_host) {
+        // Go's external linker invokes "ar" directly rather than consulting AR.
+        const ar_path = b.pathJoin(&.{ sourcePath(b, wrapper_dir), "ar.exe" });
+        const ar_build = b.addSystemCommand(&.{ go_exe, "build", "-o", ar_path });
+        ar_build.addFileArg(b.path("src/impl/golibs/tools/zig-cc-wrapper.go"));
+        ar_build.setEnvironmentVariable("GOOS", "windows");
+        ar_build.setEnvironmentVariable("GOARCH", switch (b.graph.host.result.cpu.arch) {
+            .x86_64 => "amd64",
+            .aarch64 => "arm64",
+            .x86 => "386",
+            else => @panic("Unsupported Windows host architecture"),
+        });
+        ar_build.setEnvironmentVariable("CGO_ENABLED", "0");
+        go_cmd.step.dependOn(&ar_build.step);
+        go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG", zig_exe);
+    }
+    if (is_msvc and is_win_host) {
+        // CGO expects a native executable on Windows. Build a small host tool
+        // to filter GCC-only flags without depending on a shell installation.
+        const wrapper_path = b.pathJoin(&.{ sourcePath(b, wrapper_dir), "zig-cc-wrapper.exe" });
+        const wrapper_build = b.addSystemCommand(&.{ go_exe, "build", "-o", wrapper_path });
+        wrapper_build.addFileArg(b.path("src/impl/golibs/tools/zig-cc-wrapper.go"));
+        wrapper_build.setEnvironmentVariable("GOOS", "windows");
+        wrapper_build.setEnvironmentVariable("GOARCH", switch (b.graph.host.result.cpu.arch) {
+            .x86_64 => "amd64",
+            .aarch64 => "arm64",
+            .x86 => "386",
+            else => @panic("Unsupported Windows host architecture"),
+        });
+        wrapper_build.setEnvironmentVariable("CGO_ENABLED", "0");
+        go_cmd.step.dependOn(&wrapper_build.step);
+        go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG", zig_exe);
+        go_cmd.setEnvironmentVariable("PORTWEAVER_ZIG_TARGET", target_triple);
+        go_cmd.setEnvironmentVariable("CC", b.fmt("\"{s}\" cc", .{wrapper_path}));
+        go_cmd.setEnvironmentVariable("CXX", b.fmt("\"{s}\" c++", .{wrapper_path}));
+        go_cmd.setEnvironmentVariable("AR", b.fmt("\"{s}\" ar", .{zig_exe}));
+        go_cmd.setEnvironmentVariable("CGO_CFLAGS", applyCOptimizationCmd(b, optimize));
+        go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", applyCOptimizationCmd(b, optimize));
+        go_cmd.setEnvironmentVariable("CGO_LDFLAGS", "");
+    } else if (is_msvc) {
         // MSVC targets: Go CGO adds -mthreads and GOGCCFLAGS which Zig rejects.
         // Use bash wrapper scripts that filter out GCC-only flags.
         const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false, true) catch @panic("Failed to create CC wrapper");
         const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true, true) catch @panic("Failed to create CXX wrapper");
         const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
-        go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
-        go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
+        go_cmd.setEnvironmentVariable("CC", wrapperCommand(b, cc_wrapper));
+        go_cmd.setEnvironmentVariable("CXX", wrapperCommand(b, cxx_wrapper));
         go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(sourcePath(b, ar_wrapper)));
         // MSVC doesn't support GCC-style -static / -Wl flags
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", applyCOptimizationCmd(b, optimize));
@@ -831,8 +858,8 @@ fn addGoLibrary(
         const cc_wrapper = createWrapperScript(b, wrapper_dir, "cc", zig_exe, target_triple, false, false) catch @panic("Failed to create CC wrapper");
         const cxx_wrapper = createWrapperScript(b, wrapper_dir, "c++", zig_exe, target_triple, true, false) catch @panic("Failed to create CXX wrapper");
         const ar_wrapper = createWrapperScript(b, wrapper_dir, "ar", zig_exe, null, false, false) catch @panic("Failed to create AR wrapper");
-        go_cmd.setEnvironmentVariable("CC", wrapperBashCmd(b, cc_wrapper));
-        go_cmd.setEnvironmentVariable("CXX", wrapperBashCmd(b, cxx_wrapper));
+        go_cmd.setEnvironmentVariable("CC", wrapperCommand(b, cc_wrapper));
+        go_cmd.setEnvironmentVariable("CXX", wrapperCommand(b, cxx_wrapper));
         go_cmd.setEnvironmentVariable("AR", std.fs.path.basename(sourcePath(b, ar_wrapper)));
         go_cmd.setEnvironmentVariable("CGO_CFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
         go_cmd.setEnvironmentVariable("CGO_CXXFLAGS", b.fmt("-static {s}", .{applyCOptimizationCmd(b, optimize)}));
@@ -1025,8 +1052,16 @@ fn addCombinedGoLib(
     // Ensure output directory exists (at build script parse time)
     std.Io.Dir.cwd().createDirPath(b.graph.io, arch_dir) catch {};
 
+    const go_step = addGoLibrary(b, target, optimize, output_path, tags);
+    // Go's Windows ARM64 archive index is not understood by lld-link. Rebuild
+    // it after Go finishes rather than enumerating not-yet-generated objects.
+    const link_step = if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) blk: {
+        const reindex = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "s", sourcePath(b, b.path(b.pathJoin(&.{ arch_dir, filename }))) });
+        reindex.step.dependOn(go_step);
+        break :blk &reindex.step;
+    } else go_step;
     return .{
-        .step = addGoLibrary(b, target, optimize, output_path, tags),
+        .step = link_step,
         .dir = b.path(arch_dir),
         .libname = "golibs",
         .libfilename = filename,
@@ -1227,7 +1262,7 @@ fn addForwarderBackend(
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
-fn addCBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, root: *std.Build.Module, go_step: ?*std.Build.Step, rathole: bool) void {
+fn addCBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, root: *std.Build.Module, go_step: ?*std.Build.Step, rathole: bool, uci: bool, ubus: bool) void {
     const Binding = struct { name: []const u8, header: []const u8 };
     const bindings = [_]Binding{
         .{ .name = "c_forwarder", .header = "#include <forwarder.h>\n" },
@@ -1243,6 +1278,8 @@ fn addCBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
         const is_go = std.mem.eql(u8, binding.name, "c_golibs");
         if (go_step == null and is_go) continue;
         if (!rathole and std.mem.eql(u8, binding.name, "c_rathole")) continue;
+        if (!uci and std.mem.eql(u8, binding.name, "c_uci")) continue;
+        if (!ubus and std.mem.eql(u8, binding.name, "c_ubus")) continue;
         const header = b.addWriteFiles().add(b.fmt("{s}.h", .{binding.name}), binding.header);
         const translate = b.addTranslateC(.{ .root_source_file = header, .target = target, .optimize = optimize });
         // Go emits its C header alongside the archive; translation must wait for it.
@@ -1399,36 +1436,8 @@ pub fn build(b: *std.Build) void {
         // Add combined library header file path
         exe.root_module.addIncludePath(libgolibs_build_step.dir);
 
-        // Static link libgolibs.a
-        if (target.result.os.tag == .windows and target.result.cpu.arch == .aarch64) {
-            const real_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
-            std.debug.print("Extracting object files from {s}\n", .{sourcePath(b, real_path)});
-            const extract_objects = b.addSystemCommand(&.{
-                b.graph.zig_exe,
-                "ar",
-                "x",
-                sourcePath(b, real_path),
-            });
-            const extract_objects_dir = libgolibs_build_step.dir.join(b.allocator, "obj") catch @panic("Failed to get path for extracted object files");
-            const extract_objects_dir_real = sourcePath(b, extract_objects_dir);
-            std.Io.Dir.cwd().access(b.graph.io, extract_objects_dir_real, .{}) catch {
-                std.Io.Dir.cwd().createDirPath(b.graph.io, extract_objects_dir_real) catch @panic("Failed to create dist directory");
-            };
-            extract_objects.setCwd(extract_objects_dir);
-            extract_objects.step.dependOn(libgolibs_build_step.step);
-            exe.step.dependOn(&extract_objects.step);
-            var dir = std.Io.Dir.cwd().openDir(b.graph.io, extract_objects_dir_real, .{ .iterate = true }) catch @panic("Failed to open dist directory");
-            defer dir.close(b.graph.io);
-            var it = dir.iterate();
-            while (it.next(b.graph.io) catch @panic("Failed to iterate over dist directory")) |entry| {
-                exe.root_module.addObjectFile(extract_objects_dir.join(b.allocator, entry.name) catch @panic("Failed to join path for extracted object file"));
-            }
-        } else {
-            const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
-            exe.root_module.addObjectFile(libgolibs_path);
-            // exe.addLibraryPath(libgolibs_build_step.dir);
-            // exe.root_module.linkSystemLibrary(libgolibs_build_step.libname, .{ .preferred_link_mode = .static });
-        }
+        const libgolibs_path = libgolibs_build_step.dir.join(b.allocator, libgolibs_build_step.libfilename) catch @panic("Failed to get path for combined Go library");
+        exe.root_module.addObjectFile(libgolibs_path);
 
         // Ensure libgolibs is built before the executable
         exe.step.dependOn(libgolibs_build_step.step);
@@ -1638,9 +1647,19 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the second test executable.
     const go_step = if (golibs) |lib| lib.step else null;
-    addCBindings(b, target, optimize, exe.root_module, go_step, rathole != null);
-    addCBindings(b, target, optimize, mod_tests.root_module, go_step, rathole != null);
-    addCBindings(b, target, optimize, exe_tests.root_module, go_step, rathole != null);
+    addCBindings(b, target, optimize, exe.root_module, go_step, rathole != null, uci, ubus);
+    // UCI's pure helper tests also run when runtime UCI support is disabled.
+    addCBindings(b, target, optimize, mod_tests.root_module, go_step, rathole != null, true, ubus);
+    addCBindings(b, target, optimize, exe_tests.root_module, go_step, rathole != null, uci, ubus);
+
+    if (target.result.os.tag == .macos) {
+        // Zig prefixes absolute library/framework paths with --sysroot at make
+        // time. Do not embed SDKROOT here or the SDK prefix is applied twice.
+        for ([_]*std.Build.Module{ exe.root_module, mod_tests.root_module, exe_tests.root_module }) |module| {
+            module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            module.addSystemFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
+        }
+    }
     const run_exe_tests = b.addRunArtifact(exe_tests);
     b.installArtifact(exe_tests);
 
