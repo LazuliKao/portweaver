@@ -6,7 +6,10 @@ const compat = @import("../../compat.zig");
 
 const c = forwarder_runtime.c;
 
-var next_runtime_id = std.atomic.Value(u64).init(1);
+// Keep 64-bit IDs on 32-bit targets without requiring 64-bit atomic instructions.
+// This lock protects only ID allocation, not runtime startup or callbacks.
+var runtime_id_lock: std.Io.Mutex = .init;
+var next_runtime_id: u64 = 1;
 
 pub const LoopError = error{
     RuntimeStopped,
@@ -51,8 +54,12 @@ pub const LoopRuntime = struct {
     retiring_project: ?*project_status.ProjectHandle = null,
 
     pub fn init(allocator: std.mem.Allocator) LoopRuntime {
+        runtime_id_lock.lockUncancelable(compat.io());
+        defer runtime_id_lock.unlock(compat.io());
+        const runtime_id = next_runtime_id;
+        next_runtime_id +%= 1;
         return .{
-            .runtime_id = next_runtime_id.fetchAdd(1, .monotonic),
+            .runtime_id = runtime_id,
             .allocator = allocator,
         };
     }
