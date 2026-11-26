@@ -15,11 +15,12 @@ on:
 
 jobs:
   test:
-    name: Test ${{ matrix.backend }} backend (WoL ${{ matrix.wol }})
-    runs-on: ubuntu-latest
+    name: Test ${{ matrix.os }} / ${{ matrix.backend }} (WoL ${{ matrix.wol }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
         backend:
           - libuv
           - asio
@@ -27,6 +28,13 @@ jobs:
         wol:
           - false
           - true
+        exclude:
+          - os: windows-latest
+            backend: io_uring
+          - os: macos-latest
+            backend: io_uring
+          - os: macos-15-intel
+            backend: io_uring
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -46,7 +54,12 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          zig build test -Dforward_backend=${{ matrix.backend }} -Dwol=${{ matrix.wol }} -Duci=true -Dubus=true -Dnftables=true -Dfrpc=true -Dfrps=true -Dddns=true --test-timeout 30s --summary all
+          args=()
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export SDKROOT="$(xcrun --show-sdk-path)"
+            args+=(--sysroot "$SDKROOT")
+          fi
+          zig build test -Dforward_backend=${{ matrix.backend }} -Dwol=${{ matrix.wol }} -Duci=true -Dubus=true -Dnftables=true -Dfrpc=true -Dfrps=true -Dddns=true --test-timeout 30s --summary all "${args[@]}"
 
   build:
     name: Build ${{ matrix.name }}
